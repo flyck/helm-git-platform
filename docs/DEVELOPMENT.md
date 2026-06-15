@@ -32,12 +32,12 @@ If `emacsclient` can't connect, fall back to `emacs --batch -Q` with
 
 ## Debugging via the log buffer
 
-`gp-log.el` writes to `*bitbucket-log*`: every API request (method, path,
+`gp-log.el` writes to `*gp-log*`: every API request (method, path,
 status, timing), errors with response bodies, and key actions. Read the log
 before speculating:
 
 ```sh
-./reload.sh eval '(with-current-buffer "*bitbucket-log*"
+./reload.sh eval '(with-current-buffer "*gp-log*"
   (buffer-substring (max (point-min) (- (point-max) 4000)) (point-max)))'
 ```
 

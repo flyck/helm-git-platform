@@ -17,7 +17,7 @@ The short version:
   shell**; **no hardcoded workspace/host** — everything is a `defcustom` with a
   Bitbucket-Cloud default, credentials resolve customs → env → `auth-source`.
 - **Byte-compile clean** before declaring done.
-- **Read the `*bitbucket-log*` buffer** before guessing at a reported bug.
+- **Read the `*gp-log*` buffer** before guessing at a reported bug.
 
 ## Layout
 

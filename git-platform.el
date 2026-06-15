@@ -109,12 +109,28 @@ ARGLIST may contain &optional; &rest is not supported here."
 (gp-defop commit-build-states (full-name hash)
   "Return the build state strings for commit HASH in FULL-NAME.")
 
+;;;; CI pipelines --------------------------------------------------------------
+(gp-defop pipelines-for-branch (full-name branch &optional max-items commit)
+  "Return CI pipelines in FULL-NAME for BRANCH (filtered to COMMIT if given).")
+(gp-defop pipeline-steps (full-name pipeline-uuid)
+  "Return the steps of PIPELINE-UUID in FULL-NAME, in order.")
+(gp-defop pipeline-stop (full-name pipeline-uuid)
+  "Stop running PIPELINE-UUID in FULL-NAME (pipeline-level).")
+(gp-defop pipeline-trigger (full-name branch &optional selector variables)
+  "Trigger a pipeline in FULL-NAME for BRANCH (pipeline-level).")
+(gp-defop pipeline-run-manual-step (full-name branch pipeline step)
+  "Run a waiting manual STEP of PIPELINE in FULL-NAME on BRANCH.")
+(gp-defop pipeline-step-log (full-name pipeline-uuid step-uuid)
+  "Return the captured log text for STEP-UUID of PIPELINE-UUID.")
+
 ;;;; Field accessors (JSON shape differs per platform) ------------------------
 
 (gp-defop pr-full-name (pr)
   "Return the repository \"owner/slug\" for PR.")
 (gp-defop pr-source-branch (pr)
   "Return PR's source branch name.")
+(gp-defop pr-source-commit (pr)
+  "Return PR's source (head) commit hash, or nil.")
 (gp-defop pr-destination-branch (pr)
   "Return PR's destination (base) branch name.")
 (gp-defop pr-draft-p (pr)
@@ -127,6 +143,32 @@ ARGLIST may contain &optional; &rest is not supported here."
   "Return non-nil if COMMENT is resolved.")
 (gp-defop comment-own-p (comment uuid)
   "Return non-nil if COMMENT was written by UUID.")
+
+;; Pipeline / step shape accessors (kept backend-free for the UI).
+(gp-defop pipeline-state (pipeline)
+  "Return PIPELINE's coarse state string, or nil.")
+(gp-defop pipeline-result (pipeline)
+  "Return PIPELINE's result/stage string, or nil.")
+(gp-defop pipeline-finished-p (pipeline)
+  "Return non-nil if PIPELINE has finished.")
+(gp-defop pipeline-number (pipeline)
+  "Return PIPELINE's build number, or nil.")
+(gp-defop pipeline-commit (pipeline)
+  "Return PIPELINE's target commit hash, or nil.")
+(gp-defop pipeline-step-state (step)
+  "Return STEP's coarse state string.")
+(gp-defop pipeline-step-result (step)
+  "Return STEP's result string, or nil.")
+(gp-defop pipeline-step-running-p (step)
+  "Return non-nil if STEP is currently running.")
+(gp-defop pipeline-step-manual-p (step)
+  "Return non-nil if STEP is a manual (on-demand) step.")
+(gp-defop pipeline-step-runnable-manual-p (step)
+  "Return non-nil if STEP is a manual step waiting to be started.")
+(gp-defop pipelines-sort (pipelines step-counts)
+  "Sort PIPELINES most-steps-first (STEP-COUNTS maps uuid->count).")
+(gp-defop pipelines-match-commit (pipelines commit)
+  "Return the PIPELINES whose target commit matches COMMIT.")
 
 ;;;; Platform-agnostic helpers ------------------------------------------------
 

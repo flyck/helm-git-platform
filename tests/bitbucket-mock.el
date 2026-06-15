@@ -81,6 +81,18 @@ Dispatches on PATH to a fixture.  Records the call and honours
      (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
     ((string-suffix-p "/user" path)
      (bitbucket-mock--fixture "user.json"))
+    ;; pipelines: steps, stop, trigger, list (most specific first)
+    ((string-match-p "/pipelines/[^/]+/steps" path)
+     (bitbucket-mock--fixture "pipeline-steps.json"))
+    ((string-match-p "/pipelines/[^/]+/stopPipeline\\'" path)
+     '((status . "stopped")))
+    ((and (equal method "POST") (string-match-p "/pipelines/?\\'" path))
+     ;; trigger -> echo a freshly-created pipeline
+     (append '((uuid . "{pipeline-new}") (build_number . 99)
+               (state (name . "PENDING")))
+             data))
+    ((string-match-p "/pipelines/?\\'" path)
+     (bitbucket-mock--fixture "pipelines.json"))
     (t (error "bitbucket-mock: no route for %s %s" method path)))))
 
 (defun bitbucket-mock-diff (_full-name _id)

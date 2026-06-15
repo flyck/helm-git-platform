@@ -1,4 +1,4 @@
-;;; gp-helm.el --- Helm front-end for Bitbucket PRs -*- lexical-binding: t; -*-
+;;; gp-helm.el --- Helm front-end for pull requests -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -80,8 +80,8 @@ rows still overflow on the right."
 The title takes the window width minus the fixed columns (bubble,
 avatar, id, repo, author, separators) and `gp-helm-title-reserve'
 for the trailing badges, never below `gp-helm-title-min-width'."
-  (let ((win (and (window-live-p (get-buffer-window (get-buffer "*helm bitbucket*")))
-                  (window-body-width (get-buffer-window (get-buffer "*helm bitbucket*"))))))
+  (let ((win (and (window-live-p (get-buffer-window (get-buffer "*helm git-platform*")))
+                  (window-body-width (get-buffer-window (get-buffer "*helm git-platform*"))))))
     (if (not win)
         gp-helm-title-width
       ;; bubble 3 + avatar 3 + id 6 + repo + author 16 + separators 8
@@ -255,7 +255,7 @@ the file, then overlays its inline comments."
                         (lambda (_p) (gp-helm))))
             :keymap (gp-helm--drilldown-keymap
                      (lambda () (gp-helm-files pr))))
-          :buffer "*helm bitbucket files*")))
+          :buffer "*helm git-platform files*")))
 
 (defun gp-helm--visit-file (pr path)
   "Open PATH from PR's local checkout (cloning/checkout if needed)."
@@ -278,7 +278,7 @@ overlays); a general comment opens the detail buffer."
                       (alist-get 'id pr))
             :candidates cands
             :action
-            (list (cons "Open comment on Bitbucket (focused)"
+            (list (cons "Open comment in browser (focused)"
                         (lambda (c) (gp-helm--browse-comment pr c)))
                   (cons "Reply to comment              (C-c r)"
                         (lambda (c) (gp-helm--reply-comment pr c)))
@@ -289,7 +289,7 @@ overlays); a general comment opens the detail buffer."
                   (cons "← Back to PR list             (C-c C-b)"
                         (lambda (_c) (gp-helm))))
             :keymap (gp-helm--comments-keymap pr))
-          :buffer "*helm bitbucket comments*")))
+          :buffer "*helm git-platform comments*")))
 
 (defun gp-helm--comment-url (pr comment)
   "Return the web URL focusing COMMENT on PR, with a fallback anchor."
@@ -510,7 +510,7 @@ By default only OPEN PRs are shown; with a prefix argument, or
           (append (plist-get cat :mine) (plist-get cat :drafts)))))
       (helm :sources sources
             :truncate-lines t
-            :buffer "*helm bitbucket*"
+            :buffer "*helm git-platform*"
             :full-frame gp-helm-full-frame))))
 
 (defun gp-helm--scan-pipelines-async (prs)
@@ -621,7 +621,7 @@ for those)."
                         " (…)"))))
           :truncate-lines t
           :full-frame gp-helm-full-frame
-          :buffer "*helm bitbucket open*")))
+          :buffer "*helm git-platform open*")))
 
 ;;;###autoload
 (defun gp-helm-repo (full-name)
@@ -645,7 +645,7 @@ rather than full-frame -- handy from the per-repo mode-line count."
             :nomark t
             :keymap (gp-helm--list-keymap nil))
           :truncate-lines t
-          :buffer "*helm bitbucket repo*")))
+          :buffer "*helm git-platform repo*")))
 
 (provide 'gp-helm)
 ;;; gp-helm.el ends here

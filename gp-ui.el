@@ -1,4 +1,4 @@
-;;; gp-ui.el --- magit-section UI for Bitbucket PRs -*- lexical-binding: t; -*-
+;;; gp-ui.el --- magit-section UI for pull requests -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -20,6 +20,7 @@
 (require 'git-platform)
 (require 'gp-local)
 (require 'gp-log)
+(require 'gp-pipeline)
 
 (declare-function gp-helm "gp-helm")
 (declare-function gp-compose "gp-compose")
@@ -107,6 +108,10 @@
   "Plist of (:commits :files :added :removed) for the detail buffer, or nil.")
 (defvar-local gp--detail-diff nil
   "Alist of (PATH . DIFF-CHUNK) for the detail buffer, or nil.")
+(defvar-local gp--detail-pipelines nil
+  "Pipeline data plist (:current :recent) for the detail buffer, or nil.")
+(defvar-local gp--detail-comments nil
+  "Cached comment list for the detail buffer (so it can redraw without refetch).")
 
 ;;;; Formatting helpers ------------------------------------------------------
 
@@ -272,7 +277,7 @@ reply threads."
             (insert "\n"))
           (when-let* ((url (let-alist comment .links.html.href)))
             (insert ind "  ")
-            (gp--insert-link url "↗ view on Bitbucket")
+            (gp--insert-link url "↗ view in browser")
             (insert "\n"))
           (let ((body (string-trim-right
                        (gp--render-markdown (or .content.raw "")))))
@@ -451,7 +456,7 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
        "🔍 Show diff in Magit [d]" "Checkout the branch and show its diff in Magit"
        (lambda () (gp-ui-show-diff-in-magit pr)))
       (insert "   ")
-      (gp--insert-link .links.html.href "🔗 View on Bitbucket [w]")
+      (gp--insert-link .links.html.href "🔗 View in browser [w]")
       ;; draft toggle, only on the user's own open PRs
       (when (and (gp-pr-authored-by-p pr (gp-user-uuid))
                  (member .state '("OPEN" nil)))
@@ -465,6 +470,7 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
            (lambda () (gp-ui-set-draft pr t)))))
       (insert "\n\n"))
     (gp--insert-changed-files)
+    (gp--insert-pipelines gp--detail-pipelines)
     (magit-insert-section (gp-comments)
       (magit-insert-heading
         (format "Comments (%d)" (length comments)))
@@ -484,8 +490,8 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "w"   #'gp-browse-pr
   "?"   #'gp-dispatch)
 
-(define-derived-mode gp-list-mode magit-section-mode "Bitbucket-PRs"
-  "Major mode for the Bitbucket pull-request list.")
+(define-derived-mode gp-list-mode magit-section-mode "PRs"
+  "Major mode for the pull-request list.")
 
 (defvar-keymap gp-detail-mode-map
   :parent magit-section-mode-map
@@ -499,7 +505,12 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "d"   #'gp-detail-show-diff
   "D"   #'gp-detail-toggle-draft
   "RET" #'gp-detail-ret
-  "w"   #'gp-browse-pr)
+  "w"   #'gp-browse-pr
+  ;; pipelines (pipeline-level stop/trigger; per-step log + manual run)
+  "s"   #'gp-detail-pipeline-stop
+  "T"   #'gp-detail-pipeline-trigger
+  "m"   #'gp-detail-pipeline-run-manual
+  "l"   #'gp-detail-pipeline-step-log)
 
 (defun gp-detail-show-diff ()
   "Show the current PR's branch diff in Magit."
@@ -545,7 +556,7 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
       (gp-detail-goto-comment))
      (t (call-interactively #'magit-section-toggle)))))
 
-(define-derived-mode gp-detail-mode magit-section-mode "Bitbucket-PR"
+(define-derived-mode gp-detail-mode magit-section-mode "PR"
   "Major mode for a single Bitbucket pull request."
   ;; We apply all faces ourselves (links, markdown, etc.).  Any font-lock
   ;; activation clears those manual `face' text properties on redisplay, and
@@ -713,7 +724,7 @@ server's diff regardless of local base staleness."
   (magit-diff-range (format "%s/%s...HEAD" gp-checkout-remote dest)))
 
 (defun gp-ui-back-to-list ()
-  "Return to the Bitbucket PR overview (Helm if available, else the list)."
+  "Return to the PR overview (Helm if available, else the list)."
   (interactive)
   (if (fboundp 'gp-helm)
       (gp-helm)
@@ -721,15 +732,33 @@ server's diff regardless of local base staleness."
 
 ;;;; Commands ----------------------------------------------------------------
 
-(defconst gp-list-buffer-name "*Bitbucket PRs*")
+(defconst gp-list-buffer-name "*PRs*")
+
+(defcustom gp-detail-buffer-title-width 40
+  "Max characters of the PR title shown in the detail buffer name."
+  :type 'integer :group 'bitbucket)
 
 (defun gp--detail-buffer-name (pr)
-  "Return the detail buffer name for PR."
-  (format "*Bitbucket PR #%s*" (alist-get 'id pr)))
+  "Return the detail buffer name for PR.
+Includes the title and repo so buffers are easy to tell apart, e.g.
+`*PR #239 add widget toggle (web-frontend)*'."
+  (let* ((id (alist-get 'id pr))
+         (title (or (alist-get 'title pr) ""))
+         (full-name (or (ignore-errors (gp-pr-full-name pr)) ""))
+         (repo (if (string-match "/\\([^/]+\\)\\'" full-name)
+                   (match-string 1 full-name)
+                 full-name))
+         (title (if (> (length title) gp-detail-buffer-title-width)
+                    (concat (substring title 0 (1- gp-detail-buffer-title-width)) "…")
+                  title)))
+    (format "*PR #%s%s%s*"
+            id
+            (if (string-empty-p title) "" (concat " " title))
+            (if (string-empty-p repo) "" (format " (%s)" repo)))))
 
 ;;;###autoload
 (defun gp-list ()
-  "Open (or refresh) the Bitbucket pull-request list."
+  "Open (or refresh) the pull-request list."
   (interactive)
   (let ((buf (get-buffer-create gp-list-buffer-name)))
     (with-current-buffer buf
@@ -758,11 +787,17 @@ server's diff regardless of local base staleness."
 Costs two extra API calls (diffstat + commits) per PR."
   :type 'boolean :group 'bitbucket)
 
-(defun gp--render-detail-into (buf pr comments stats &optional diff)
-  "Render PR/COMMENTS/STATS (and per-file DIFF) into BUF (the detail buffer)."
+(defcustom gp-detail-show-pipelines t
+  "When non-nil, fetch and show the PR branch's CI pipelines in the detail buffer.
+Costs one API call to list pipelines plus one per pipeline for its
+steps; set to nil to skip it."
+  :type 'boolean :group 'bitbucket)
+
+(defun gp--render-detail-into (buf pr comments stats &optional diff pipelines)
+  "Render PR/COMMENTS/STATS (and per-file DIFF, PIPELINES) into BUF."
   (with-current-buffer buf
-    (setq gp--pr pr gp--detail-stats stats
-          gp--detail-diff diff)
+    (setq gp--pr pr gp--detail-stats stats gp--detail-comments comments
+          gp--detail-diff diff gp--detail-pipelines pipelines)
     (let ((inhibit-read-only t)
           (pos (point)))
       (erase-buffer)
@@ -771,6 +806,16 @@ Costs two extra API calls (diffstat + commits) per PR."
       ;; resolved comments on refresh -- force them collapsed again
       (gp--collapse-resolved-sections)
       (goto-char (min pos (point-max))))))
+
+(defun gp--detail-rerender (buf)
+  "Redraw BUF's detail view from its cached buffer-locals (no refetch).
+Used to fold in pipeline data that arrives after the first render."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when gp--pr
+        (gp--render-detail-into buf gp--pr gp--detail-comments
+                                gp--detail-stats gp--detail-diff
+                                gp--detail-pipelines)))))
 
 (defun gp--collapse-resolved-sections ()
   "Hide every resolved-comment section in the current detail buffer."
@@ -845,8 +890,15 @@ stays visible during a refresh -- so it never freezes or blanks."
                             (ignore-errors
                               (gp-split-diff-by-file
                                (gp-pull-request-diff full-name id))))))
-               (gp--render-detail-into buf pr comments stats diff)
-               (with-current-buffer buf (gp--detail-clear-loading)))
+               ;; render the main content first; pipelines (N+1 calls) are
+               ;; fetched in a SEPARATE deferred step so they never delay or
+               ;; block the comments/diff view.
+               (gp--render-detail-into buf pr comments stats diff
+                                       (with-current-buffer buf
+                                         gp--detail-pipelines))
+               (with-current-buffer buf (gp--detail-clear-loading))
+               (when gp-detail-show-pipelines
+                 (gp--detail-load-pipelines buf pr)))
            (error
             (with-current-buffer buf
               (gp--detail-clear-loading)
@@ -858,6 +910,23 @@ stays visible during a refresh -- so it never freezes or blanks."
             (gp-log-error "detail load failed: %s"
                                  (error-message-string e)))))))
     buf))
+
+(defun gp--detail-load-pipelines (buf pr)
+  "Fetch PR's pipelines on a separate idle timer and fold them into BUF.
+Kept separate from the main load so the N+1 pipeline calls never
+block or delay the comments/diff view."
+  (run-with-idle-timer
+   0.1 nil
+   (lambda ()
+     (when (buffer-live-p buf)
+       (condition-case e
+           (let ((data (gp-pipeline-fetch-for-pr pr)))
+             (with-current-buffer buf
+               (setq gp--detail-pipelines data))
+             (gp--detail-rerender buf))
+         (error
+          (gp-log-error "pipeline load failed: %s"
+                        (error-message-string e))))))))
 
 (defun gp-detail-refresh ()
   "Re-fetch and redraw the current detail buffer (non-blocking)."

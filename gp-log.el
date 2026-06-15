@@ -1,4 +1,4 @@
-;;; gp-log.el --- Diagnostic log buffer for bitbucket.el -*- lexical-binding: t; -*-
+;;; gp-log.el --- Diagnostic log buffer for helm-git-platform -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 

@@ -52,6 +52,7 @@
 (require 'gp-local)
 (require 'gp-checkout)
 (require 'gp-compose)
+(require 'gp-pipeline)
 (require 'gp-overlay)
 (require 'gp-watch)
 (require 'gp-ui)

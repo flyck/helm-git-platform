@@ -744,5 +744,201 @@ PRs to :mine; everything else (PRs the user reviews) to
           :mine (nreverse mine)
           :drafts (nreverse drafts))))
 
+;;;; Pipelines -----------------------------------------------------------------
+
+;; Bitbucket Pipelines API.  Platform constraints baked in here:
+;;   * stop and trigger are PIPELINE-level only -- there is no per-step
+;;     stop/trigger endpoint.  A waiting *manual* step is advanced by
+;;     re-triggering its pipeline with a custom selector (see
+;;     `bitbucket-pipeline-run-manual-step').
+;;   * the step-log endpoint returns the captured log as text/plain; there is
+;;     no streaming endpoint, so "live" logs are polled (see gp-pipeline-log).
+;;   * stop/trigger go through `bitbucket-api-request', which SIGNALS on non-2xx
+;;     (e.g. 403 when the token lacks Pipelines:Write) -- callers report it.
+
+(defun bitbucket-pipeline-commit (pipeline)
+  "Return PIPELINE's target commit hash, or nil."
+  (let-alist pipeline .target.commit.hash))
+
+(defun bitbucket-pipelines-match-commit (pipelines commit)
+  "Return the PIPELINES whose target commit matches COMMIT.
+Matches by hash prefix in either direction, since the API may
+return short or full hashes.  With COMMIT nil, returns PIPELINES
+unchanged."
+  (if (not commit)
+      pipelines
+    (cl-remove-if-not
+     (lambda (p)
+       (let ((h (bitbucket-pipeline-commit p)))
+         (and h (or (string-prefix-p h commit)
+                    (string-prefix-p commit h)))))
+     pipelines)))
+
+(defun bitbucket-pipelines-for-branch (full-name branch &optional max-items commit)
+  "Return pipelines in FULL-NAME for BRANCH, newest first.
+When COMMIT is non-nil, only pipelines whose target commit matches
+it are returned -- a PR's relevant pipelines are the ones for its
+current head commit, not every run on the branch.  Caps the
+*fetched* set at MAX-ITEMS (default 20) before the commit filter."
+  (when (and full-name branch)
+    (bitbucket-pipelines-match-commit
+     (bitbucket-api-paged
+      (format "/repositories/%s/pipelines" full-name)
+      `(("sort" . "-created_on")
+        ("target.ref_name" . ,branch))
+      (or max-items 20))
+     commit)))
+
+(defun bitbucket-pipeline-steps (full-name pipeline-uuid)
+  "Return the steps of PIPELINE-UUID in FULL-NAME, in execution order."
+  (when (and full-name pipeline-uuid)
+    (bitbucket-api-paged
+     (format "/repositories/%s/pipelines/%s/steps" full-name pipeline-uuid))))
+
+(defun bitbucket-pipeline-stop (full-name pipeline-uuid)
+  "Signal a stop of PIPELINE-UUID in FULL-NAME (all incomplete steps).
+Requires a token with Pipelines:Write.  Signals on HTTP error."
+  (bitbucket-api-request
+   "POST"
+   (format "/repositories/%s/pipelines/%s/stopPipeline"
+           full-name pipeline-uuid)))
+
+(defun bitbucket-pipeline-trigger (full-name branch &optional selector variables)
+  "Trigger a pipeline in FULL-NAME for BRANCH.
+With no SELECTOR, runs the branch's default pipeline.  SELECTOR is a
+cons (TYPE . PATTERN), e.g. (\"custom\" . \"my-pipeline\"), to run a
+named pipeline.  VARIABLES is an alist of (KEY . VALUE) build
+variables.  Returns the created pipeline object.  Requires a token
+with Pipelines:Write."
+  (let* ((target `((type . "pipeline_ref_target")
+                   (ref_type . "branch")
+                   (ref_name . ,branch)))
+         (target (if selector
+                     (append target
+                             `((selector . ((type . ,(car selector))
+                                            (pattern . ,(cdr selector))))))
+                   target))
+         (data `((target . ,target))))
+    (when variables
+      (push `(variables . ,(mapcar (lambda (kv)
+                                     `((key . ,(car kv)) (value . ,(cdr kv))))
+                                   variables))
+            data))
+    (bitbucket-api-request
+     "POST" (format "/repositories/%s/pipelines" full-name) nil data)))
+
+(defun bitbucket-pipeline-run-manual-step (full-name branch pipeline step)
+  "Run a waiting manual STEP of PIPELINE in FULL-NAME on BRANCH.
+Bitbucket has no \"run this step\" endpoint; a manual step is started
+by re-triggering its pipeline with the custom selector naming the
+pipeline pattern.  Errors unless STEP is a manual step."
+  (unless (bitbucket-pipeline-step-manual-p step)
+    (user-error "Step %S is not a manual step"
+                (or (alist-get 'name step) "?")))
+  (let* ((pattern (let-alist pipeline .target.selector.pattern))
+         (selector (when pattern (cons "custom" pattern))))
+    (bitbucket-pipeline-trigger full-name branch selector)))
+
+(defun bitbucket-pipeline-step-log (full-name pipeline-uuid step-uuid)
+  "Return the captured log text for STEP-UUID of PIPELINE-UUID in FULL-NAME.
+Returns an empty string when the step has produced no log yet.  The
+endpoint returns text/plain, so this reads the raw body (like the
+diff endpoint) rather than parsing JSON."
+  (when (and full-name pipeline-uuid step-uuid)
+    (let* ((url (bitbucket--build-url
+                 (format "/repositories/%s/pipelines/%s/steps/%s/log"
+                         full-name pipeline-uuid step-uuid)
+                 nil))
+           (url-request-method "GET")
+           (url-request-extra-headers
+            `(("Authorization" . ,(bitbucket--auth-header))))
+           (buf (url-retrieve-synchronously url t t bitbucket-request-timeout)))
+      (if (not buf)
+          ""
+        (unwind-protect
+            (with-current-buffer buf
+              (goto-char (point-min))
+              (if (save-excursion
+                    (re-search-forward "^HTTP/[0-9.]+ 404"
+                                       (line-end-position) t))
+                  ""                    ;; no log produced yet
+                (re-search-forward "\n\n" nil t)
+                (decode-coding-string
+                 (buffer-substring-no-properties (point) (point-max)) 'utf-8)))
+          (kill-buffer buf))))))
+
+;;;; Pipeline pure helpers (shape-aware, no network) ---------------------------
+
+(defun bitbucket-pipeline-state (pipeline)
+  "Return PIPELINE's coarse state string (PENDING/IN_PROGRESS/COMPLETED) or nil."
+  (let-alist pipeline .state.name))
+
+(defun bitbucket-pipeline-result (pipeline)
+  "Return PIPELINE's result/stage string (SUCCESSFUL/FAILED/STOPPED/…) or nil.
+A finished pipeline carries a `result'; a running one may carry a `stage'."
+  (let-alist pipeline (or .state.result.name .state.stage.name)))
+
+(defun bitbucket-pipeline-finished-p (pipeline)
+  "Non-nil when PIPELINE has finished (state COMPLETED)."
+  (equal (bitbucket-pipeline-state pipeline) "COMPLETED"))
+
+(defun bitbucket-pipeline-number (pipeline)
+  "Return PIPELINE's build number, or nil."
+  (alist-get 'build_number pipeline))
+
+(defun bitbucket-pipeline-step-state (step)
+  "Return STEP's coarse state string (PENDING/IN_PROGRESS/COMPLETED/…)."
+  (let-alist step .state.name))
+
+(defun bitbucket-pipeline-step-result (step)
+  "Return STEP's result string (SUCCESSFUL/FAILED/STOPPED/…) or nil."
+  (let-alist step .state.result.name))
+
+(defun bitbucket-pipeline-step-running-p (step)
+  "Non-nil when STEP is currently running (state IN_PROGRESS)."
+  (equal (bitbucket-pipeline-step-state step) "IN_PROGRESS"))
+
+(defun bitbucket-pipeline-step-manual-p (step)
+  "Non-nil when STEP is a manual step (gated, started on demand).
+The real API marks these with a `trigger' type of
+\"pipeline_step_trigger_manual\"; older/other shapes use plain
+\"manual\".  Match any trigger type CONTAINING \"manual\"."
+  (let* ((trigger (alist-get 'trigger step))
+         (type (and trigger (alist-get 'type trigger))))
+    (and type (string-match-p "manual" (downcase (format "%s" type))))))
+
+(defun bitbucket-pipeline-step-pending-p (step)
+  "Non-nil when STEP is waiting to run (state PENDING / paused / ready).
+A manual step you can start now is both manual and pending."
+  (member (bitbucket-pipeline-step-state step)
+          '("PENDING" "READY" "NOT_RUN" "PAUSED")))
+
+(defun bitbucket-pipeline-step-runnable-manual-p (step)
+  "Non-nil when STEP is a manual step that is waiting and can be started now."
+  (and (bitbucket-pipeline-step-manual-p step)
+       (bitbucket-pipeline-step-pending-p step)))
+
+(defun bitbucket-pipelines-sort (pipelines step-counts)
+  "Return PIPELINES sorted by step count descending, then newest first.
+STEP-COUNTS maps a pipeline's uuid to its number of steps (a hash
+table or alist keyed by the `uuid' string).  Pipelines with an
+unknown count sort as zero."
+  (let ((count-of
+         (lambda (p)
+           (let ((uuid (alist-get 'uuid p)))
+             (or (if (hash-table-p step-counts)
+                     (gethash uuid step-counts)
+                   (cdr (assoc uuid step-counts)))
+                 0)))))
+    (sort (copy-sequence pipelines)
+          (lambda (a b)
+            (let ((ca (funcall count-of a))
+                  (cb (funcall count-of b)))
+              (if (= ca cb)
+                  ;; tie: newer created_on first (ISO-8601 strings compare)
+                  (string> (or (alist-get 'created_on a) "")
+                           (or (alist-get 'created_on b) ""))
+                (> ca cb)))))))
+
 (provide 'bitbucket-api)
 ;;; bitbucket-api.el ends here
