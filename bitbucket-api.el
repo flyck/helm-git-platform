@@ -760,6 +760,28 @@ PRs to :mine; everything else (PRs the user reviews) to
   "Return PIPELINE's target commit hash, or nil."
   (let-alist pipeline .target.commit.hash))
 
+(defun bitbucket-commit-message (full-name hash)
+  "Return the commit message for HASH in FULL-NAME, or nil.
+Cached, since commit messages are immutable.  The pipelines list
+carries only the commit hash, so this is a separate lookup (needs
+Repositories:Read)."
+  (when (and full-name hash)
+    (bitbucket-with-cache
+     (list 'commit-msg full-name hash)
+     (lambda ()
+       (ignore-errors
+         (alist-get 'message
+                    (bitbucket-api-request
+                     "GET"
+                     (format "/repositories/%s/commit/%s" full-name hash)
+                     '(("fields" . "message")))))))))
+
+(defun bitbucket-commit-summary (message)
+  "Return the first non-empty line of commit MESSAGE, trimmed, or \"\"."
+  (if (not message)
+      ""
+    (string-trim (car (split-string message "\n" t)))))
+
 (defun bitbucket-pipelines-match-commit (pipelines commit)
   "Return the PIPELINES whose target commit matches COMMIT.
 Matches by hash prefix in either direction, since the API may

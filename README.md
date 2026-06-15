@@ -75,9 +75,20 @@ export BITBUCKET_API_TOKEN="…"   # https://id.atlassian.com/manage-profile/sec
 
 They can also be set via the `bitbucket-workspace` / `bitbucket-user-email` /
 `bitbucket-api-token` customs, and the token falls back to `auth-source`.
-Grant the token **Account: Read**, **Repositories: Read** and **Pull requests:
-Read**; add **Pull requests: Write** only if you want to post/resolve comments
-from Emacs (everything else works read-only).
+
+Grant the token these scopes:
+
+| Scope | Needed for |
+|---|---|
+| **Account: Read** | resolve your own identity (split mine vs needs-my-review) |
+| **Repositories: Read** | list repos, read diffs and commit messages |
+| **Pull requests: Read** | list PRs and read details/comments |
+| **Pipelines: Read** | show the PR's CI pipelines and step logs |
+| **Pull requests: Write** | *(optional)* post / reply / resolve comments from Emacs |
+| **Pipelines: Write** | *(optional)* stop / trigger / run-manual on pipelines |
+
+Everything except the two **Write** scopes works read-only — omit them for a
+strictly read-only setup (the write actions simply 403).
 
 > **macOS GUI Emacs** doesn't source your shell rc, so exports in `~/.zshrc`
 > are invisible. The optional `bitbucket-env` helper reads them out without

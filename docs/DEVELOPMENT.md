@@ -67,9 +67,10 @@ The suite is fast (~1s of real work) and fully offline.
 - **No hardcoded workspace/host.** Everything is a `defcustom` with a
   Bitbucket-Cloud default; credentials resolve from customs → env vars →
   `auth-source`. Don't bake in a workspace name or `api.bitbucket.org`.
-- **Read vs write scopes.** Browsing/overlays/checkout need only read scopes;
-  posting/resolving comments needs Pull-requests:Write. Keep that split honest
-  in code and docs.
+- **Read vs write scopes.** Browsing/overlays/checkout/pipeline-viewing need
+  only read scopes (incl. Pipelines:Read); posting/resolving comments needs
+  Pull-requests:Write, and pipeline stop/trigger/manual-run needs
+  Pipelines:Write. Keep that split honest in code and docs.
 
 ## Architecture
 

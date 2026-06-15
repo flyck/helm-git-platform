@@ -93,6 +93,9 @@ Dispatches on PATH to a fixture.  Records the call and honours
              data))
     ((string-match-p "/pipelines/?\\'" path)
      (bitbucket-mock--fixture "pipelines.json"))
+    ;; commit lookup (for pipeline recent-run summaries)
+    ((string-match-p "/commit/[0-9a-f]+\\'" path)
+     '((message . "Fix the widget toggle\n\nlonger body ignored")))
     (t (error "bitbucket-mock: no route for %s %s" method path)))))
 
 (defun bitbucket-mock-diff (_full-name _id)

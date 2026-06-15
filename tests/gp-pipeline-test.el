@@ -50,8 +50,16 @@
       (should (= (length current) 2))
       (should (cl-every (lambda (pp) (listp (cdr pp))) current))
       (should (= (length (cdr (car current))) 3))   ;; steps fetched
-      ;; the one pipeline on an older commit -> :recent (no steps)
-      (should (= (length recent) 1)))))
+      ;; the one pipeline on an older commit -> :recent (PIPELINE . SUMMARY)
+      (should (= (length recent) 1))
+      (should (consp (car recent)))
+      ;; the summary is the first line of the mocked commit message
+      (should (equal (cdr (car recent)) "Fix the widget toggle")))))
+
+(ert-deftest gp-test-commit-summary-first-line ()
+  (should (equal (gp-commit-summary "first line\nsecond") "first line"))
+  (should (equal (gp-commit-summary "  spaced  \nx") "spaced"))
+  (should (equal (gp-commit-summary nil) "")))
 
 ;;;; Rendering -----------------------------------------------------------------
 
@@ -76,8 +84,29 @@
       (should (string-match-p "Deploy to LIVE" text))
       ;; the waiting manual step is flagged as runnable
       (should (string-match-p "\\[manual ▸ m\\]" text))
-      ;; the older-commit run appears in the recent-runs summary
-      (should (string-match-p "Recent runs on this branch (1)" text)))))
+      ;; the older-commit run appears in the recent-runs summary,
+      ;; with its commit message (not just the sha)
+      (should (string-match-p "Recent runs on this branch (1)" text))
+      (should (string-match-p "Fix the widget toggle" text)))))
+
+(ert-deftest gp-test-pipeline-recent-runs-are-sections ()
+  "Each recent run is its own foldable section, like comments."
+  (bitbucket-mock-with-service
+    (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+           (data (gp-pipeline-fetch-for-pr pr)))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (magit-insert-section (gp-root)
+            (gp--insert-pipelines data)))
+        (let ((recent-secs
+               (cl-remove-if-not
+                (lambda (s) (and (object-of-class-p s 'gp-pipeline-recent-section)
+                                 ;; the per-run sections carry a pipeline value
+                                 (oref s value)))
+                (gp-test--all-pipeline-sections magit-root-section))))
+          ;; one per recent run
+          (should (= (length recent-secs) 1)))))))
 
 (ert-deftest gp-test-pipeline-render-empty-is-noop ()
   (should (equal (gp-test--render-pipelines nil) "")))

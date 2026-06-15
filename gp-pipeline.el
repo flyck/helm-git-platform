@@ -62,6 +62,7 @@
 
 (defclass gp-pipeline-section (magit-section) ())
 (defclass gp-pipeline-step-section (magit-section) ())
+(defclass gp-pipeline-recent-section (magit-section) ())
 
 ;;;; Status formatting (pure) --------------------------------------------------
 
@@ -150,25 +151,34 @@ list of prior-commit pipelines shown as a one-line status summary."
                       (dolist (s steps) (gp-pipeline--insert-step s))
                     (insert "    (no steps)\n")))))
           (insert "  (no pipeline for the current commit)\n"))
-        ;; compact summary of runs on the branch's other recent commits
+        ;; status summary of runs on the branch's other recent commits;
+        ;; each run is its own (foldable, navigable) section.
         (when recent
-          (magit-insert-section (magit-section 'pipelines-recent t)
+          (magit-insert-section (gp-pipeline-recent-section nil t)
             (magit-insert-heading
               (format "  Recent runs on this branch (%d)" (length recent)))
-            (dolist (p recent)
-              (let* ((state (gp-pipeline-state p))
-                     (result (gp-pipeline-result p))
-                     (g (gp-pipeline--status-glyph state result)))
-                (insert "    "
-                        (propertize (car g) 'face (cdr g))
-                        (format " #%s " (or (gp-pipeline-number p) "?"))
-                        (propertize (gp-pipeline--short-hash
-                                     (gp-pipeline-commit p))
-                                    'face 'magit-hash)
-                        (propertize (format "  %s" (or result state ""))
-                                    'face 'shadow)
-                        "\n")))))
+            (dolist (entry recent)
+              (gp-pipeline--insert-recent entry))))
         (insert "\n")))))
+
+(defun gp-pipeline--insert-recent (entry)
+  "Insert one recent-run ENTRY (a cons (PIPELINE . SUMMARY)) as a section."
+  (let* ((p (car entry))
+         (summary (cdr entry))
+         (state (gp-pipeline-state p))
+         (result (gp-pipeline-result p))
+         (g (gp-pipeline--status-glyph state result)))
+    (magit-insert-section (gp-pipeline-recent-section p)
+      (magit-insert-heading
+        (concat "    "
+                (propertize (car g) 'face (cdr g))
+                (format " #%s " (or (gp-pipeline-number p) "?"))
+                (propertize (gp-pipeline--short-hash (gp-pipeline-commit p))
+                            'face 'magit-hash)
+                (when (and summary (not (string-empty-p summary)))
+                  (propertize (format "  %s" summary) 'face 'default))
+                (propertize (format "   %s" (or result state ""))
+                            'face 'shadow))))))
 
 ;;;; Fetching (network, via the protocol) --------------------------------------
 
@@ -179,10 +189,10 @@ list of prior-commit pipelines shown as a one-line status summary."
 current head commit -- the runs that matter -- most steps first,
 with each pipeline's steps fetched.
 
-:recent is a short list of pipeline objects for the branch's other
-recent commits (newest first, no steps fetched) -- a lightweight
-status summary.  Both may be nil.  Returns nil on any error (the
-detail view degrades gracefully)."
+:recent is a short list of (PIPELINE . COMMIT-SUMMARY) conses for
+the branch's other recent commits (newest first, no steps fetched)
+-- a lightweight status summary.  Both may be nil.  Returns nil on
+any error (the detail view degrades gracefully)."
   (ignore-errors
     (let* ((full-name (gp-pr-full-name pr))
            (branch (gp-pr-source-branch pr))
@@ -206,7 +216,13 @@ detail view degrades gracefully)."
                       (cons p (gethash (alist-get 'uuid p) steps-of)))
                     (gp-pipelines-sort current counts))
             :recent
-            (seq-take recent gp-pipeline-recent-max)))))
+            ;; attach each run's commit summary (one extra lookup per run,
+            ;; cached) so the renderer needs no network access
+            (mapcar (lambda (p)
+                      (cons p (gp-commit-summary
+                               (gp-commit-message
+                                full-name (gp-pipeline-commit p)))))
+                    (seq-take recent gp-pipeline-recent-max))))))
 
 (defun gp-pipelines-match-commit (pipelines commit)
   "Return PIPELINES whose target commit matches COMMIT (delegates to backend)."
