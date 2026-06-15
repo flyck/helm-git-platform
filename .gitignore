@@ -1,0 +1,13 @@
+# Byte-compiled / native-compiled elisp
+*.elc
+*.eln
+eln-cache/
+
+# Editor / OS noise
+*~
+\#*\#
+.\#*
+.DS_Store
+
+# Test/spec drift cache (written to /tmp by default, but just in case)
+/swagger.json

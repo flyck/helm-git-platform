@@ -1,0 +1,92 @@
+;;; gp-ui-test.el --- Tests for the PR list/detail UI -*- lexical-binding: t; -*-
+
+;;; Commentary:
+;; Drives the magit-section renderers against mock data in a real
+;; (batch) buffer and asserts on the produced text and section tree --
+;; this is the "simulate UI" coverage without a live display.
+
+;;; Code:
+
+(require 'ert)
+(require 'cl-lib)
+(require 'gp-ui)
+(require 'bitbucket-mock)
+
+(defun gp-test--mock-prs ()
+  (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json")))
+
+(ert-deftest gp-test-pr-heading-contains-id-title ()
+  (let* ((pr (car (gp-test--mock-prs)))
+         (h (substring-no-properties (gp--pr-heading pr))))
+    (should (string-match-p (format "#%s" (alist-get 'id pr)) h))
+    (should (string-match-p (regexp-quote (alist-get 'title pr)) h))))
+
+(ert-deftest gp-test-render-list-builds-groups ()
+  "Rendering produces both group headings and one section per PR."
+  (let ((prs (gp-test--mock-prs))
+        (uuid "{21d7839d-779f-44b2-8c40-6f43ac90be06}"))
+    (with-temp-buffer
+      (gp-list-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-list prs uuid))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "Needs my review (0)" text))
+        (should (string-match-p "My pull requests (10)" text))
+        ;; a known PR id from the fixture appears
+        (should (string-match-p "#239" text)))
+      ;; section tree: root has children, and PR sections carry their pr
+      (let* ((root magit-root-section)
+             (pr-secs (cl-remove-if-not
+                       (lambda (s) (object-of-class-p s 'gp-pr-section))
+                       (gp-test--all-sections root))))
+        (should (= (length pr-secs) 10))
+        (should (alist-get 'id (oref (car pr-secs) value)))))))
+
+(defun gp-test--all-sections (section)
+  "Flatten SECTION and all descendants into a list."
+  (cons section
+        (cl-mapcan #'gp-test--all-sections
+                   (oref section children))))
+
+(ert-deftest gp-test-render-detail-shows-comments ()
+  (let ((pr (car (gp-test--mock-prs)))
+        (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-detail pr comments))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p (format "Comments (%d)" (length comments)) text))
+        ;; an inline comment's location label shows file:line
+        (should (string-match-p "\\.ts:[0-9]+" text))))))
+
+(ert-deftest gp-test-comment-location-inline-vs-general ()
+  (should (equal (gp--comment-location
+                  '((inline (path . "a/b.ts") (to . 42))))
+                 "a/b.ts:42"))
+  (should (equal (gp--comment-location '((content (raw . "hi"))))
+                 "general")))
+
+(ert-deftest gp-test-comment-threads ()
+  "Replies are ordered under their parent, one level deeper."
+  (let* ((comments '(((id . 1))
+                     ((id . 2) (parent (id . 1)))   ;; reply to 1
+                     ((id . 3))                      ;; another root
+                     ((id . 4) (parent (id . 2)))   ;; reply to reply
+                     ((id . 5) (parent (id . 1)))))  ;; second reply to 1
+         (threads (gp--comment-threads comments))
+         (order (mapcar (lambda (cd) (cons (alist-get 'id (car cd)) (cdr cd)))
+                        threads)))
+    ;; depth-first: 1, 2(reply), 4(reply-of-reply), 5(reply), then root 3
+    (should (equal order '((1 . 0) (2 . 1) (4 . 2) (5 . 1) (3 . 0))))))
+
+(ert-deftest gp-test-comment-threads-orphan-parent ()
+  "A reply whose parent isn't in the set is treated as a root."
+  (let ((threads (gp--comment-threads
+                  '(((id . 9) (parent (id . 999)))))))
+    ;; not dropped; appears at depth 0
+    (should (= (length threads) 1))
+    (should (= (cdr (car threads)) 0))))
+
+(provide 'gp-ui-test)
+;;; gp-ui-test.el ends here
