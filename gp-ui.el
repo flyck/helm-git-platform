@@ -503,6 +503,7 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "e"   #'gp-detail-edit
   "f"   #'gp-detail-goto-comment
   "d"   #'gp-detail-show-diff
+  "X"   #'gp-detail-delete        ;; delete your own comment at point
   "D"   #'gp-detail-toggle-draft
   "RET" #'gp-detail-ret
   "w"   #'gp-browse-pr
@@ -516,6 +517,14 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "Show the current PR's branch diff in Magit."
   (interactive)
   (gp-ui-show-diff-in-magit gp--pr))
+
+(defun gp-detail-delete ()
+  "Delete the comment at point (your own only)."
+  (interactive)
+  (let ((c (gp-detail--comment-at-point)))
+    (unless (gp-comment-own-p c (gp-user-uuid))
+      (user-error "You can only delete your own comments"))
+    (gp-ui-delete-comment gp--pr c)))
 
 (defun gp-detail--comment-at-point ()
   "Return the comment at point in the detail buffer, or signal."

@@ -118,13 +118,15 @@ actions uppercase; buttons are clickable):
 | `b` | Back to the PR list |
 | `o` | Autostash & checkout the PR branch, then open the repo |
 | `d` | Show the branch diff in Magit (no checkout) |
-| `w` | View the PR on Bitbucket |
+| `w` | View the PR in the browser |
 | `i` | Overlay this PR's inline comments onto its local files |
 | `r` | Reply to the comment at point |
 | `e` | Edit your own comment at point |
 | `g` | Refresh (non-blocking) |
 | `x` | Resolve / reopen the comment at point |
+| `X` | Delete your own comment at point |
 | `D` | Convert to draft / mark ready (your own PRs) |
+| `s` `T` `m` `l` | Pipeline: stop · trigger · run-manual · step log |
 
 On an inline comment **overlay** (in a checked-out file), under the `C-c b`
 prefix so they don't collide with the file's own bindings:

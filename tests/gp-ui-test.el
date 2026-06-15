@@ -88,5 +88,36 @@
     (should (= (length threads) 1))
     (should (= (cdr (car threads)) 0))))
 
+(ert-deftest gp-test-detail-delete-own-comment ()
+  "`gp-detail-delete' deletes an own comment at point (confirmed)."
+  (let* ((uuid "{me}")
+         (pr '((id . 7) (destination (repository (full_name . "acme/x")))))
+         (own '((id . 55) (user (uuid . "{me}"))))
+         (gp--pr pr)
+         (deleted nil))
+    (cl-letf (((symbol-function 'magit-current-section)
+               (lambda () (let ((s (gp-comment-section))) (oset s value own) s)))
+              ((symbol-function 'gp-user-uuid) (lambda () uuid))
+              ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+              ((symbol-function 'gp-detail-refresh) #'ignore)
+              ((symbol-function 'gp-delete-comment)
+               (lambda (fn id cid) (setq deleted (list fn id cid)))))
+      (gp-detail-delete)
+      (should (equal deleted '("acme/x" 7 55))))))
+
+(ert-deftest gp-test-detail-delete-rejects-foreign-comment ()
+  "Deleting someone else's comment signals and does not call the API."
+  (let* ((pr '((id . 7) (destination (repository (full_name . "acme/x")))))
+         (other '((id . 55) (user (uuid . "{someone-else}"))))
+         (gp--pr pr)
+         (called nil))
+    (cl-letf (((symbol-function 'magit-current-section)
+               (lambda () (let ((s (gp-comment-section))) (oset s value other) s)))
+              ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+              ((symbol-function 'gp-delete-comment)
+               (lambda (&rest _) (setq called t))))
+      (should-error (gp-detail-delete) :type 'user-error)
+      (should-not called))))
+
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here
