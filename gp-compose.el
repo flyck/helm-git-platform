@@ -1,8 +1,8 @@
-;;; gp-compose.el --- Compose buffer for Bitbucket comments -*- lexical-binding: t; -*-
+;;; gp-compose.el --- Compose buffer for PR comments -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; A small compose buffer for writing a Bitbucket PR comment in Markdown.
+;; A small compose buffer for writing a PR comment in Markdown.
 ;; It derives from `gfm-mode' (markdown-mode's GitHub-flavoured variant)
 ;; when available so you get live fontification and a familiar preview;
 ;; otherwise it falls back to plain `text-mode'.
@@ -27,7 +27,7 @@
 (declare-function gfm-mode "markdown-mode")
 (declare-function markdown-standalone "markdown-mode")
 
-(defcustom gp-compose-preview-buffer "*Bitbucket Comment Preview*"
+(defcustom gp-compose-preview-buffer "*PR Comment Preview*"
   "Name of the buffer used to render a Markdown preview."
   :type 'string
   :group 'bitbucket)
@@ -102,7 +102,7 @@ Triggers after a colon, e.g. typing \":think\" offers \":thinking:\"."
   "C-c C-p" #'gp-compose-preview)
 
 (define-minor-mode gp-compose-mode
-  "Minor mode active in a Bitbucket comment compose buffer.
+  "Minor mode active in a PR comment compose buffer.
 Layers submit/cancel/preview bindings on top of the Markdown mode,
 and adds :emoji: shortcode completion via `completion-at-point'."
   :lighter " BB-Compose"
@@ -230,7 +230,7 @@ Lines that are blank, already end in two spaces, or sit inside a
 TARGET keys: :full-name :id [:inline (PATH . LINE)] [:parent ID]
 [:submit-function FN] [:on-success FN].  See
 `gp-compose--target'."
-  (let ((buf (generate-new-buffer "*Bitbucket Comment*"))
+  (let ((buf (generate-new-buffer "*PR Comment*"))
         (winconf (current-window-configuration)))
     (with-current-buffer buf
       (gp-compose--base-mode)

@@ -1,4 +1,4 @@
-;;; gp-checkout.el --- Branch checkout service for Bitbucket PRs -*- lexical-binding: t; -*-
+;;; gp-checkout.el --- Branch checkout service for pull requests -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -25,7 +25,7 @@
 (require 'subr-x)
 
 (defgroup gp-checkout nil
-  "Branch checkout service for Bitbucket PRs."
+  "Branch checkout service for pull requests."
   :group 'bitbucket)
 
 (defcustom gp-checkout-clone-base nil

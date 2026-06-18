@@ -16,6 +16,7 @@ emacs --batch -Q \
   -l gp-local.el \
   -l gp-checkout.el \
   -l gp-compose.el \
+  -l gp-pipeline.el \
   -l gp-overlay.el \
   -l gp-watch.el \
   -l gp-ui.el \
@@ -25,12 +26,14 @@ emacs --batch -Q \
   -l tests/bitbucket-env-test.el \
   -l tests/gp-log-test.el \
   -l tests/bitbucket-api-test.el \
+  -l tests/bitbucket-pipeline-test.el \
   -l tests/git-platform-test.el \
   -l tests/gp-api-drift-test.el \
   -l tests/gp-local-test.el \
   -l tests/gp-checkout-test.el \
   -l tests/gp-compose-test.el \
   -l tests/gp-ui-test.el \
+  -l tests/gp-pipeline-test.el \
   -l tests/gp-overlay-test.el \
   -l tests/gp-watch-test.el \
   -l tests/gp-magit-test.el \

@@ -1,8 +1,8 @@
-;;; gp-local.el --- Link Bitbucket PRs to local checkouts -*- lexical-binding: t; -*-
+;;; gp-local.el --- Link pull requests to local checkouts -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Bridges a Bitbucket pull request to a local working copy under
+;; Bridges a pull request to a local working copy under
 ;; `gp-local-git-root' (default ~/git).
 ;;
 ;; A PR carries its repository as "workspace/slug" (full_name).  We find

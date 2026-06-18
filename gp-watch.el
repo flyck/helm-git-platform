@@ -3,14 +3,14 @@
 ;;; Commentary:
 
 ;; A global minor mode that, whenever you open a file, quietly works out
-;; whether you are sitting on a Bitbucket pull-request branch and, if that
+;; whether you are sitting on a pull-request branch and, if that
 ;; PR has inline comments on the file, draws them as overlays -- without
 ;; you asking.  It also shows a per-buffer count of the repo's open PRs in
 ;; the mode line.
 ;;
 ;; The pipeline on `find-file', all early-exit and cached:
 ;;
-;;   1. Is the file under a git repo with a Bitbucket remote?
+;;   1. Is the file under a git repo with a known-forge remote?
 ;;      -> `gp-local--dir-remote', memoised here for ONE DAY since
 ;;         a checkout's origin essentially never changes.
 ;;   2. What branch is checked out?  (cheap git call)
@@ -40,7 +40,7 @@
 (defvar gp-watch-mode)
 
 (defcustom gp-watch-repo-cache-ttl 86400
-  "Seconds to cache whether a directory is a Bitbucket repo (default 1 day)."
+  "Seconds to cache whether a directory is a known-forge repo (default 1 day)."
   :type 'integer
   :group 'bitbucket)
 
@@ -63,7 +63,7 @@
   "full-name -> (EXPIRY . COUNT).")
 
 (defvar-local gp-watch--repo nil
-  "The Bitbucket \"ws/slug\" this buffer belongs to, or nil.")
+  "The repo \"ws/slug\" this buffer belongs to, or nil.")
 (defvar-local gp-watch--pr-count nil
   "Open-PR count for this buffer's repo, or nil.")
 (defvar-local gp-watch--branch-pr nil
@@ -101,7 +101,7 @@ A stored `none' represents a cached negative; it is returned as nil."
 ;;;; Resolution steps (each cached) ------------------------------------------
 
 (defun gp-watch--repo-for-file (file)
-  "Return the Bitbucket \"ws/slug\" for FILE, or nil. Cached for a day."
+  "Return the repo \"ws/slug\" for FILE, or nil. Cached for a day."
   (when file
     (let* ((dir (file-name-directory (expand-file-name file)))
            (root (or (locate-dominating-file dir ".git") dir))
@@ -283,7 +283,7 @@ overlays are drawn yet."
 (define-minor-mode gp-watch-mode
   "Global mode: show open-PR counts and auto-overlay PR comments on files.
 
-When you visit a file in a git repo with a Bitbucket remote, the
+When you visit a file in a git repo with a known-forge remote, the
 mode line shows that repo's open-PR count; and if you are on a
 pull-request branch whose PR has inline comments on the file, they
 are drawn as overlays automatically.

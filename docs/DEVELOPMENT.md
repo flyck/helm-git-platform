@@ -32,12 +32,12 @@ If `emacsclient` can't connect, fall back to `emacs --batch -Q` with
 
 ## Debugging via the log buffer
 
-`gp-log.el` writes to `*bitbucket-log*`: every API request (method, path,
+`gp-log.el` writes to `*gp-log*`: every API request (method, path,
 status, timing), errors with response bodies, and key actions. Read the log
 before speculating:
 
 ```sh
-./reload.sh eval '(with-current-buffer "*bitbucket-log*"
+./reload.sh eval '(with-current-buffer "*gp-log*"
   (buffer-substring (max (point-min) (- (point-max) 4000)) (point-max)))'
 ```
 
@@ -67,9 +67,10 @@ The suite is fast (~1s of real work) and fully offline.
 - **No hardcoded workspace/host.** Everything is a `defcustom` with a
   Bitbucket-Cloud default; credentials resolve from customs → env vars →
   `auth-source`. Don't bake in a workspace name or `api.bitbucket.org`.
-- **Read vs write scopes.** Browsing/overlays/checkout need only read scopes;
-  posting/resolving comments needs Pull-requests:Write. Keep that split honest
-  in code and docs.
+- **Read vs write scopes.** Browsing/overlays/checkout/pipeline-viewing need
+  only read scopes (incl. Pipelines:Read); posting/resolving comments needs
+  Pull-requests:Write, and pipeline stop/trigger/manual-run needs
+  Pipelines:Write. Keep that split honest in code and docs.
 
 ## Architecture
 
@@ -117,13 +118,15 @@ actions uppercase; buttons are clickable):
 | `b` | Back to the PR list |
 | `o` | Autostash & checkout the PR branch, then open the repo |
 | `d` | Show the branch diff in Magit (no checkout) |
-| `w` | View the PR on Bitbucket |
+| `w` | View the PR in the browser |
 | `i` | Overlay this PR's inline comments onto its local files |
 | `r` | Reply to the comment at point |
 | `e` | Edit your own comment at point |
 | `g` | Refresh (non-blocking) |
 | `x` | Resolve / reopen the comment at point |
+| `X` | Delete your own comment at point |
 | `D` | Convert to draft / mark ready (your own PRs) |
+| `s` `T` `m` `l` | Pipeline: stop · trigger · run-manual · step log |
 
 On an inline comment **overlay** (in a checked-out file), under the `C-c b`
 prefix so they don't collide with the file's own bindings:

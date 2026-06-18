@@ -58,6 +58,20 @@
 (cl-defmethod gp--commit-build-states ((_ git-platform-bitbucket) full-name hash)
   (bitbucket-commit-build-states full-name hash))
 
+;; Pipelines
+(cl-defmethod gp--pipelines-for-branch ((_ git-platform-bitbucket) full-name branch &optional max-items commit)
+  (bitbucket-pipelines-for-branch full-name branch max-items commit))
+(cl-defmethod gp--pipeline-steps ((_ git-platform-bitbucket) full-name pipeline-uuid)
+  (bitbucket-pipeline-steps full-name pipeline-uuid))
+(cl-defmethod gp--pipeline-stop ((_ git-platform-bitbucket) full-name pipeline-uuid)
+  (bitbucket-pipeline-stop full-name pipeline-uuid))
+(cl-defmethod gp--pipeline-trigger ((_ git-platform-bitbucket) full-name branch &optional selector variables)
+  (bitbucket-pipeline-trigger full-name branch selector variables))
+(cl-defmethod gp--pipeline-run-manual-step ((_ git-platform-bitbucket) full-name branch pipeline step)
+  (bitbucket-pipeline-run-manual-step full-name branch pipeline step))
+(cl-defmethod gp--pipeline-step-log ((_ git-platform-bitbucket) full-name pipeline-uuid step-uuid)
+  (bitbucket-pipeline-step-log full-name pipeline-uuid step-uuid))
+
 ;;;; Field accessors ----------------------------------------------------------
 
 ;; The JSON-shape logic lives in bitbucket-api.el; methods delegate to it so
@@ -66,6 +80,8 @@
   (let-alist pr .destination.repository.full_name))
 (cl-defmethod gp--pr-source-branch ((_ git-platform-bitbucket) pr)
   (let-alist pr .source.branch.name))
+(cl-defmethod gp--pr-source-commit ((_ git-platform-bitbucket) pr)
+  (let-alist pr .source.commit.hash))
 (cl-defmethod gp--pr-destination-branch ((_ git-platform-bitbucket) pr)
   (let-alist pr .destination.branch.name))
 (cl-defmethod gp--pr-draft-p ((_ git-platform-bitbucket) pr)
@@ -78,6 +94,36 @@
   (bitbucket-comment-resolved-p comment))
 (cl-defmethod gp--comment-own-p ((_ git-platform-bitbucket) comment uuid)
   (bitbucket-comment-own-p comment uuid))
+
+;; Pipeline / step shape accessors
+(cl-defmethod gp--pipeline-state ((_ git-platform-bitbucket) pipeline)
+  (bitbucket-pipeline-state pipeline))
+(cl-defmethod gp--pipeline-result ((_ git-platform-bitbucket) pipeline)
+  (bitbucket-pipeline-result pipeline))
+(cl-defmethod gp--pipeline-finished-p ((_ git-platform-bitbucket) pipeline)
+  (bitbucket-pipeline-finished-p pipeline))
+(cl-defmethod gp--pipeline-number ((_ git-platform-bitbucket) pipeline)
+  (bitbucket-pipeline-number pipeline))
+(cl-defmethod gp--pipeline-commit ((_ git-platform-bitbucket) pipeline)
+  (bitbucket-pipeline-commit pipeline))
+(cl-defmethod gp--commit-message ((_ git-platform-bitbucket) full-name hash)
+  (bitbucket-commit-message full-name hash))
+(cl-defmethod gp--commit-summary ((_ git-platform-bitbucket) message)
+  (bitbucket-commit-summary message))
+(cl-defmethod gp--pipeline-step-state ((_ git-platform-bitbucket) step)
+  (bitbucket-pipeline-step-state step))
+(cl-defmethod gp--pipeline-step-result ((_ git-platform-bitbucket) step)
+  (bitbucket-pipeline-step-result step))
+(cl-defmethod gp--pipeline-step-running-p ((_ git-platform-bitbucket) step)
+  (bitbucket-pipeline-step-running-p step))
+(cl-defmethod gp--pipeline-step-manual-p ((_ git-platform-bitbucket) step)
+  (bitbucket-pipeline-step-manual-p step))
+(cl-defmethod gp--pipeline-step-runnable-manual-p ((_ git-platform-bitbucket) step)
+  (bitbucket-pipeline-step-runnable-manual-p step))
+(cl-defmethod gp--pipelines-sort ((_ git-platform-bitbucket) pipelines step-counts)
+  (bitbucket-pipelines-sort pipelines step-counts))
+(cl-defmethod gp--pipelines-match-commit ((_ git-platform-bitbucket) pipelines commit)
+  (bitbucket-pipelines-match-commit pipelines commit))
 
 (provide 'git-platform-bitbucket)
 ;;; git-platform-bitbucket.el ends here

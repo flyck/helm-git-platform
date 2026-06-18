@@ -1,14 +1,18 @@
 # helm-git-platform
 
-A magit-flavoured **Bitbucket Cloud** client for Emacs. Browse pull requests
+A magit-flavoured **git-platform client** for Emacs. Browse pull requests
 across your whole workspace, drill into changed files and comments with Helm,
 jump to the matching local checkout and switch branches safely, see inline
 review comments as overlays on the code, and watch live PR counts in the mode
 line.
 
+It talks to a forge through a backend protocol (`git-platform`).
+**Bitbucket Cloud is the only backend implemented today**, but the UI, overlays,
+checkout service and Helm front-end are all platform-agnostic — adding another
+forge (GitHub, GitLab, …) is a matter of writing one backend.
+
 > Nothing is hardcoded to a workspace or host — every value is a `defcustom`,
-> and credentials come from the environment or `auth-source`. It ships
-> Bitbucket today, behind a backend protocol that leaves room for other forges.
+> and credentials come from the environment or `auth-source`.
 
 ## Install
 
@@ -71,9 +75,20 @@ export BITBUCKET_API_TOKEN="…"   # https://id.atlassian.com/manage-profile/sec
 
 They can also be set via the `bitbucket-workspace` / `bitbucket-user-email` /
 `bitbucket-api-token` customs, and the token falls back to `auth-source`.
-Grant the token **Account: Read**, **Repositories: Read** and **Pull requests:
-Read**; add **Pull requests: Write** only if you want to post/resolve comments
-from Emacs (everything else works read-only).
+
+Grant the token these scopes:
+
+| Scope | Needed for |
+|---|---|
+| **Account: Read** | resolve your own identity (split mine vs needs-my-review) |
+| **Repositories: Read** | list repos, read diffs and commit messages |
+| **Pull requests: Read** | list PRs and read details/comments |
+| **Pipelines: Read** | show the PR's CI pipelines and step logs |
+| **Pull requests: Write** | *(optional)* post / reply / resolve comments from Emacs |
+| **Pipelines: Write** | *(optional)* stop / trigger / run-manual on pipelines |
+
+Everything except the two **Write** scopes works read-only — omit them for a
+strictly read-only setup (the write actions simply 403).
 
 > **macOS GUI Emacs** doesn't source your shell rc, so exports in `~/.zshrc`
 > are invisible. The optional `bitbucket-env` helper reads them out without
@@ -88,6 +103,7 @@ from Emacs (everything else works read-only).
 | **Inline comment overlays** — review comments drawn on the code | on by default | `(setq gp-overlay-enabled nil)` or `M-x gp-overlay-toggle-globally` |
 | **Auto-overlay + mode-line counts** — per-repo PR count and comments while you visit files | `(gp-watch-mode 1)` | omit it, or `(gp-watch-mode -1)` |
 | **Comments in magit diffs** | `(gp-magit-mode 1)` | omit it |
+| **CI pipelines in the detail view** — the PR branch's pipelines, tabbable, with stop / trigger / manual-run / logs | on by default | `(setq gp-detail-show-pipelines nil)` |
 | **Shell-rc env import** (macOS convenience) | `(require 'bitbucket-env)` + `(bitbucket-env-load)` | omit it (default) |
 
 The core browsing (`gp-helm`, `gp-list`, checkout) works with none of these on.
@@ -105,6 +121,17 @@ The core browsing (`gp-helm`, `gp-list`, checkout) works with none of these on.
 In the detail buffer and on overlays, most actions show their key in
 `[brackets]` and the buttons are clickable (reply, resolve, new comment, open,
 diff). Comments are written in Markdown with `C-c C-c` to post.
+
+The detail buffer also shows the PR branch's **CI pipelines** (the one with the
+most steps on top; finished pipelines start collapsed, `TAB` expands). On a
+pipeline or step: `s` stops the running pipeline, `T` triggers/re-runs it, `m`
+runs a waiting *manual* step, and `l` opens a step's log in a buffer (tailed
+live while it runs, historical once finished).
+
+> The platform allows stop and trigger only at the **whole-pipeline** level —
+> there is no per-step stop/trigger API — and step logs are fetched, not
+> streamed (so "live" means polled). Requires a token with **Pipelines: Read**,
+> plus **Pipelines: Write** for stop/trigger/manual-run.
 
 ## Limitations
 
