@@ -165,13 +165,13 @@ branch has an open PR (and `gp-watch-mode' is on)."
     (remove-hook 'magit-post-refresh-hook #'gp-magit--maybe-activate)))
 
 (defvar-keymap gp-magit-command-map
-  :doc "Keymap for PR-comment actions in magit-diff buffers (under `C-c b')."
+  :doc "Keymap for PR-comment actions in magit-diff buffers (under `C-c B')."
   "n" #'gp-magit-add-comment
   "g" #'gp-magit-refresh-comments)
 
 (defun gp-magit--activate-keys ()
   "Bind the PR-comment keys locally in this magit-diff buffer."
-  (local-set-key (kbd "C-c b") gp-magit-command-map))
+  (local-set-key (kbd "C-c B") gp-magit-command-map))
 
 (provide 'gp-magit)
 ;;; gp-magit.el ends here

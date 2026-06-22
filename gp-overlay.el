@@ -430,14 +430,14 @@ With a negative N, move to the previous one."
   (gp-overlay-next-comment (- (or n 1))))
 
 (defvar-keymap gp-overlay-mode-map
-  "C-c b r" #'gp-overlay-reply
-  "C-c b R" #'gp-overlay-resolve
-  "C-c b k" #'gp-overlay-reopen
-  "C-c b n" #'gp-overlay-new-comment
-  "C-c b TAB" #'gp-overlay-toggle-collapse
-  "C-c b g" #'gp-overlay-refresh
-  "C-c b ]" #'gp-overlay-next-comment
-  "C-c b [" #'gp-overlay-previous-comment)
+  "C-c B r" #'gp-overlay-reply
+  "C-c B R" #'gp-overlay-resolve
+  "C-c B k" #'gp-overlay-reopen
+  "C-c B n" #'gp-overlay-new-comment
+  "C-c B TAB" #'gp-overlay-toggle-collapse
+  "C-c B g" #'gp-overlay-refresh
+  "C-c B ]" #'gp-overlay-next-comment
+  "C-c B [" #'gp-overlay-previous-comment)
 
 (define-minor-mode gp-overlay-mode
   "Minor mode adding keybindings for acting on inline PR comments."

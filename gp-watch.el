@@ -318,7 +318,7 @@ overlays are drawn yet."
     (gp-overlay-new-comment)))
 
 (defvar-keymap gp-watch-command-map
-  :doc "Keymap for `gp-watch-mode' file actions (under `C-c b')."
+  :doc "Keymap for `gp-watch-mode' file actions (under `C-c B')."
   "n" #'gp-watch-add-comment
   "p" #'gp-watch-visit-branch-pr)
 
@@ -335,7 +335,7 @@ overlays are drawn yet."
 
 (defvar-keymap gp-watch-mode-map
   :doc "Global keymap active while `gp-watch-mode' is on."
-  "C-c b" gp-watch-command-map)
+  "C-c B" gp-watch-command-map)
 
 ;;;###autoload
 (define-minor-mode gp-watch-mode
