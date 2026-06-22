@@ -116,9 +116,9 @@
                 (propertize (car g) 'face (cdr g))
                 " "
                 (propertize name 'face 'default)
-                (cond
-                 (runnable (propertize "  [manual ▸ m]" 'face 'gp-pipeline-running-face))
-                 (manual (propertize "  [manual]" 'face 'shadow)))
+                 (cond
+                  (runnable (propertize "  [manual ▸ T]" 'face 'gp-pipeline-running-face))
+                  (manual (propertize "  [manual]" 'face 'shadow)))
                 (unless (string-empty-p dur)
                   (propertize (format "  %s" dur) 'face 'shadow))
                 (propertize "   l:log" 'face 'shadow))))))
@@ -145,7 +145,7 @@ list of prior-commit pipelines shown as a one-line status summary."
                     (gp-pipeline-section (cons pipeline steps) collapsed)
                   (magit-insert-heading
                     (concat "  " (gp-pipeline--label pipeline)
-                            (propertize "   s:stop  T:trigger  m:run-manual"
+                            (propertize "   s:stop  T:trigger"
                                         'face 'shadow)))
                   (if steps
                       (dolist (s steps) (gp-pipeline--insert-step s))
@@ -276,8 +276,17 @@ point is not within a pipeline."
             (message "Triggered pipeline #%s"
                      (or (gp-pipeline-number new) "?"))
             (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
-        (error (message "Could not trigger pipeline: %s"
-                        (error-message-string e)))))))
+         (error (message "Could not trigger pipeline: %s"
+                         (error-message-string e)))))))
+
+(defun gp-detail-pipeline-trigger-or-run-manual ()
+  "Trigger the pipeline, or run a waiting manual step when point is on one."
+  (interactive)
+  (let ((sec (magit-current-section)))
+    (if (and sec (object-of-class-p sec 'gp-pipeline-step-section)
+             (gp-pipeline-step-runnable-manual-p (oref sec value)))
+        (gp-detail-pipeline-run-manual)
+      (gp-detail-pipeline-trigger))))
 
 (defun gp-detail-pipeline-run-manual ()
   "Start the waiting manual step at point.

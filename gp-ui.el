@@ -573,7 +573,7 @@ block at once.  The file name remains clickable and opens the checkout."
   "w"   #'gp-detail-browse
   ;; pipelines (pipeline-level stop/trigger; per-step log + manual run)
   "s"   #'gp-detail-pipeline-stop
-  "T"   #'gp-detail-pipeline-trigger
+  "T"   #'gp-detail-pipeline-trigger-or-run-manual
   "m"   #'gp-detail-toggle-mark
   "l"   #'gp-detail-pipeline-step-log)
 

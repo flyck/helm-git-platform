@@ -83,11 +83,24 @@
       (should (string-match-p "Build and test" text))
       (should (string-match-p "Deploy to LIVE" text))
       ;; the waiting manual step is flagged as runnable
-      (should (string-match-p "\\[manual ▸ m\\]" text))
+      (should (string-match-p "\\[manual ▸ T\\]" text))
       ;; the older-commit run appears in the recent-runs summary,
       ;; with its commit message (not just the sha)
       (should (string-match-p "Recent runs on this branch (1)" text))
       (should (string-match-p "Fix the widget toggle" text)))))
+
+(ert-deftest gp-test-pipeline-trigger-or-run-manual-prefers-manual-step ()
+  (let ((called nil)
+        (step '((state (name . "PENDING") (stage (name . "PAUSED")))
+                (trigger (type . "pipeline_step_trigger_manual")))))
+    (cl-letf (((symbol-function 'magit-current-section)
+               (lambda () (let ((s (gp-pipeline-step-section))) (oset s value step) s)))
+              ((symbol-function 'gp-detail-pipeline-run-manual)
+               (lambda () (setq called 'manual)))
+              ((symbol-function 'gp-detail-pipeline-trigger)
+               (lambda () (setq called 'trigger))))
+      (gp-detail-pipeline-trigger-or-run-manual)
+      (should (eq called 'manual)))))
 
 (ert-deftest gp-test-pipeline-recent-runs-are-sections ()
   "Each recent run is its own foldable section, like comments."
