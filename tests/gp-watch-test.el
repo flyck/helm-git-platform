@@ -51,8 +51,21 @@
         (should (= calls 1))               ;; second call hit the cache
         ;; after TTL it re-resolves
         (setq clock (+ clock gp-watch-repo-cache-ttl 1))
-        (gp-watch--repo-for-file "/repo/a.el")
-        (should (= calls 2))))))
+         (gp-watch--repo-for-file "/repo/a.el")
+         (should (= calls 2))))))
+
+(ert-deftest gp-test-watch-repo-lookup-for-directory ()
+  "Directory-backed buffers resolve via the repo root too."
+  (gp-watch-test--with-clock
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'gp-local--dir-remote)
+                 (lambda (_dir) (cl-incf calls) "ws/slug"))
+                ((symbol-function 'locate-dominating-file)
+                 (lambda (_d _n) "/repo/"))
+                ((symbol-function 'file-directory-p)
+                 (lambda (path) (equal path "/repo/"))))
+        (should (equal (gp-watch--repo-for-path "/repo/") "ws/slug"))
+        (should (= calls 1))))))
 
 (ert-deftest gp-test-watch-pr-for-branch-cached ()
   (gp-watch-test--with-clock
@@ -129,6 +142,36 @@
         (insert "x\n")
         (should (null (gp-watch--overlay-if-comments '((id . 7)) "ws/slug")))
         (set-buffer-modified-p nil)))))
+
+(ert-deftest gp-test-watch-activates-in-magit-buffer-from-directory ()
+  "Magit buffers use `default-directory' for repo and branch PR resolution."
+  (let ((gp-watch-mode t))
+    (with-temp-buffer
+      (setq default-directory "/repo/")
+      (cl-letf (((symbol-function 'derived-mode-p)
+                 (lambda (&rest modes) (memq 'magit-mode modes)))
+                ((symbol-function 'gp-watch--repo-for-path)
+                 (lambda (path)
+                   (should (equal path "/repo/"))
+                   "ws/slug"))
+                ((symbol-function 'gp-watch--open-count)
+                 (lambda (_full-name) 4))
+                ((symbol-function 'gp-watch--current-branch)
+                 (lambda (path)
+                   (should (equal path "/repo/"))
+                   "feature/demo"))
+                ((symbol-function 'gp-watch--pr-for)
+                 (lambda (_full-name branch)
+                   (should (equal branch "feature/demo"))
+                   '((id . 8) (comment_count . 2))))
+                ((symbol-function 'gp-watch--overlay-if-comments)
+                 (lambda (&rest _) (ert-fail "should not overlay in non-file Magit buffer"))))
+        (gp-watch--maybe-activate)
+        (should (equal gp-watch--repo "ws/slug"))
+        (should (= gp-watch--pr-count 4))
+        (should (= (alist-get 'id gp-watch--branch-pr) 8))
+        (should (string-match-p "BB:4" (substring-no-properties gp-watch-mode-line)))
+        (should (string-match-p "💬2" (substring-no-properties gp-watch-mode-line)))))))
 
 (provide 'gp-watch-test)
 ;;; gp-watch-test.el ends here

@@ -35,9 +35,12 @@
 
 (declare-function gp-checkout-current-branch "gp-checkout")
 (declare-function gp-helm-repo "gp-helm")
+(declare-function gp-show-pr "gp-ui")
 ;; Forward declaration: the minor-mode variable is defined below but
 ;; referenced by the activation helper above its definition.
 (defvar gp-watch-mode)
+(defvar magit-mode-hook)
+(defvar magit-post-refresh-hook)
 
 (defcustom gp-watch-repo-cache-ttl 86400
   "Seconds to cache whether a directory is a known-forge repo (default 1 day)."
@@ -100,11 +103,15 @@ A stored `none' represents a cached negative; it is returned as nil."
 
 ;;;; Resolution steps (each cached) ------------------------------------------
 
-(defun gp-watch--repo-for-file (file)
-  "Return the repo \"ws/slug\" for FILE, or nil. Cached for a day."
-  (when file
-    (let* ((dir (file-name-directory (expand-file-name file)))
-           (root (or (locate-dominating-file dir ".git") dir))
+(defun gp-watch--repo-for-path (path)
+  "Return the repo \"ws/slug\" for PATH, or nil. Cached for a day.
+PATH may be a file or directory."
+  (when path
+    (let* ((expanded (expand-file-name path))
+           (dir (if (file-directory-p expanded)
+                    (file-name-as-directory expanded)
+                  (file-name-directory expanded)))
+           (root (and dir (or (locate-dominating-file dir ".git") dir)))
            (key (directory-file-name (expand-file-name root)))
            (cached (gp-watch--cache-get gp-watch--repo-cache key)))
       (if (not (eq cached 'miss))
@@ -114,11 +121,18 @@ A stored `none' represents a cached negative; it is returned as nil."
          (gp-local--dir-remote key)
          gp-watch-repo-cache-ttl)))))
 
-(defun gp-watch--current-branch (file)
-  "Return the git branch checked out for FILE's repo, or nil."
+(defalias 'gp-watch--repo-for-file #'gp-watch--repo-for-path)
+
+(defun gp-watch--current-branch (path)
+  "Return the git branch checked out for PATH's repo, or nil.
+PATH may be a file or directory."
   (require 'gp-checkout)
-  (let ((root (locate-dominating-file
-               (file-name-directory (expand-file-name file)) ".git")))
+  (let* ((expanded (and path (expand-file-name path)))
+         (dir (and expanded
+                   (if (file-directory-p expanded)
+                       (file-name-as-directory expanded)
+                     (file-name-directory expanded))))
+         (root (and dir (locate-dominating-file dir ".git"))))
     (when root (gp-checkout-current-branch root))))
 
 (defun gp-watch--pr-for (full-name branch)
@@ -215,23 +229,42 @@ so the correct buffer's branch PR is used."
 
 ;;;; Per-buffer activation ---------------------------------------------------
 
+(defun gp-watch--context-path ()
+  "Return the path that should drive watch resolution in this buffer.
+Visited files use `buffer-file-name'.  Magit buffers fall back to
+`default-directory' so their mode line can surface repo and branch PR data."
+  (or buffer-file-name
+      (and default-directory
+           (derived-mode-p 'magit-mode)
+           default-directory)))
+
+(defun gp-watch--clear-buffer-state ()
+  "Clear this buffer's cached watch state and mode-line segment."
+  (setq gp-watch--repo nil
+        gp-watch--pr-count nil
+        gp-watch--branch-pr nil
+        gp-watch-mode-line "")
+  (force-mode-line-update))
+
 (defun gp-watch--maybe-activate (&optional buffer)
   "Run the resolution pipeline for BUFFER (default current) and act.
 Draws overlays only when on a PR branch whose PR has comments for
 this file.  Errors are swallowed so opening files never breaks."
   (with-current-buffer (or buffer (current-buffer))
-    (when (and buffer-file-name gp-watch-mode)
+    (when gp-watch-mode
       (condition-case err
-          (let ((full-name (gp-watch--repo-for-file buffer-file-name)))
-            (setq gp-watch--repo full-name)
-            (when full-name
+          (if-let* ((path (gp-watch--context-path))
+                    (full-name (gp-watch--repo-for-path path)))
               (let* ((count (gp-watch--open-count full-name))
-                     (branch (gp-watch--current-branch buffer-file-name))
+                     (branch (gp-watch--current-branch path))
                      (pr (gp-watch--pr-for full-name branch)))
+                (setq gp-watch--repo full-name)
                 (gp-watch--update-mode-line count pr)
-                ;; only draw when on a PR branch *and* comments exist here
-                (when pr
-                  (gp-watch--overlay-if-comments pr full-name)))))
+                ;; only draw when on a visited file that's on a PR branch
+                ;; and comments exist here.
+                (when (and pr buffer-file-name)
+                  (gp-watch--overlay-if-comments pr full-name)))
+            (gp-watch--clear-buffer-state))
         (error
          (message "gp-watch: %s" (error-message-string err)))))))
 
@@ -275,6 +308,11 @@ overlays are drawn yet."
   "Entry from `find-file-hook'."
   (gp-watch--maybe-activate))
 
+(defun gp-watch--magit-refresh-hook ()
+  "Refresh watch state for the current Magit buffer."
+  (when (derived-mode-p 'magit-mode)
+    (gp-watch--maybe-activate)))
+
 (defvar-keymap gp-watch-mode-map
   :doc "Global keymap active while `gp-watch-mode' is on."
   "C-c b" gp-watch-command-map)
@@ -302,10 +340,16 @@ file line at point (when the file belongs to an open PR), and
                 (append mode-line-misc-info
                         '((:eval gp-watch-mode-line)))))
         (add-hook 'find-file-hook #'gp-watch--find-file-hook)
+        (with-eval-after-load 'magit
+          (add-hook 'magit-post-refresh-hook #'gp-watch--magit-refresh-hook)
+          (add-hook 'magit-mode-hook #'gp-watch--magit-refresh-hook))
         ;; activate for already-open file buffers too
         (dolist (buf (buffer-list))
           (gp-watch--maybe-activate buf)))
     (remove-hook 'find-file-hook #'gp-watch--find-file-hook)
+    (with-eval-after-load 'magit
+      (remove-hook 'magit-post-refresh-hook #'gp-watch--magit-refresh-hook)
+      (remove-hook 'magit-mode-hook #'gp-watch--magit-refresh-hook))
     (setq mode-line-misc-info
           (delete '(:eval gp-watch-mode-line) mode-line-misc-info))))
 
