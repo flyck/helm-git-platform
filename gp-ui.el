@@ -338,7 +338,7 @@ reply threads."
             (insert "\n"))
           (insert "\n"))
           (when marked
-            (add-face-text-property start (point) 'gp-comment-marked-face t))))))
+            (add-face-text-property start (point) 'gp-comment-marked-face t)))))))
 
 (defun gp--insert-link (url &optional label)
   "Insert URL as a clickable button (showing LABEL, default URL)."
