@@ -34,6 +34,7 @@
 (require 'gp-overlay)
 
 (declare-function gp-checkout-current-branch "gp-checkout")
+(declare-function gp-helm-repo-branch "gp-helm")
 (declare-function gp-helm-repo "gp-helm")
 (declare-function gp-show-pr "gp-ui")
 ;; Forward declaration: the minor-mode variable is defined below but
@@ -222,10 +223,29 @@ Bound to the mode-line comment counter.  The \"@\" in the
 `interactive' spec selects the window whose mode line was clicked,
 so the correct buffer's branch PR is used."
   (interactive "@")
-  (let ((pr gp-watch--branch-pr))
-    (if pr
-        (progn (require 'gp-ui) (gp-show-pr pr))
-      (user-error "No pull request for the current branch"))))
+  (let ((pr gp-watch--branch-pr)
+        (full-name gp-watch--repo)
+        (branch (gp-watch--current-branch (gp-watch--context-path))))
+    (cond
+     ((not pr)
+      (user-error "No pull request for the current branch"))
+     ((not (and full-name branch (fboundp 'gp-repo-pull-requests)))
+      (require 'gp-ui)
+      (gp-show-pr pr))
+     (t
+      (let* ((prs (gp-repo-pull-requests full-name))
+             (matches (cl-remove-if-not
+                       (lambda (candidate)
+                         (equal (gp-pr-source-branch candidate) branch))
+                       prs)))
+        (pcase (length matches)
+          (0 (require 'gp-ui)
+             (gp-show-pr pr))
+          (1 (require 'gp-ui)
+             (gp-show-pr (car matches)))
+          (_ (if (fboundp 'gp-helm-repo-branch)
+                 (gp-helm-repo-branch full-name branch)
+               (user-error "Multiple pull requests found for branch %s" branch)))))))))
 
 ;;;; Per-buffer activation ---------------------------------------------------
 

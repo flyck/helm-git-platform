@@ -173,5 +173,41 @@
         (should (string-match-p "BB:4" (substring-no-properties gp-watch-mode-line)))
         (should (string-match-p "💬2" (substring-no-properties gp-watch-mode-line)))))))
 
+(ert-deftest gp-test-watch-visit-branch-pr-opens-single-match ()
+  "A single branch match opens the PR detail directly."
+  (let ((shown nil)
+        (gp-watch--repo "ws/slug")
+        (gp-watch--branch-pr '((id . 7))))
+    (with-temp-buffer
+      (setq default-directory "/repo/")
+      (cl-letf (((symbol-function 'gp-watch--context-path) (lambda () "/repo/"))
+                ((symbol-function 'gp-watch--current-branch) (lambda (_path) "feat/demo"))
+                ((symbol-function 'gp-repo-pull-requests)
+                 (lambda (_full-name)
+                   '(((id . 7) (source (branch (name . "feat/demo")))))))
+                ((symbol-function 'gp-show-pr)
+                 (lambda (pr) (setq shown pr))))
+        (gp-watch-visit-branch-pr)
+        (should (= (alist-get 'id shown) 7))))))
+
+(ert-deftest gp-test-watch-visit-branch-pr-opens-helm-on-multiple-matches ()
+  "Multiple branch matches open the branch-filtered Helm picker."
+  (let ((called nil)
+        (gp-watch--repo "ws/slug")
+        (gp-watch--branch-pr '((id . 7))))
+    (with-temp-buffer
+      (setq default-directory "/repo/")
+      (cl-letf (((symbol-function 'gp-watch--context-path) (lambda () "/repo/"))
+                ((symbol-function 'gp-watch--current-branch) (lambda (_path) "feat/demo"))
+                ((symbol-function 'gp-repo-pull-requests)
+                 (lambda (_full-name)
+                   '(((id . 7) (source (branch (name . "feat/demo"))))
+                     ((id . 8) (source (branch (name . "feat/demo")))))))
+                ((symbol-function 'gp-helm-repo-branch)
+                 (lambda (full-name branch)
+                   (setq called (list full-name branch)))))
+        (gp-watch-visit-branch-pr)
+        (should (equal called '("ws/slug" "feat/demo")))))))
+
 (provide 'gp-watch-test)
 ;;; gp-watch-test.el ends here

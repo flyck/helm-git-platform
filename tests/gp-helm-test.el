@@ -116,8 +116,16 @@
     (should (gp-helm--source
              "Full" '(((id . 1) (title . "t")
                        (author (display_name . "a"))
-                       (destination (repository (slug . "r")))))
-             nil))))
+                        (destination (repository (slug . "r")))))
+              nil))))
+
+(ert-deftest gp-test-helm-prs-for-branch ()
+  (let* ((prs '(((id . 1) (source (branch (name . "feat/a"))))
+                ((id . 2) (source (branch (name . "feat/b"))))
+                ((id . 3) (source (branch (name . "feat/a"))))))
+         (matches (gp-helm--prs-for-branch prs "feat/a")))
+    (should (equal (mapcar (lambda (pr) (alist-get 'id pr)) matches)
+                   '(1 3)))))
 
 (ert-deftest gp-test-helm-default-action-is-detail ()
   "RET / click should open the detail buffer (first action)."

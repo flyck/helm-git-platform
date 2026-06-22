@@ -411,6 +411,12 @@ so empty sections are omitted."
                      (concat (gp-helm--header name prs)
                              "   (C-c g reload · C-c m merged)")))))
 
+(defun gp-helm--prs-for-branch (prs branch)
+  "Return the PRs from PRS whose source branch is BRANCH."
+  (cl-remove-if-not (lambda (pr)
+                      (equal (gp-pr-source-branch pr) branch))
+                    prs))
+
 (defun gp-helm--list-keymap (include-merged)
   "Keymap for the main PR list.
 C-c g reloads; C-c m toggles whether MERGED/DECLINED PRs are shown
@@ -644,8 +650,33 @@ rather than full-frame -- handy from the per-repo mode-line count."
             :action (gp-helm--pr-actions)
             :nomark t
             :keymap (gp-helm--list-keymap nil))
+           :truncate-lines t
+           :buffer "*helm git-platform repo*")))
+
+;;;###autoload
+(defun gp-helm-repo-branch (full-name branch)
+  "List open pull requests in FULL-NAME whose source branch is BRANCH.
+Uses the cached per-repo open-PR list and filters it client-side."
+  (interactive
+   (list (or (and (boundp 'gp-watch--repo) gp-watch--repo)
+             (read-string "Repository (owner/slug): "))
+         (read-string "Branch: ")))
+  (require 'helm)
+  (let* ((prs (bitbucket-with-cache
+               (list 'repo-prs full-name)
+               (lambda () (gp-repo-pull-requests full-name))))
+         (matches (gp-helm--prs-for-branch prs branch))
+         (gp-helm-full-frame nil))
+    (unless matches
+      (user-error "No open pull requests in %s on branch %s" full-name branch))
+    (helm :sources
+          (helm-build-sync-source (format "Open PRs · %s · %s" full-name branch)
+            :candidates (gp-helm--pr-candidates matches)
+            :action (gp-helm--pr-actions)
+            :nomark t
+            :keymap (gp-helm--list-keymap nil))
           :truncate-lines t
-          :buffer "*helm git-platform repo*")))
+          :buffer "*helm git-platform repo-branch*")))
 
 (provide 'gp-helm)
 ;;; gp-helm.el ends here

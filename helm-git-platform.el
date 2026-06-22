@@ -80,6 +80,10 @@
   "List the open pull requests in one repository." t)
 
 ;;;###autoload
+(autoload 'gp-helm-repo-branch "gp-helm"
+  "List the open pull requests in one repository on one branch." t)
+
+;;;###autoload
 (autoload 'gp-list "gp-ui"
   "Open the pull-request list (magit-section)." t)
 
