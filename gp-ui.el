@@ -606,7 +606,10 @@ block at once.  The file name remains clickable and opens the checkout."
   "Send marked comments, or the comment at point, to the terminal session."
   (interactive)
   (if-let* ((comments (gp--detail-marked-comments)))
-      (gp-ui-send-comments-to-terminal gp--pr comments)
+      (progn
+        (gp-ui-send-comments-to-terminal gp--pr comments)
+        (setq gp--detail-marked-comment-ids nil)
+        (gp--detail-rerender (current-buffer)))
     (gp-ui-send-comment-to-terminal gp--pr (gp-detail--comment-at-point))))
 
 (defun gp-detail-toggle-mark ()
