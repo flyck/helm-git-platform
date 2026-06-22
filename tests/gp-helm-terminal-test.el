@@ -45,8 +45,13 @@
          (plan (gp-helm-terminal--plan sessions repo)))
     (should (eq (plist-get plan :action) 'open))
     (should (equal (plist-get plan :directory) repo))
-    (should (equal (plist-get plan :command) "claude"))
+    (should (equal (plist-get plan :command) "claude --permission-mode auto"))
     (should (= (plist-get plan :delay) 1.2))))
+
+(ert-deftest gp-test-terminal-launch-command-keeps-explicit-permission-mode ()
+  (let ((gp-helm-terminal-launch-command "claude --permission-mode default"))
+    (should (equal (gp-helm-terminal--launch-command)
+                   "claude --permission-mode default"))))
 
 (ert-deftest gp-test-terminal-send-comment-opens-or-reuses-via-backend ()
   (let* ((pr '((id . 42)

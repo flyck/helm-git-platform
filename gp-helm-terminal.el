@@ -66,6 +66,17 @@ open a plain shell and only paste the prompt text."
     (when .inline.path
       (format "%s:%s" .inline.path (or .inline.to .inline.from "?")))))
 
+(defun gp-helm-terminal--launch-command ()
+  "Return the effective launch command for a fresh terminal session.
+When the configured command starts Claude and does not already pick a
+permission mode, append `--permission-mode auto'."
+  (let ((command gp-helm-terminal-launch-command))
+    (if (and command
+             (string-match-p "\\`claude\\(?:\\s-\\|\\'\\)" command)
+             (not (string-match-p "--permission-mode\\(?:=\\|\\s-\\)" command)))
+        (concat command " --permission-mode auto")
+      command)))
+
 (defun gp-helm-terminal--build-prompt (pr comment)
   "Build the terminal prompt text for COMMENT on PR."
   (let* ((repo (gp-pr-full-name pr))
@@ -133,7 +144,7 @@ only matching sessions are reused; otherwise a fresh session is opened."
   (if-let* ((session (gp-helm-terminal--choose-session sessions repo-dir)))
       (list :action 'reuse :session session)
     (list :action 'open :directory repo-dir
-          :command gp-helm-terminal-launch-command
+          :command (gp-helm-terminal--launch-command)
           :delay gp-helm-terminal-launch-delay)))
 
 (defun gp-helm-terminal--list-sessions ()
