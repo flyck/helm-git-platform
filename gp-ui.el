@@ -23,6 +23,7 @@
 (require 'gp-pipeline)
 
 (declare-function gp-helm "gp-helm")
+(declare-function gp-helm-terminal-send-comment "gp-helm-terminal")
 (declare-function gp-compose "gp-compose")
 (declare-function gp-overlay-pr "gp-overlay")
 (declare-function magit-section-toggle "magit-section")
@@ -112,7 +113,6 @@
   "Pipeline data plist (:current :recent) for the detail buffer, or nil.")
 (defvar-local gp--detail-comments nil
   "Cached comment list for the detail buffer (so it can redraw without refetch).")
-
 ;;;; Formatting helpers ------------------------------------------------------
 
 (defun gp--pr-heading (pr)
@@ -287,6 +287,11 @@ reply threads."
             (gp--insert-action-button
              "reply [r]" "Reply to this comment"
              (lambda () (gp-ui-reply-comment pr comment)))
+            (insert " ")
+            (gp--insert-action-button
+             "send to terminal [t]"
+             "Send this comment to the matching AI terminal session"
+             (lambda () (gp-ui-send-comment-to-terminal pr comment)))
             (insert " ")
             (if resolved
                 (gp--insert-action-button
@@ -499,6 +504,7 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "b"   #'gp-ui-back-to-list
   "o"   #'gp-detail-open-in-ide
   "r"   #'gp-detail-reply
+  "t"   #'gp-detail-send-to-terminal
   "x"   #'gp-detail-resolve
   "e"   #'gp-detail-edit
   "f"   #'gp-detail-goto-comment
@@ -537,6 +543,11 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "Reply to the comment at point."
   (interactive)
   (gp-ui-reply-comment gp--pr (gp-detail--comment-at-point)))
+
+(defun gp-detail-send-to-terminal ()
+  "Send the comment at point to the matching AI terminal session."
+  (interactive)
+  (gp-ui-send-comment-to-terminal gp--pr (gp-detail--comment-at-point)))
 
 (defun gp-detail-resolve ()
   "Toggle resolve/reopen on the comment at point."
@@ -606,6 +617,11 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
                          (when (buffer-live-p (get-buffer (gp--detail-buffer-name pr)))
                            (with-current-buffer (gp--detail-buffer-name pr)
                              (gp-detail-refresh))))))))
+
+(defun gp-ui-send-comment-to-terminal (pr comment)
+  "Send COMMENT on PR to the configured AI terminal session."
+  (require 'gp-helm-terminal)
+  (gp-helm-terminal-send-comment pr comment))
 
 (defun gp-ui-set-resolution (pr comment resolve)
   "Resolve (RESOLVE non-nil) or reopen COMMENT on PR, then refresh the buffer."

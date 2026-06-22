@@ -51,14 +51,16 @@
 (ert-deftest gp-test-render-detail-shows-comments ()
   (let ((pr (car (gp-test--mock-prs)))
         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
-    (with-temp-buffer
-      (gp-detail-mode)
-      (let ((inhibit-read-only t))
-        (gp--render-detail pr comments))
-      (let ((text (substring-no-properties (buffer-string))))
-        (should (string-match-p (format "Comments (%d)" (length comments)) text))
-        ;; an inline comment's location label shows file:line
-        (should (string-match-p "\\.ts:[0-9]+" text))))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p (format "Comments (%d)" (length comments)) text))
+          ;; an inline comment's location label shows file:line
+          (should (string-match-p "\\.ts:[0-9]+" text))
+          (should (string-match-p "send to terminal \\\[t\\\]" text)))))))
 
 (ert-deftest gp-test-comment-location-inline-vs-general ()
   (should (equal (gp--comment-location
@@ -118,6 +120,19 @@
                (lambda (&rest _) (setq called t))))
       (should-error (gp-detail-delete) :type 'user-error)
       (should-not called))))
+
+(ert-deftest gp-test-detail-send-to-terminal-delegates ()
+  (let* ((pr '((id . 7) (destination (repository (full_name . "acme/x")))))
+         (comment '((id . 55) (content (raw . "Please fix this"))))
+         (gp--pr pr)
+         (called nil))
+    (cl-letf (((symbol-function 'magit-current-section)
+               (lambda () (let ((s (gp-comment-section))) (oset s value comment) s)))
+              ((symbol-function 'gp-ui-send-comment-to-terminal)
+               (lambda (seen-pr seen-comment)
+                 (setq called (list seen-pr seen-comment)))))
+      (gp-detail-send-to-terminal)
+      (should (equal called (list pr comment))))))
 
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here
