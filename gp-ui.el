@@ -113,6 +113,8 @@
   "Pipeline data plist (:current :recent) for the detail buffer, or nil.")
 (defvar-local gp--detail-comments nil
   "Cached comment list for the detail buffer (so it can redraw without refetch).")
+(defvar-local gp--detail-refresh-token 0
+  "Monotonic token used to ignore stale async detail refresh callbacks.")
 ;;;; Formatting helpers ------------------------------------------------------
 
 (defun gp--pr-heading (pr)
@@ -1018,13 +1020,60 @@ block or delay the comments/diff view."
                (setq gp--detail-pipelines data))
              (gp--detail-rerender buf))
          (error
-          (gp-log-error "pipeline load failed: %s"
-                        (error-message-string e))))))))
+           (gp-log-error "pipeline load failed: %s"
+                         (error-message-string e))))))))
+
+(defun gp--detail-refresh-async (buf pr)
+  "Refresh BUF's PR detail asynchronously, preserving existing content.
+This refreshes the PR object and comments in the background, then rerenders
+using the buffer's already-cached stats, diff and pipelines."
+  (with-current-buffer buf
+    (cl-incf gp--detail-refresh-token)
+    (let ((token gp--detail-refresh-token)
+          (full-name (gp-pr-full-name pr))
+          (id (alist-get 'id pr))
+          (old-pr gp--pr)
+          (old-comments gp--detail-comments)
+          (new-pr nil)
+          (new-comments nil)
+          (pending 2)
+          (failed nil))
+      (cl-labels ((finish-one (ok value kind)
+                    (when (and (buffer-live-p buf)
+                               (= token (buffer-local-value 'gp--detail-refresh-token buf)))
+                      (unless ok (setq failed t))
+                      (pcase kind
+                        ('pr (setq new-pr value))
+                        ('comments (setq new-comments value)))
+                      (setq pending (1- pending))
+                      (when (zerop pending)
+                        (with-current-buffer buf
+                          (gp--detail-clear-loading)
+                          (if failed
+                              (let ((inhibit-read-only t))
+                                (goto-char (point-max))
+                                (insert (propertize "\n  refresh failed; showing cached content\n"
+                                                    'face 'error)))
+                            (gp--render-detail-into
+                             buf (or new-pr old-pr) (or new-comments old-comments)
+                             gp--detail-stats gp--detail-diff gp--detail-pipelines)
+                            (when gp-detail-show-pipelines
+                              (gp--detail-load-pipelines buf (or new-pr old-pr)))))))))
+        (bitbucket-pull-request-async
+         full-name id
+         (lambda (ok value) (finish-one ok value 'pr)))
+        (bitbucket-pull-request-comments-async
+         full-name id
+         (lambda (ok value) (finish-one ok value 'comments)))))))
 
 (defun gp-detail-refresh ()
   "Re-fetch and redraw the current detail buffer (non-blocking)."
   (interactive)
-  (gp-show-pr gp--pr))
+  (if (and gp--pr gp--detail-comments)
+      (progn
+        (gp--detail-show-loading)
+        (gp--detail-refresh-async (current-buffer) gp--pr))
+    (gp-show-pr gp--pr)))
 
 (defun gp-browse-pr ()
   "Open the PR at point in a web browser."

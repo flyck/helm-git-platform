@@ -247,7 +247,34 @@ pagination) -- intended for fan-out scans."
            (error (gp-log-error "async %s parse: %s"
                                        path (error-message-string e))))
          (funcall callback result)))
-     nil t t)))
+      nil t t)))
+
+(defun bitbucket-api-paged-async (path &optional params callback max-items)
+  "GET PATH following pagination asynchronously; call CALLBACK with (OK VALUES).
+On success, OK is non-nil and VALUES is the collected list. On any error, OK is
+nil and VALUES is nil."
+  (let ((acc '())
+        (count 0))
+    (cl-labels
+        ((finish (ok values)
+           (funcall callback ok values))
+         (step (next next-params)
+           (bitbucket-api-get-async
+            next next-params
+            (lambda (page)
+              (if (null page)
+                  (finish nil nil)
+                (let ((done nil))
+                  (dolist (v (alist-get 'values page))
+                    (push v acc)
+                    (setq count (1+ count))
+                    (when (and max-items (>= count max-items))
+                      (setq done t)))
+                  (let ((next-url (and (not done) (alist-get 'next page))))
+                    (if next-url
+                        (step next-url nil)
+                      (finish t (nreverse acc))))))))))
+      (step path params))))
 
 (defun bitbucket--parse-json (string)
   "Parse STRING as JSON into alists/lists, tolerating an empty body."
@@ -544,6 +571,14 @@ what to keep (e.g. excluding their own)."
   (bitbucket-api-request
    "GET" (format "/repositories/%s/pullrequests/%s" full-name id)))
 
+(defun bitbucket-pull-request-async (full-name id callback)
+  "Fetch PR ID in FULL-NAME asynchronously, calling CALLBACK with (OK PR)."
+  (bitbucket-api-get-async
+   (format "/repositories/%s/pullrequests/%s" full-name id)
+   nil
+   (lambda (pr)
+     (funcall callback (and pr t) pr))))
+
 (defun bitbucket-set-pull-request-draft (full-name id draft &optional title)
   "Set the draft flag of PR ID in FULL-NAME to DRAFT (a boolean).
 PUT replaces the PR, so TITLE is sent to preserve it (fetched when
@@ -604,7 +639,27 @@ Deleted comments are filtered out.  MAX-ITEMS caps the count."
                     "values.inline.path,values.inline.from,values.inline.to,"
                     "values.links.html.href,"
                     "values.parent.id,next")))
-    max-items)))
+     max-items)))
+
+(defun bitbucket-pull-request-comments-async (full-name id callback &optional max-items)
+  "Fetch comments for PR ID in FULL-NAME asynchronously.
+CALLBACK receives (OK COMMENTS). Deleted comments are filtered out."
+  (bitbucket-api-paged-async
+   (format "/repositories/%s/pullrequests/%s/comments" full-name id)
+   `(("fields" . ,(concat
+                   "values.id,values.deleted,values.content.raw,"
+                   "values.user.display_name,values.user.uuid,"
+                   "values.user.links.avatar.href,values.created_on,"
+                   "values.resolution.user.display_name,"
+                   "values.inline.path,values.inline.from,values.inline.to,"
+                   "values.links.html.href,"
+                   "values.parent.id,next")))
+   (lambda (ok comments)
+     (funcall callback ok
+              (if ok
+                  (cl-remove-if (lambda (c) (alist-get 'deleted c)) comments)
+                nil)))
+   max-items))
 
 (defun bitbucket-comment-resolved-p (comment)
   "Return non-nil if COMMENT has been marked resolved on the PR."
