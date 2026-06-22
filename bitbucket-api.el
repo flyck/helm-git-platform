@@ -368,7 +368,7 @@ UUID defaults to the authenticated user.  STATE defaults to
                      "values.destination.repository.slug,"
                      "values.comment_count,values.created_on,values.updated_on,"
                      "values.participants.role,values.participants.approved,"
-                     "values.participants.state,"
+                     "values.participants.state,values.participants.user.uuid,"
                      "values.links.html.href,next")))
      max-items)))
 
@@ -466,7 +466,7 @@ no restriction."
           "values.destination.repository.slug,"
           "values.comment_count,values.created_on,values.updated_on,"
           "values.participants.role,values.participants.approved,"
-          "values.participants.state,"
+          "values.participants.state,values.participants.user.uuid,"
           "values.links.html.href,next")
   "Field selector for repo PR-list scans.")
 
@@ -661,6 +661,37 @@ Requires Pull-requests:Write.  Returns the updated comment."
 (defun bitbucket-comment-own-p (comment uuid)
   "Return non-nil if COMMENT was written by the user with UUID."
   (equal (let-alist comment .user.uuid) uuid))
+
+(defun bitbucket-approve-pr (full-name id &optional unapprove)
+  "Approve PR ID in FULL-NAME ("ws/slug").
+With UNAPPROVE non-nil, retract a previous approval instead.
+Requires Pull-requests:Write."
+  (bitbucket-api-request
+   (if unapprove "DELETE" "POST")
+   (format "/repositories/%s/pullrequests/%s/approve" full-name id)))
+
+(defun bitbucket-request-changes-pr (full-name id &optional unrequest)
+  "Request changes on PR ID in FULL-NAME ("ws/slug").
+With UNREQUEST non-nil, retract a previous changes-request instead.
+Requires Pull-requests:Write."
+  (bitbucket-api-request
+   (if unrequest "DELETE" "POST")
+   (format "/repositories/%s/pullrequests/%s/request-changes" full-name id)))
+
+(defun bitbucket-pr-my-review-state (pr uuid)
+  "Return UUID's own review state on PR: `approved', `changes', or nil.
+Reads the PR's participants; nil means UUID has neither approved
+nor requested changes (or is not a participant)."
+  (let (state)
+    (dolist (p (alist-get 'participants pr))
+      (when (equal (let-alist p .user.uuid) uuid)
+        (let ((s (alist-get 'state p)))
+          (cond
+           ((or (equal s "approved") (eq (alist-get 'approved p) t))
+            (setq state 'approved))
+           ((equal s "changes_requested")
+            (setq state 'changes))))))
+    state))
 
 (defun bitbucket-pull-request-stats (full-name id &optional pr)
   "Return a plist (:files N :added N :removed N :commits N) for a PR.

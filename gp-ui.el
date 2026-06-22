@@ -473,6 +473,26 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
           (gp--insert-action-button
            "📝 Convert to draft [D]" "Convert this PR back to a draft"
            (lambda () (gp-ui-set-draft pr t)))))
+      ;; review actions, only on others' open PRs you can review
+      (when (and (member .state '("OPEN" nil))
+                 (not (gp-pr-authored-by-p pr (gp-user-uuid))))
+        (let ((mine (gp-pr-my-review-state pr (gp-user-uuid))))
+          (insert "\n   ")
+          (if (eq mine 'approved)
+              (gp--insert-action-button
+               "↩ Unapprove [a]" "Retract your approval of this PR"
+               (lambda () (gp-ui-set-review pr 'approved t)))
+            (gp--insert-action-button
+             "✅ Approve [a]" "Approve this pull request"
+             (lambda () (gp-ui-set-review pr 'approved nil))))
+          (insert "   ")
+          (if (eq mine 'changes)
+              (gp--insert-action-button
+               "↩ Clear request [c]" "Retract your request for changes"
+               (lambda () (gp-ui-set-review pr 'changes t)))
+            (gp--insert-action-button
+             "🚫 Request changes [c]" "Request changes on this pull request"
+             (lambda () (gp-ui-set-review pr 'changes nil))))))
       (insert "\n\n"))
     (gp--insert-changed-files)
     (gp--insert-pipelines gp--detail-pipelines)
@@ -511,6 +531,8 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "d"   #'gp-detail-show-diff
   "X"   #'gp-detail-delete        ;; delete your own comment at point
   "D"   #'gp-detail-toggle-draft
+  "a"   #'gp-detail-approve         ;; approve / unapprove (others' open PRs)
+  "c"   #'gp-detail-request-changes ;; request changes / clear (others' open PRs)
   "RET" #'gp-detail-ret
   "w"   #'gp-browse-pr
   ;; pipelines (pipeline-level stop/trigger; per-step log + manual run)
@@ -694,6 +716,41 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   (message "PR #%s %s" (alist-get 'id pr)
            (if draft "converted to draft" "marked ready for review"))
   (gp-detail-refresh))
+
+(defun gp-ui-set-review (pr kind retract)
+  "Set your review on PR.
+KIND is `approved' or `changes'; RETRACT non-nil withdraws it.
+Refreshes the detail buffer afterwards."
+  (let ((full-name (gp-pr-full-name pr))
+        (id (alist-get 'id pr)))
+    (pcase kind
+      ('approved (gp-approve-pr full-name id retract))
+      ('changes  (gp-request-changes-pr full-name id retract)))
+    (message "PR #%s %s" id
+             (pcase (cons kind retract)
+               ('(approved . nil) "approved")
+               ('(approved . t)   "approval retracted")
+               ('(changes . nil)  "changes requested")
+               ('(changes . t)    "changes-request cleared")))
+    (gp-detail-refresh)))
+
+(defun gp-detail-approve ()
+  "Approve the current PR, or retract if you already approved it."
+  (interactive)
+  (let ((pr gp--pr))
+    (when (gp-pr-authored-by-p pr (gp-user-uuid))
+      (user-error "You cannot approve your own PR"))
+    (gp-ui-set-review pr 'approved
+                      (eq (gp-pr-my-review-state pr (gp-user-uuid)) 'approved))))
+
+(defun gp-detail-request-changes ()
+  "Request changes on the current PR, or retract if you already did."
+  (interactive)
+  (let ((pr gp--pr))
+    (when (gp-pr-authored-by-p pr (gp-user-uuid))
+      (user-error "You cannot request changes on your own PR"))
+    (gp-ui-set-review pr 'changes
+                      (eq (gp-pr-my-review-state pr (gp-user-uuid)) 'changes))))
 
 (defun gp-detail-toggle-draft ()
   "Toggle draft/ready on the current PR (must be your own)."
