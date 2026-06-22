@@ -22,6 +22,8 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'helm)
+(require 'helm-source)
 (require 'bitbucket-api)
 (require 'git-platform)
 (require 'gp-local)
