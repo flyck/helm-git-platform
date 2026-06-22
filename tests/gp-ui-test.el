@@ -167,6 +167,16 @@
       (gp-detail-send-to-terminal)
       (should (equal called (list pr (list comment-1 comment-2)))))))
 
+(ert-deftest gp-test-detail-open-local-opens-magit-without-checkout ()
+  (let* ((pr '((id . 7) (destination (repository (full_name . "acme/x")))))
+         (gp--pr pr)
+         (opened nil))
+    (cl-letf (((symbol-function 'require) (lambda (feature &optional _filename _noerror) (eq feature 'magit)))
+              ((symbol-function 'gp-local-find-checkout) (lambda (_full-name) "/tmp/repo"))
+              ((symbol-function 'magit-status) (lambda (dir) (setq opened dir))))
+      (gp-detail-open-local)
+      (should (equal opened "/tmp/repo")))))
+
 (ert-deftest gp-test-render-detail-shows-mark-action-for-comments ()
   (let ((pr (car (gp-test--mock-prs)))
         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))

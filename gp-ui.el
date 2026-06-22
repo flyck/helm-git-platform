@@ -33,6 +33,7 @@
 (defvar magit-section-highlight-current)
 (defvar gp-checkout-remote)
 (declare-function magit-diff-range "magit-diff")
+(declare-function magit-status "magit-status")
 (declare-function magit-refresh "magit-mode")
 (declare-function gp-overlay--avatar-image "gp-overlay")
 
@@ -374,34 +375,30 @@ reply threads."
 
 (defun gp--insert-changed-files ()
   "Insert a collapsable changed-files section for the detail buffer's PR.
-Each file is itself collapsable: its heading shows +/- line counts
-and a clickable name (opens the file in the checkout); expanding it
-\(TAB) reveals that file's diff, fontified like `diff-mode'.  Uses
-the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
+Each file is a single line inside the section so `p' and `n' can skip the whole
+block at once.  The file name remains clickable and opens the checkout."
   (let ((files (plist-get gp--detail-stats :file-list)))
     (when files
       (magit-insert-section (gp-files nil gp-detail-files-collapsed)
         (magit-insert-heading (format "Changed files (%d)" (length files)))
         (dolist (f files)
-          (let* ((path (plist-get f :path))
-                 (chunk (cdr (assoc path gp--detail-diff))))
-            ;; file diffs start collapsed; TAB on the file expands its hunks
-            (magit-insert-section (gp-file-section f (and chunk t))
-              (magit-insert-heading
-                (concat
-                 "  "
-                 (propertize path 'face 'gp-link-face
-                             'help-echo "TAB: show diff · RET: open in checkout")
-                 "  "
-                 (propertize (format "+%d" (plist-get f :added)) 'face 'diff-added)
-                 " "
-                 (propertize (format "-%d" (plist-get f :removed)) 'face 'diff-removed)
-                 (let ((st (plist-get f :status)))
-                   (if (member st '("added" "removed" "renamed"))
-                       (propertize (format "  (%s)" st) 'face 'shadow) ""))))
-              (when chunk
-                (insert (gp--fontify-diff chunk))
-                (unless (bolp) (insert "\n"))))))
+          (let ((path (plist-get f :path)))
+            (insert "  ")
+            (insert-text-button path
+                                'face 'gp-link-face
+                                'follow-link t
+                                'help-echo "RET/mouse-1: open in checkout"
+                                'gp-file-path path
+                                'action (lambda (_button)
+                                          (gp-ui-open-file gp--pr path)))
+            (insert "  ")
+            (insert (propertize (format "+%d" (plist-get f :added)) 'face 'diff-added))
+            (insert " ")
+            (insert (propertize (format "-%d" (plist-get f :removed)) 'face 'diff-removed))
+            (let ((st (plist-get f :status)))
+              (when (member st '("added" "removed" "renamed"))
+                (insert (propertize (format "  (%s)" st) 'face 'shadow))))
+            (insert "\n")))
         (insert "\n")))))
 
 (defun gp-ui-open-file (pr path)
@@ -414,10 +411,10 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
 (defun gp-detail-visit-file ()
   "Open the changed file at point (detail buffer)."
   (interactive)
-  (let ((sec (magit-current-section)))
-    (if (and sec (object-of-class-p sec 'gp-file-section))
-        (gp-ui-open-file gp--pr (plist-get (oref sec value) :path))
-      (user-error "Point is not on a changed file"))))
+  (if-let* ((button (button-at (point)))
+            (path (button-get button 'gp-file-path)))
+      (gp-ui-open-file gp--pr path)
+    (user-error "Point is not on a changed file")))
 
 (defun gp--render-detail (pr comments)
   "Render PR and its COMMENTS into the current detail buffer."
@@ -480,7 +477,12 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
        (lambda () (gp-ui-back-to-list)))
       (insert "   ")
       (gp--insert-action-button
-       "🖥  Autostash & checkout [o]"
+       "🖥  Open local repo [o]"
+       "Open the current repo in Magit without changing branches"
+       (lambda () (gp-detail-open-local)))
+      (insert "   ")
+      (gp--insert-action-button
+       "🖥  Autostash & checkout [O]"
        "Stash any local changes and check out the PR branch, then open the repo (unlike 'd', which only shows the diff)"
        (lambda () (gp-ui-open-in-ide pr)))
       (insert "   ")
@@ -555,7 +557,8 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   :parent magit-section-mode-map
   "g"   #'gp-detail-refresh
   "b"   #'gp-ui-back-to-list
-  "o"   #'gp-detail-open-in-ide
+  "o"   #'gp-detail-open-local
+  "O"   #'gp-detail-open-in-ide
   "r"   #'gp-detail-reply
   "t"   #'gp-detail-send-to-terminal
   "x"   #'gp-detail-resolve
@@ -649,7 +652,8 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   (interactive)
   (let ((sec (magit-current-section)))
     (cond
-     ((and sec (object-of-class-p sec 'gp-file-section))
+     ((and (button-at (point))
+           (button-get (button-at (point)) 'gp-file-path))
       (gp-detail-visit-file))
      ((and sec (object-of-class-p sec 'gp-comment-section)
            (let-alist (oref sec value) .inline.path))
@@ -670,6 +674,18 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "Open the current detail buffer's PR in the IDE."
   (interactive)
   (gp-ui-open-in-ide gp--pr))
+
+(defun gp-detail-open-local ()
+  "Open the current detail buffer's repo in Magit without switching branches."
+  (interactive)
+  (unless (require 'magit nil t)
+    (user-error "Magit is not available"))
+  (let* ((full-name (gp-pr-full-name gp--pr))
+         (dir (gp-local-find-checkout full-name)))
+    (unless dir
+      (user-error "No local checkout of %s under %s"
+                  full-name gp-local-git-root))
+    (magit-status dir)))
 
 ;;;; Section accessors -------------------------------------------------------
 
