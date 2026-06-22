@@ -277,7 +277,7 @@ reply threads."
             (insert "\n"))
           (when-let* ((url (let-alist comment .links.html.href)))
             (insert ind "  ")
-            (gp--insert-link url "↗ view in browser")
+            (gp--insert-link url "↗ view in browser [w]")
             (insert "\n"))
           (let ((body (string-trim-right
                        (gp--render-markdown (or .content.raw "")))))
@@ -534,7 +534,7 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "a"   #'gp-detail-approve         ;; approve / unapprove (others' open PRs)
   "c"   #'gp-detail-request-changes ;; request changes / clear (others' open PRs)
   "RET" #'gp-detail-ret
-  "w"   #'gp-browse-pr
+  "w"   #'gp-detail-browse
   ;; pipelines (pipeline-level stop/trigger; per-step log + manual run)
   "s"   #'gp-detail-pipeline-stop
   "T"   #'gp-detail-pipeline-trigger
@@ -585,6 +585,17 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
     (unless (gp-comment-own-p c (gp-user-uuid))
       (user-error "You can only edit your own comments"))
     (gp-ui-edit-comment gp--pr c)))
+
+(defun gp-detail-browse ()
+  "Browse the comment at point, or the PR when point is elsewhere."
+  (interactive)
+  (let ((sec (magit-current-section)))
+    (if (and sec (object-of-class-p sec 'gp-comment-section))
+        (let ((url (let-alist (oref sec value) .links.html.href)))
+          (if url
+              (browse-url url)
+            (user-error "No URL for this comment")))
+      (gp-browse-pr))))
 
 (defun gp-detail-ret ()
   "Context action: open a changed file, jump to an inline comment, else fold."

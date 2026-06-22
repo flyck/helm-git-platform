@@ -60,7 +60,8 @@
           (should (string-match-p (format "Comments (%d)" (length comments)) text))
           ;; an inline comment's location label shows file:line
           (should (string-match-p "\\.ts:[0-9]+" text))
-          (should (string-match-p "send to terminal \\\[t\\\]" text)))))))
+          (should (string-match-p "send to terminal \\\[t\\\]" text))
+          (should (string-match-p "view in browser \\\[w\\\]" text)))))))
 
 (ert-deftest gp-test-comment-location-inline-vs-general ()
   (should (equal (gp--comment-location
@@ -133,6 +134,16 @@
                  (setq called (list seen-pr seen-comment)))))
       (gp-detail-send-to-terminal)
       (should (equal called (list pr comment))))))
+
+(ert-deftest gp-test-detail-browse-opens-comment-url-at-comment-point ()
+  (let ((comment '((links (html (href . "https://example.test/comment/1")))))
+        (opened nil))
+    (cl-letf (((symbol-function 'magit-current-section)
+               (lambda () (let ((s (gp-comment-section))) (oset s value comment) s)))
+              ((symbol-function 'browse-url)
+               (lambda (url &rest _) (setq opened url))))
+      (gp-detail-browse)
+      (should (equal opened "https://example.test/comment/1")))))
 
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here
