@@ -95,6 +95,28 @@ permission mode, append `--permission-mode auto'."
                  body))
      "\n")))
 
+(defun gp-helm-terminal--build-multi-prompt (pr comments)
+  "Build one terminal prompt covering COMMENTS on PR."
+  (if (= (length comments) 1)
+      (gp-helm-terminal--build-prompt pr (car comments))
+    (let* ((repo (gp-pr-full-name pr))
+           (pr-id (alist-get 'id pr))
+           (title (or (alist-get 'title pr) ""))
+           (blocks
+            (cl-loop for comment in comments
+                     for idx from 1
+                     for location = (or (gp-helm-terminal--comment-location comment) "general")
+                     for body = (string-trim (or (let-alist comment .content.raw) ""))
+                     collect (format "%d. Comment: %s\n%s" idx location body))))
+      (string-join
+       (append (list "please implement these comments:"
+                     ""
+                     (format "Repo: %s" repo)
+                     (format "PR: #%s %s" pr-id title)
+                     "")
+               blocks)
+       "\n\n"))))
+
 (defun gp-helm-terminal--path-match-p (session-path repo-dir)
   "Return non-nil when SESSION-PATH belongs to REPO-DIR."
   (let ((session-path (gp-helm-terminal--normalize-path session-path))
@@ -190,9 +212,13 @@ terminal session instead of aborting the handoff."
 
 (defun gp-helm-terminal-send-comment (pr comment)
   "Send COMMENT from PR to the configured terminal backend."
+  (gp-helm-terminal-send-comments pr (list comment)))
+
+(defun gp-helm-terminal-send-comments (pr comments)
+  "Send COMMENTS from PR to the configured terminal backend."
   (condition-case err
       (let* ((dir (gp-local-ensure-checkout pr))
-             (text (gp-helm-terminal--build-prompt pr comment))
+             (text (gp-helm-terminal--build-multi-prompt pr comments))
              (plan (gp-helm-terminal--plan (gp-helm-terminal--safe-list-sessions) dir)))
         (gp-log 'info "terminal handoff: repo=%s pr=%s dir=%s action=%s"
                 (gp-pr-full-name pr) (alist-get 'id pr) dir (plist-get plan :action))

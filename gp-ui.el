@@ -24,6 +24,7 @@
 
 (declare-function gp-helm "gp-helm")
 (declare-function gp-helm-terminal-send-comment "gp-helm-terminal")
+(declare-function gp-helm-terminal-send-comments "gp-helm-terminal")
 (declare-function gp-compose "gp-compose")
 (declare-function gp-overlay-pr "gp-overlay")
 (declare-function magit-section-toggle "magit-section")
@@ -90,6 +91,9 @@
   "Face for the large PR title in the detail buffer." :group 'bitbucket-faces)
 (defface gp-link-face '((t :inherit link))
   "Face for the clickable PR link." :group 'bitbucket-faces)
+(defface gp-comment-marked-face '((t :inherit highlight :extend t))
+  "Face for comments marked for batch terminal handoff."
+  :group 'bitbucket-faces)
 
 ;;;; Section types -----------------------------------------------------------
 
@@ -113,6 +117,8 @@
   "Pipeline data plist (:current :recent) for the detail buffer, or nil.")
 (defvar-local gp--detail-comments nil
   "Cached comment list for the detail buffer (so it can redraw without refetch).")
+(defvar-local gp--detail-marked-comment-ids nil
+  "Comment ids marked for batch terminal handoff in the detail buffer.")
 (defvar-local gp--detail-refresh-token 0
   "Monotonic token used to ignore stale async detail refresh callbacks.")
 ;;;; Formatting helpers ------------------------------------------------------
@@ -243,6 +249,16 @@ comments keep their original order."
       (dolist (root (nreverse roots)) (walk root 0)))
     (nreverse result)))
 
+(defun gp--detail-comment-marked-p (comment)
+  "Return non-nil when COMMENT is marked for batch terminal handoff."
+  (memq (alist-get 'id comment) gp--detail-marked-comment-ids))
+
+(defun gp--detail-marked-comments ()
+  "Return marked comments from the detail buffer in display order."
+  (let ((ids gp--detail-marked-comment-ids))
+    (cl-remove-if-not (lambda (comment) (memq (alist-get 'id comment) ids))
+                      gp--detail-comments)))
+
 (defun gp--insert-comment (comment &optional pr depth)
   "Insert a COMMENT section, with markdown body and action buttons.
 PR is the enclosing pull request, needed for the reply/resolve
@@ -251,12 +267,14 @@ reply threads."
   (let* ((depth (or depth 0))
          (ind (make-string (* depth 4) ?\s))
          (resolved (gp-comment-resolved-p comment))
+         (marked (and pr (gp--detail-comment-marked-p comment)))
          ;; prefix every line of STR with the thread indent
          (pad (lambda (str) (replace-regexp-in-string "^" ind str))))
     ;; resolved comments start collapsed (HIDE arg); TAB expands them
     (magit-insert-section (gp-comment-section comment resolved)
-      (let-alist comment
-        (progn
+      (let ((start (point)))
+        (let-alist comment
+          (progn
           (magit-insert-heading
             (concat
              ind
@@ -291,6 +309,11 @@ reply threads."
              (lambda () (gp-ui-reply-comment pr comment)))
             (insert " ")
             (gp--insert-action-button
+             (if marked "unmark [m]" "mark [m]")
+             "Toggle whether this comment participates in batch terminal handoff"
+             (lambda () (gp-detail-toggle-mark)))
+            (insert " ")
+            (gp--insert-action-button
              "send to terminal [t]"
              "Send this comment to the matching AI terminal session"
              (lambda () (gp-ui-send-comment-to-terminal pr comment)))
@@ -312,7 +335,9 @@ reply threads."
                "delete" "Delete this comment"
                (lambda () (gp-ui-delete-comment pr comment))))
             (insert "\n"))
-          (insert "\n"))))))
+          (insert "\n"))
+          (when marked
+            (add-face-text-property start (point) 'gp-comment-marked-face t))))))
 
 (defun gp--insert-link (url &optional label)
   "Insert URL as a clickable button (showing LABEL, default URL)."
@@ -464,6 +489,12 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
        (lambda () (gp-ui-show-diff-in-magit pr)))
       (insert "   ")
       (gp--insert-link .links.html.href "🔗 View in browser [w]")
+      (when gp--detail-marked-comment-ids
+        (insert "   ")
+        (gp--insert-action-button
+         (format "📤 Send %d marked [t]" (length gp--detail-marked-comment-ids))
+         "Send all marked comments to the matching AI terminal session"
+         (lambda () (gp-detail-send-to-terminal))))
       ;; draft toggle, only on the user's own open PRs
       (when (and (gp-pr-authored-by-p pr (gp-user-uuid))
                  (member .state '("OPEN" nil)))
@@ -540,7 +571,7 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   ;; pipelines (pipeline-level stop/trigger; per-step log + manual run)
   "s"   #'gp-detail-pipeline-stop
   "T"   #'gp-detail-pipeline-trigger
-  "m"   #'gp-detail-pipeline-run-manual
+  "m"   #'gp-detail-toggle-mark
   "l"   #'gp-detail-pipeline-step-log)
 
 (defun gp-detail-show-diff ()
@@ -569,9 +600,23 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   (gp-ui-reply-comment gp--pr (gp-detail--comment-at-point)))
 
 (defun gp-detail-send-to-terminal ()
-  "Send the comment at point to the matching AI terminal session."
+  "Send marked comments, or the comment at point, to the terminal session."
   (interactive)
-  (gp-ui-send-comment-to-terminal gp--pr (gp-detail--comment-at-point)))
+  (if-let* ((comments (gp--detail-marked-comments)))
+      (gp-ui-send-comments-to-terminal gp--pr comments)
+    (gp-ui-send-comment-to-terminal gp--pr (gp-detail--comment-at-point))))
+
+(defun gp-detail-toggle-mark ()
+  "Toggle whether the comment at point is marked for batch handoff."
+  (interactive)
+  (let* ((comment (gp-detail--comment-at-point))
+         (id (alist-get 'id comment)))
+    (if (memq id gp--detail-marked-comment-ids)
+        (setq gp--detail-marked-comment-ids (delq id gp--detail-marked-comment-ids))
+      (push id gp--detail-marked-comment-ids))
+    (gp--detail-rerender (current-buffer))
+    (message "%s comment #%s"
+             (if (memq id gp--detail-marked-comment-ids) "Marked" "Unmarked") id)))
 
 (defun gp-detail-resolve ()
   "Toggle resolve/reopen on the comment at point."
@@ -657,6 +702,11 @@ the buffer-cached `gp--detail-stats' and `gp--detail-diff'."
   "Send COMMENT on PR to the configured AI terminal session."
   (require 'gp-helm-terminal)
   (gp-helm-terminal-send-comment pr comment))
+
+(defun gp-ui-send-comments-to-terminal (pr comments)
+  "Send COMMENTS on PR to the configured AI terminal session as one batch."
+  (require 'gp-helm-terminal)
+  (gp-helm-terminal-send-comments pr comments))
 
 (defun gp-ui-set-resolution (pr comment resolve)
   "Resolve (RESOLVE non-nil) or reopen COMMENT on PR, then refresh the buffer."

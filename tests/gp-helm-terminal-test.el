@@ -24,6 +24,18 @@
     (should (string-match-p "Comment: src/app.ts:17" text))
     (should (string-match-p "Please rename this helper\." text))))
 
+(ert-deftest gp-test-terminal-build-multi-prompt-numbers-comments ()
+  (let* ((pr '((id . 42)
+               (title . "Implement thing")
+               (destination (repository (full_name . "acme/repo")))))
+         (comments '(((content (raw . "First fix")) (inline (path . "a.ts") (to . 3)))
+                     ((content (raw . "Second fix")))))
+         (text (gp-helm-terminal--build-multi-prompt pr comments)))
+    (should (string-match-p "please implement these comments:" text))
+    (should (string-match-p "1\\. Comment: a\\.ts:3" text))
+    (should (string-match-p "2\\. Comment: general" text))
+    (should (string-match-p "Second fix" text))))
+
 (ert-deftest gp-test-terminal-choose-session-prefers-exact-ai-match ()
   (let* ((repo "/tmp/repo")
          (sessions (list (make-gp-helm-terminal-session
