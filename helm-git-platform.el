@@ -52,6 +52,7 @@
 (require 'gp-local)
 (require 'gp-checkout)
 (require 'gp-compose)
+(require 'gp-create)
 (require 'gp-helm-terminal)
 (require 'gp-pipeline)
 (require 'gp-overlay)
@@ -83,6 +84,10 @@
 ;;;###autoload
 (autoload 'gp-helm-repo-branch "gp-helm"
   "List the open pull requests in one repository on one branch." t)
+
+;;;###autoload
+(autoload 'gp-create-pr "gp-create"
+  "Open the pull-request creation mask for a branch." t)
 
 ;;;###autoload
 (autoload 'gp-list "gp-ui"

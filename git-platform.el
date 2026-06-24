@@ -106,6 +106,13 @@ ARGLIST may contain &optional; &rest is not supported here."
   "Request changes on PR FULL-NAME/ID (UNREQUEST non-nil retracts it).")
 (gp-defop open-pr-for-branch (full-name branch)
   "Return the open PR in FULL-NAME whose source branch is BRANCH.")
+(gp-defop repo-default-branch (full-name)
+  "Return repo FULL-NAME's default (main) branch name, or nil.")
+(gp-defop repo-default-reviewers (full-name)
+  "Return repo FULL-NAME's default reviewers (list of user alists).")
+(gp-defop create-pull-request (full-name source dest title &optional description draft close-source-branch reviewer-uuids)
+  "Open a PR in FULL-NAME from SOURCE into DEST with TITLE.
+DESCRIPTION/DRAFT/CLOSE-SOURCE-BRANCH/REVIEWER-UUIDS are optional.")
 (gp-defop repo-open-pr-count (full-name)
   "Return the open-PR count for repo FULL-NAME.")
 (gp-defop repo-pull-requests (full-name &optional state)

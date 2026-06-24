@@ -36,6 +36,11 @@
 (declare-function helm-get-selection "helm-core")
 (declare-function helm-update "helm-core")
 (declare-function gp-compose "gp-compose")
+(declare-function gp-create-pr "gp-create")
+(declare-function gp-watch--repo-for-path "gp-watch")
+(declare-function gp-watch--current-branch "gp-watch")
+(declare-function gp-watch--pr-for "gp-watch")
+(declare-function gp-local-find-checkout "gp-local")
 (defvar helm-map)
 (defvar helm-alive-p)
 
@@ -449,11 +454,11 @@ C-c g reloads; C-c m toggles whether MERGED/DECLINED PRs are shown
     (define-key map (kbd "C-c g")
                 (lambda () (interactive)
                   (helm-run-after-exit
-                   (lambda () (bitbucket-cache-clear) (gp-helm include-merged)))))
+                   (lambda () (bitbucket-cache-clear) (gp-helm--list include-merged)))))
     (define-key map (kbd "C-c m")
                 (lambda () (interactive)
                   (helm-run-after-exit
-                   (lambda () (gp-helm (not include-merged))))))
+                   (lambda () (gp-helm--list (not include-merged))))))
     map))
 
 (defvar gp-helm--reviewing-cache nil
@@ -471,9 +476,40 @@ Symbol `loading' while the background scan runs.")
     (gp-helm--pr-candidates gp-helm--reviewing-cache))
    (t nil)))
 
+(defcustom gp-helm-create-from-magit t
+  "When non-nil, `gp-helm' from a magit buffer on a branch with no
+open PR opens the PR-creation mask instead of the workspace list.
+Set to nil to always get the PR list."
+  :type 'boolean :group 'bitbucket)
+
+(defun gp-helm--magit-create-context ()
+  "Return (DIR FULL-NAME BRANCH) to offer PR creation, or nil.
+Non-nil only in a magit buffer whose repo+branch resolve and have
+no open PR, and whose branch is not the repo's default branch."
+  (when (and gp-helm-create-from-magit
+             (derived-mode-p 'magit-mode)
+             default-directory)
+    (require 'gp-watch)
+    (let* ((dir (expand-file-name default-directory))
+           (full-name (gp-watch--repo-for-path dir))
+           (branch (and full-name (gp-watch--current-branch dir))))
+      (when (and full-name branch
+                 (not (member branch '("main" "master")))
+                 (not (equal branch (gp-repo-default-branch full-name)))
+                 (not (gp-watch--pr-for full-name branch)))
+        (let ((root (or (and (fboundp 'gp-local-find-checkout)
+                             (gp-local-find-checkout full-name))
+                        (locate-dominating-file dir ".git")
+                        dir)))
+          (list (directory-file-name root) full-name branch))))))
+
 ;;;###autoload
 (defun gp-helm (&optional include-merged)
   "List workspace pull requests with Helm, without freezing.
+
+When called from a magit buffer on a branch that has no open pull
+request (and is not the repo's default branch), open the
+PR-creation mask instead -- see `gp-helm-create-from-magit'.
 
 Your authored PRs and drafts appear immediately; the \"Needs my
 review\" section shows a loading row and fills in once a
@@ -488,6 +524,37 @@ By default only OPEN PRs are shown; with a prefix argument, or
 \\`C-c m' in the list, INCLUDE-MERGED also shows MERGED/DECLINED."
   (interactive "P")
   (require 'helm)
+  (let (matches)
+    (cond
+     ;; magit buffer, branch with no open PR -> offer to create one
+     ((and (not include-merged)
+           (setq matches (gp-helm--magit-create-context)))
+      (require 'gp-create)
+      (gp-create-pr (nth 0 matches) (nth 1 matches) (nth 2 matches)))
+     ;; magit buffer, branch with exactly one open PR -> open it directly
+     ((and (not include-merged)
+           (setq matches (gp-helm--magit-branch-prs))
+           (= (length matches) 1))
+      (require 'gp-ui)
+      (gp-show-pr (car matches)))
+     (t (gp-helm--list include-merged)))))
+
+(defun gp-helm--magit-branch-prs ()
+  "Return the open PRs for the current magit buffer's repo+branch, or nil.
+Nil outside a magit buffer, or when the repo/branch cannot be
+resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
+  (when (and (derived-mode-p 'magit-mode) default-directory)
+    (require 'gp-watch)
+    (let* ((dir (expand-file-name default-directory))
+           (full-name (gp-watch--repo-for-path dir))
+           (branch (and full-name (gp-watch--current-branch dir))))
+      (when (and full-name branch (fboundp 'gp-repo-pull-requests))
+        (cl-remove-if-not
+         (lambda (pr) (equal (gp-pr-source-branch pr) branch))
+         (gp-repo-pull-requests full-name))))))
+
+(defun gp-helm--list (include-merged)
+  "Show the Helm workspace PR list.  See `gp-helm' for INCLUDE-MERGED."
   (let* ((uuid (gp-user-uuid))
          (states (if include-merged '("OPEN" "MERGED" "DECLINED") '("OPEN")))
          (mine-prs (bitbucket-with-cache

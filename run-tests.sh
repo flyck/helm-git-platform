@@ -16,6 +16,7 @@ emacs --batch -Q \
   -l gp-local.el \
   -l gp-checkout.el \
   -l gp-compose.el \
+  -l gp-create.el \
   -l gp-helm-terminal.el \
   -l gp-helm-terminal-iterm2.el \
   -l gp-pipeline.el \
@@ -34,6 +35,7 @@ emacs --batch -Q \
   -l tests/gp-local-test.el \
   -l tests/gp-checkout-test.el \
   -l tests/gp-compose-test.el \
+  -l tests/gp-create-test.el \
   -l tests/gp-helm-terminal-test.el \
   -l tests/gp-ui-test.el \
   -l tests/gp-pipeline-test.el \

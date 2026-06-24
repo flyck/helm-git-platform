@@ -607,6 +607,68 @@ branch, returning the first (most recent) match."
                     "values.comment_count,values.links.html.href,next")))
     1)))
 
+(defun bitbucket-repo-default-branch (full-name)
+  "Return repo FULL-NAME's default (main) branch name, or nil.
+Reads the repository's `mainbranch' field (needs Repositories:Read).
+Cached, since it changes rarely."
+  (bitbucket-with-cache
+   (list 'default-branch full-name)
+   (lambda ()
+     (ignore-errors
+       (let-alist (bitbucket-api-request
+                   "GET" (format "/repositories/%s" full-name)
+                   '(("fields" . "mainbranch.name")))
+         .mainbranch.name)))))
+
+(cl-defun bitbucket-create-pull-request
+    (full-name source dest title
+     &key description draft close-source-branch reviewer-uuids)
+  "Open a pull request in FULL-NAME from branch SOURCE into DEST.
+TITLE and optional DESCRIPTION (Markdown) seed it.  Keyword args:
+DRAFT opens it as a draft; CLOSE-SOURCE-BRANCH marks the source
+branch to be deleted on merge; REVIEWER-UUIDS is a list of account
+uuids to add as reviewers.  Returns the created PR object.
+Requires a token with Pull-requests:Write; SOURCE must already
+exist on the remote (push it first)."
+  (let ((data (list (cons 'title title)
+                    (cons 'source (list (cons 'branch (list (cons 'name source)))))
+                    (cons 'destination (list (cons 'branch (list (cons 'name dest))))))))
+    (when (and description (not (string-empty-p description)))
+      (setq data (append data (list (cons 'description description)))))
+    (when draft
+      (setq data (append data (list (cons 'draft t)))))
+    (when close-source-branch
+      (setq data (append data (list (cons 'close_source_branch t)))))
+    (when reviewer-uuids
+      (setq data (append data
+                         (list (cons 'reviewers
+                                     (mapcar (lambda (u) (list (cons 'uuid u)))
+                                             reviewer-uuids))))))
+    (bitbucket-api-request
+     "POST" (format "/repositories/%s/pullrequests" full-name)
+     nil data)))
+
+(defun bitbucket-repo-default-reviewers (full-name)
+  "Return repo FULL-NAME's default reviewers as a list of user alists.
+Each element has at least `uuid' and `display_name'.  Empty list
+when none are configured (needs Repositories:Read).
+
+A non-empty result is cached; an empty result (whether genuinely
+empty or from a transient error) is NOT cached, so a later open
+re-fetches rather than sticking on a stale empty list."
+  (let ((key (list 'default-reviewers full-name)))
+    (let ((hit (bitbucket-cache-get key)))
+      (if (car hit)
+          (cdr hit)
+        (let ((reviewers
+               (ignore-errors
+                 (bitbucket-api-paged
+                  (format "/repositories/%s/default-reviewers" full-name)
+                  '(("fields" . "values.uuid,values.display_name,values.nickname,next"))))))
+          (when reviewers
+            (bitbucket-cache-put key reviewers))
+          reviewers)))))
+
 (defun bitbucket-repo-open-pr-count (full-name)
   "Return the number of OPEN pull requests in repo FULL-NAME.
 Cheap: requests a single-item page and reads the `size' total."

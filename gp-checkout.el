@@ -66,6 +66,36 @@ is an error."
   (let ((res (gp-checkout--git dir "rev-parse" "--abbrev-ref" "HEAD")))
     (when (= (car res) 0) (cdr res))))
 
+(defun gp-checkout-branch-on-remote-p (dir branch &optional remote)
+  "Return non-nil if BRANCH exists on REMOTE (default origin) for DIR."
+  (let ((res (gp-checkout--git dir "ls-remote" "--heads"
+                              (or remote gp-checkout-remote) branch)))
+    (and (= (car res) 0) (not (string-empty-p (cdr res))))))
+
+(defun gp-checkout-commit-summaries (dir base &optional branch)
+  "Return the commit summary lines on BRANCH (default HEAD) not on BASE in DIR.
+Newest first, as `git log BASE..BRANCH --format=%s' produces.  BASE
+may be a local or `origin/'-qualified ref; if the plain BASE is
+unknown we retry against `origin/BASE'.  Returns nil on failure."
+  (let* ((range (lambda (b) (format "%s..%s" b (or branch "HEAD"))))
+         (run (lambda (b)
+                (gp-checkout--git dir "log" (funcall range b) "--format=%s")))
+         (res (funcall run base)))
+    (when (/= (car res) 0)
+      (setq res (funcall run (concat gp-checkout-remote "/" base))))
+    (when (= (car res) 0)
+      (split-string (cdr res) "\n" t))))
+
+(defun gp-checkout-push-branch (dir branch &optional remote)
+  "Push BRANCH from DIR to REMOTE (default origin), setting upstream.
+Refuses to push a branch named \"main\" or \"master\".  Returns a
+plist (:ok BOOL :log STRING)."
+  (when (member branch '("main" "master"))
+    (user-error "Refusing to push protected branch %s" branch))
+  (let ((res (gp-checkout--git dir "push" "--set-upstream"
+                              (or remote gp-checkout-remote) branch)))
+    (list :ok (= (car res) 0) :log (cdr res))))
+
 ;;;; Pure planning -----------------------------------------------------------
 
 (defun gp-checkout--stash-name (branch)

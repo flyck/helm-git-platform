@@ -55,6 +55,16 @@
   (bitbucket-request-changes-pr full-name id unrequest))
 (cl-defmethod gp--open-pr-for-branch ((_ git-platform-bitbucket) full-name branch)
   (bitbucket-open-pr-for-branch full-name branch))
+(cl-defmethod gp--repo-default-branch ((_ git-platform-bitbucket) full-name)
+  (bitbucket-repo-default-branch full-name))
+(cl-defmethod gp--repo-default-reviewers ((_ git-platform-bitbucket) full-name)
+  (bitbucket-repo-default-reviewers full-name))
+(cl-defmethod gp--create-pull-request ((_ git-platform-bitbucket) full-name source dest title &optional description draft close-source-branch reviewer-uuids)
+  (bitbucket-create-pull-request full-name source dest title
+                                 :description description
+                                 :draft draft
+                                 :close-source-branch close-source-branch
+                                 :reviewer-uuids reviewer-uuids))
 (cl-defmethod gp--repo-open-pr-count ((_ git-platform-bitbucket) full-name)
   (bitbucket-repo-open-pr-count full-name))
 (cl-defmethod gp--repo-pull-requests ((_ git-platform-bitbucket) full-name &optional state)
