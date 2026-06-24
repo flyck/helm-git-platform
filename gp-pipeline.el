@@ -290,7 +290,7 @@ point is not within a pipeline."
 
 (defun gp-detail-pipeline-run-manual ()
   "Start the waiting manual step at point.
-The platform has no \"advance this step\" API, so this triggers a
+Bitbucket has no public \"advance this step\" API, so this triggers a
 fresh pipeline run targeting the step's pipeline definition (with a
 custom selector when the pipeline has one).  Only offered on a
 manual step that is still waiting."
@@ -307,7 +307,7 @@ manual step that is still waiting."
       (user-error "Manual step %S is not waiting (state: %s)"
                   name (or (gp-pipeline-step-state step) "?")))
     (when (yes-or-no-p
-           (format "Trigger a new pipeline run for manual step %S? " name))
+           (format "Bitbucket can't resume a step in place; trigger a NEW pipeline run for manual step %S? " name))
       (condition-case e
           (progn
             (gp-pipeline-run-manual-step full-name branch pipeline step)

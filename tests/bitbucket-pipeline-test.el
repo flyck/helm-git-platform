@@ -102,6 +102,23 @@
     "acme/x" "main" '((target)) '((state (name . "PENDING")) (trigger (type . "automatic"))))
    :type 'user-error))
 
+(ert-deftest bitbucket-test-pipeline-run-manual-triggers-with-selector ()
+  "Bitbucket has no per-step run endpoint, so a waiting manual step is
+advanced by re-triggering its pipeline with the custom selector."
+  (bitbucket-mock-with-service
+    (bitbucket-pipeline-run-manual-step
+     "acme/x" "main"
+     '((uuid . "{pipe}") (target (selector (pattern . "deploy"))))
+     '((uuid . "{step-3}")
+       (state (name . "PENDING") (stage (name . "PAUSED")))
+       (trigger (type . "pipeline_step_trigger_manual"))))
+    (let* ((call (cl-find "POST" bitbucket-mock-calls :key #'car :test #'equal))
+           (data (nth 3 call)))
+      (should call)
+      (should (string-suffix-p "/pipelines" (nth 1 call)))
+      (should (equal (let-alist data .target.selector.type) "custom"))
+      (should (equal (let-alist data .target.selector.pattern) "deploy")))))
+
 (ert-deftest bitbucket-test-pipelines-for-branch-and-steps ()
   (bitbucket-mock-with-service
     ;; no commit filter -> all three fixture pipelines

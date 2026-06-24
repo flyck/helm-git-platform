@@ -834,9 +834,10 @@ PRs to :mine; everything else (PRs the user reviews) to
 
 ;; Bitbucket Pipelines API.  Platform constraints baked in here:
 ;;   * stop and trigger are PIPELINE-level only -- there is no per-step
-;;     stop/trigger endpoint.  A waiting *manual* step is advanced by
-;;     re-triggering its pipeline with a custom selector (see
-;;     `bitbucket-pipeline-run-manual-step').
+;;     stop/trigger endpoint (POST .../steps/STEP-UUID/run returns 404).
+;;     A waiting *manual* step is advanced by re-triggering its pipeline
+;;     with a custom selector (see `bitbucket-pipeline-run-manual-step'),
+;;     which starts a NEW pipeline run.
 ;;   * the step-log endpoint returns the captured log as text/plain; there is
 ;;     no streaming endpoint, so "live" logs are polled (see gp-pipeline-log).
 ;;   * stop/trigger go through `bitbucket-api-request', which SIGNALS on non-2xx
@@ -937,9 +938,12 @@ with Pipelines:Write."
 
 (defun bitbucket-pipeline-run-manual-step (full-name branch pipeline step)
   "Run a waiting manual STEP of PIPELINE in FULL-NAME on BRANCH.
-Bitbucket has no \"run this step\" endpoint; a manual step is started
-by re-triggering its pipeline with the custom selector naming the
-pipeline pattern.  Errors unless STEP is a manual step."
+Bitbucket Cloud has no public per-step run endpoint -- the web UI's
+play button calls an internal API, and POSTing to
+.../steps/STEP-UUID/run returns 404.  The only documented way to
+advance a manual step is to re-trigger its pipeline with the custom
+selector naming the pipeline pattern, which starts a NEW pipeline
+run.  Errors unless STEP is a manual step.  Requires Pipelines:Write."
   (unless (bitbucket-pipeline-step-manual-p step)
     (user-error "Step %S is not a manual step"
                 (or (alist-get 'name step) "?")))
