@@ -116,6 +116,8 @@
   "Alist of (PATH . DIFF-CHUNK) for the detail buffer, or nil.")
 (defvar-local gp--detail-pipelines nil
   "Pipeline data plist (:current :recent) for the detail buffer, or nil.")
+(defvar-local gp--detail-pipeline-timer nil
+  "Poll timer re-fetching pipelines while a current run is unfinished, or nil.")
 (defvar-local gp--detail-comments nil
   "Cached comment list for the detail buffer (so it can redraw without refetch).")
 (defvar-local gp--detail-marked-comment-ids nil
@@ -671,7 +673,8 @@ block at once.  The file name remains clickable and opens the checkout."
   (setq-local magit-section-highlight-current nil)
   (setq-local font-lock-defaults nil)
   (font-lock-mode -1)
-  (when (fboundp 'jit-lock-mode) (jit-lock-mode nil)))
+  (when (fboundp 'jit-lock-mode) (jit-lock-mode nil))
+  (add-hook 'kill-buffer-hook #'gp--detail-cancel-pipeline-timer nil t))
 
 (defun gp-detail-open-in-ide ()
   "Open the current detail buffer's PR in the IDE."
@@ -957,6 +960,25 @@ Costs one API call to list pipelines plus one per pipeline for its
 steps; set to nil to skip it."
   :type 'boolean :group 'bitbucket)
 
+(defcustom gp-detail-pipeline-poll-interval 6
+  "Seconds between pipeline re-fetches while a current run is unfinished.
+The detail buffer auto-polls so a freshly triggered deployment's
+state updates without a manual refresh; polling stops once every
+current-commit pipeline has finished.  Set to 0 to disable."
+  :type 'integer :group 'bitbucket)
+
+(defun gp--detail-pipelines-running-p (data)
+  "Non-nil when any current-commit pipeline in DATA is not finished."
+  (cl-some (lambda (entry)
+             (not (gp-pipeline-finished-p (car entry))))
+           (plist-get data :current)))
+
+(defun gp--detail-cancel-pipeline-timer ()
+  "Cancel the current detail buffer's pipeline poll timer, if any."
+  (when (timerp gp--detail-pipeline-timer)
+    (cancel-timer gp--detail-pipeline-timer)
+    (setq gp--detail-pipeline-timer nil)))
+
 (defun gp--render-detail-into (buf pr comments stats &optional diff pipelines)
   "Render PR/COMMENTS/STATS (and per-file DIFF, PIPELINES) into BUF."
   (with-current-buffer buf
@@ -1078,7 +1100,9 @@ stays visible during a refresh -- so it never freezes or blanks."
 (defun gp--detail-load-pipelines (buf pr)
   "Fetch PR's pipelines on a separate idle timer and fold them into BUF.
 Kept separate from the main load so the N+1 pipeline calls never
-block or delay the comments/diff view."
+block or delay the comments/diff view.  While any current-commit
+pipeline is still running, schedules a poll so the buffer tracks a
+live deployment without a manual refresh."
   (run-with-idle-timer
    0.1 nil
    (lambda ()
@@ -1086,8 +1110,15 @@ block or delay the comments/diff view."
        (condition-case e
            (let ((data (gp-pipeline-fetch-for-pr pr)))
              (with-current-buffer buf
-               (setq gp--detail-pipelines data))
-             (gp--detail-rerender buf))
+               (setq gp--detail-pipelines data)
+               (gp--detail-rerender buf)
+               (gp--detail-cancel-pipeline-timer)
+               (when (and (> gp-detail-pipeline-poll-interval 0)
+                          (gp--detail-pipelines-running-p data))
+                 (setq gp--detail-pipeline-timer
+                       (run-with-timer
+                        gp-detail-pipeline-poll-interval nil
+                        #'gp--detail-load-pipelines buf pr)))))
          (error
            (gp-log-error "pipeline load failed: %s"
                          (error-message-string e))))))))
