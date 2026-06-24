@@ -188,10 +188,31 @@ reviewer (✅✅⏳); nil hides it."
               (if (> c 0) (format "❌%d " c) "")
               (if (> p 0) (format "⏳%d" p) ""))))))
 
+(defun gp-helm--pr-search-tail (pr)
+  "Return an invisible, searchable suffix of PR's full untruncated fields.
+The visible row truncates the repo slug, title and author to fixed
+column widths (see `gp-helm--pad'), so Helm -- which matches the
+display string -- cannot match text past the cut.  Appending the
+full fields as an invisible tail makes the whole slug/title/author
+matchable regardless of truncation."
+  (let-alist pr
+    (propertize
+     (concat " " (mapconcat #'identity
+                            (delq nil (list (format "#%s" .id)
+                                            .destination.repository.slug
+                                            .title
+                                            .author.display_name))
+                            " "))
+     'invisible t)))
+
 (defun gp-helm--pr-candidates (prs &optional draft)
   "Return helm candidates (DISPLAY . PR) for PRS.
 DRAFT non-nil styles the rows as drafts."
-  (mapcar (lambda (pr) (cons (gp-helm--pr-display pr draft) pr)) prs))
+  (mapcar (lambda (pr)
+            (cons (concat (gp-helm--pr-display pr draft)
+                          (gp-helm--pr-search-tail pr))
+                  pr))
+          prs))
 
 (defun gp-helm--header (label prs)
   "Return a section header string LABEL with the count of PRS."
