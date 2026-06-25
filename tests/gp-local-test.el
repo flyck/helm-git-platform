@@ -32,8 +32,10 @@
 (defmacro gp-test-with-fake-tree (specs &rest body)
   "Run BODY with a temp git root populated per SPECS.
 SPECS is a list of (DIRNAME . REMOTE-URL); each becomes a
-subdirectory with a .git/ dir, and `git remote get-url' is stubbed
-to return the mapped REMOTE-URL."
+subdirectory with a .git entry, and git is stubbed (at the
+`gp-local--git-output' seam) so each dir is a work tree whose
+`origin' resolves to the mapped REMOTE-URL.  A nil REMOTE-URL
+makes that dir report no remotes (still a work tree)."
   (declare (indent 1) (debug t))
   `(let* ((root (make-temp-file "bb-git-" t))
           (gp-local-git-root root)
@@ -43,12 +45,19 @@ to return the mapped REMOTE-URL."
        (let ((dir (expand-file-name (car spec) root)))
          (make-directory (expand-file-name ".git" dir) t)
          (puthash (directory-file-name dir) (cdr spec) remotes)))
-     (cl-letf (((symbol-function 'shell-command-to-string)
-                (lambda (_cmd)
-                  (or (gethash (directory-file-name
-                                (directory-file-name default-directory))
-                               remotes)
-                      ""))))
+     ;; Stub git itself: any dir under the fake tree is a work tree; its
+     ;; sole remote `origin' maps to the spec URL (nil -> no remotes).
+     (cl-letf (((symbol-function 'gp-local--git-output)
+                (lambda (&rest args)
+                  (let* ((key (directory-file-name
+                               (directory-file-name
+                                (expand-file-name default-directory))))
+                         (url (gethash key remotes)))
+                    (pcase args
+                      (`("rev-parse" "--is-inside-work-tree") "true")
+                      (`("remote" "get-url" "origin") url)
+                      (`("remote") (and url "origin"))
+                      (_ nil))))))
        (unwind-protect (progn ,@body)
          (delete-directory root t)))))
 
@@ -66,6 +75,58 @@ to return the mapped REMOTE-URL."
     (should (string-suffix-p
              "my-frontend-clone"
              (gp-local-find-checkout "acme/web-frontend")))))
+
+(ert-deftest gp-test-dir-remote-prefers-origin ()
+  "`origin' wins when it is a Bitbucket remote."
+  (gp-local-clear-cache)
+  (cl-letf (((symbol-function 'gp-local--git-output)
+             (lambda (&rest args)
+               (pcase args
+                 (`("rev-parse" "--is-inside-work-tree") "true")
+                 (`("remote" "get-url" "origin")
+                  "git@bitbucket.org:acme/web.git")
+                 (`("remote") "origin\nupstream")
+                 (_ nil)))))
+    (should (equal (gp-local--dir-remote "/tmp/x") "acme/web"))))
+
+(ert-deftest gp-test-dir-remote-works-in-worktree ()
+  "A linked worktree (where .git is a FILE, not a dir) still resolves.
+We never touch the filesystem -- git reports it is a work tree."
+  (gp-local-clear-cache)
+  (cl-letf (((symbol-function 'gp-local--git-output)
+             (lambda (&rest args)
+               (pcase args
+                 (`("rev-parse" "--is-inside-work-tree") "true")
+                 (`("remote" "get-url" "origin")
+                  "git@bitbucket.org:acme/api.git")
+                 (`("remote") "origin")
+                 (_ nil)))))
+    (should (equal (gp-local--dir-remote "/tmp/wt") "acme/api"))))
+
+(ert-deftest gp-test-dir-remote-falls-back-to-other-remote ()
+  "When `origin' is not Bitbucket, scan other remotes for one that is."
+  (gp-local-clear-cache)
+  (cl-letf (((symbol-function 'gp-local--git-output)
+             (lambda (&rest args)
+               (pcase args
+                 (`("rev-parse" "--is-inside-work-tree") "true")
+                 (`("remote" "get-url" "origin")
+                  "git@github.com:fork/api.git")  ; fork on GitHub
+                 (`("remote") "origin\nbitbucket")
+                 (`("remote" "get-url" "bitbucket")
+                  "git@bitbucket.org:acme/api.git")
+                 (_ nil)))))
+    (should (equal (gp-local--dir-remote "/tmp/y") "acme/api"))))
+
+(ert-deftest gp-test-dir-remote-nil-outside-work-tree ()
+  "Outside a work tree (git says so), resolution yields nil -- no crash."
+  (gp-local-clear-cache)
+  (cl-letf (((symbol-function 'gp-local--git-output)
+             (lambda (&rest args)
+               (pcase args
+                 (`("rev-parse" "--is-inside-work-tree") nil) ; non-zero exit
+                 (_ nil)))))
+    (should (null (gp-local--dir-remote "/tmp/nope")))))
 
 (ert-deftest gp-test-find-checkout-missing ()
   (gp-test-with-fake-tree

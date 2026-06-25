@@ -49,18 +49,50 @@ Handles SSH (git@bitbucket.org:ws/slug.git) and HTTPS
     (when (string-match "bitbucket\\.org[:/]\\([^/]+\\)/\\([^/]+?\\)\\(?:\\.git\\)?/?\\'" url)
       (concat (match-string 1 url) "/" (match-string 2 url)))))
 
+(defun gp-local--git-output (&rest args)
+  "Run git with ARGS in `default-directory'; return trimmed stdout or nil.
+Nil on any non-zero exit or empty output."
+  (with-temp-buffer
+    (let ((status (apply #'process-file "git" nil t nil args)))
+      (and (eq status 0)
+           (let ((out (string-trim (buffer-string))))
+             (unless (string-empty-p out) out))))))
+
+(defun gp-local--bitbucket-remote-url (dir)
+  "Return a Bitbucket remote URL for DIR, preferring `origin', or nil.
+Asks git itself whether DIR is inside a work tree -- so this also
+works in worktrees and submodules, where `.git' is a FILE (a
+gitdir pointer) rather than a directory.  If `origin' is not a
+Bitbucket remote, falls back to the first remote whose URL is."
+  (let ((default-directory (file-name-as-directory
+                            (directory-file-name (expand-file-name dir)))))
+    (when (equal "true" (gp-local--git-output
+                         "rev-parse" "--is-inside-work-tree"))
+      (let ((origin (gp-local--git-output "remote" "get-url" "origin")))
+        (if (and origin (string-match-p "bitbucket\\.org" origin))
+            origin
+          ;; origin missing or not Bitbucket -> scan every remote's URL
+          (let ((remotes (gp-local--git-output "remote")))
+            (catch 'hit
+              (dolist (r (and remotes (split-string remotes "\n" t)))
+                (let ((url (gp-local--git-output "remote" "get-url" r)))
+                  (when (and url (string-match-p "bitbucket\\.org" url))
+                    (throw 'hit url))))
+              ;; nothing Bitbucket; still hand back origin so the parse
+              ;; (which rejects non-Bitbucket URLs) decides, keeping old
+              ;; behaviour for non-Bitbucket repos.
+              origin)))))))
+
 (defun gp-local--dir-remote (dir)
-  "Return the parsed \"ws/slug\" of DIR's origin remote, cached."
+  "Return the parsed \"ws/slug\" of DIR's Bitbucket remote, cached.
+Prefers `origin'; falls back to any other Bitbucket remote.  Works
+in plain clones, worktrees and submodules."
   (let* ((key (directory-file-name (expand-file-name dir)))
          (cached (gethash key gp-local--remote-cache 'miss)))
     (if (not (eq cached 'miss))
         cached
-      (let* ((default-directory (file-name-as-directory key))
-             (url (when (file-directory-p (expand-file-name ".git" key))
-                    (string-trim
-                     (shell-command-to-string
-                      "git remote get-url origin 2>/dev/null"))))
-             (parsed (gp-local--parse-remote url)))
+      (let ((parsed (gp-local--parse-remote
+                     (gp-local--bitbucket-remote-url key))))
         (puthash key parsed gp-local--remote-cache)
         parsed))))
 
