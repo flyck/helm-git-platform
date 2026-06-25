@@ -270,6 +270,7 @@ reply threads."
   (let* ((depth (or depth 0))
          (ind (make-string (* depth 4) ?\s))
          (resolved (gp-comment-resolved-p comment))
+         (outdated (gp-comment-outdated-p comment gp--detail-diff))
          (marked (and pr (gp--detail-comment-marked-p comment)))
          ;; prefix every line of STR with the thread indent
          (pad (lambda (str) (replace-regexp-in-string "^" ind str))))
@@ -290,7 +291,8 @@ reply threads."
              "  "
              (propertize (gp--comment-location comment)
                          'face 'gp-branch-face)
-             (if resolved (propertize "  ✓ resolved" 'face 'success) "")))
+             (if resolved (propertize "  ✓ resolved" 'face 'success) "")
+             (if outdated (propertize "  ⊘ outdated" 'face 'shadow) "")))
           (when (and pr .inline.path)
             (insert ind "  ")
             (gp--insert-action-button
@@ -479,12 +481,12 @@ block at once.  The file name remains clickable and opens the checkout."
        (lambda () (gp-ui-back-to-list)))
       (insert "   ")
       (gp--insert-action-button
-       "🖥  Open local repo [o]"
+       "⎇ Open local repo [o]"
        "Open the current repo in Magit without changing branches"
        (lambda () (gp-detail-open-local)))
       (insert "   ")
       (gp--insert-action-button
-       "🖥  Autostash & checkout [O]"
+       "📦 Autostash & checkout [O]"
        "Stash any local changes and check out the PR branch, then open the repo (unlike 'd', which only shows the diff)"
        (lambda () (gp-ui-open-in-ide pr)))
       (insert "   ")
@@ -674,6 +676,10 @@ block at once.  The file name remains clickable and opens the checkout."
   (setq-local font-lock-defaults nil)
   (font-lock-mode -1)
   (when (fboundp 'jit-lock-mode) (jit-lock-mode nil))
+  ;; magit-section-mode turns on `truncate-lines'; soft-wrap instead so
+  ;; long comment bodies stay fully readable without horizontal scroll.
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
   (add-hook 'kill-buffer-hook #'gp--detail-cancel-pipeline-timer nil t))
 
 (defun gp-detail-open-in-ide ()
@@ -973,6 +979,10 @@ current-commit pipeline has finished.  Set to 0 to disable."
              (not (gp-pipeline-finished-p (car entry))))
            (plist-get data :current)))
 
+(defun gp--detail-pipelines-empty-p (data)
+  "Non-nil when DATA carries no pipelines at all (no :current, no :recent)."
+  (not (or (plist-get data :current) (plist-get data :recent))))
+
 (defun gp--detail-cancel-pipeline-timer ()
   "Cancel the current detail buffer's pipeline poll timer, if any."
   (when (timerp gp--detail-pipeline-timer)
@@ -1047,55 +1057,138 @@ Leaves existing content intact (only fresh buffers are blank)."
     (delete-overlay gp--detail-loading)
     (setq gp--detail-loading nil)))
 
-(defun gp-show-pr (pr)
-  "Display PR's detail buffer; load comments/stats without blocking.
+(defun gp--detail-buffer-shows-p (buf pr)
+  "Return non-nil if BUF is still showing PR (same id).
+Used by deferred loaders to decide whether their fetched data is
+still relevant, regardless of how many refreshes have happened
+since -- the PR id, not a refresh token, is the real invariant."
+  (and (buffer-live-p buf)
+       (let ((cur (buffer-local-value 'gp--pr buf)))
+         (and cur (equal (alist-get 'id cur) (alist-get 'id pr))))))
 
-The buffer shows a small ⏳ spinner near the title while the
-comments and stats are fetched on an idle timer; existing content
-stays visible during a refresh -- so it never freezes or blanks."
+(defun gp-show-pr (pr)
+  "Display PR's detail buffer; load it asynchronously, never freezing.
+
+A skeleton (title, branches, author, action buttons) is painted
+IMMEDIATELY from the overview PR object, so navigating in never
+shows a blank or frozen page.  The full PR object and comments are
+then fetched in the background (cached where it makes sense), and
+the heavier stats/diff and pipelines fold in afterwards.  A ⏳
+spinner near the title marks the in-flight load."
   (let ((buf (get-buffer-create (gp--detail-buffer-name pr))))
     (with-current-buffer buf
-      (gp-detail-mode)
+      ;; Only (re)initialise the mode on a fresh buffer.  `gp-detail-mode' is a
+      ;; `define-derived-mode', so calling it runs `kill-all-local-variables'
+      ;; and wipes the cached `gp--detail-pipelines' (etc.) -- re-running it on
+      ;; an already-open buffer is what made pipelines vanish on reopen.
+      (unless (derived-mode-p 'gp-detail-mode)
+        (gp-detail-mode))
       (setq gp--pr pr)
+      ;; Paint a skeleton from the overview PR right away, then hang the
+      ;; spinner on it.  This is the instant first paint -- no network yet.
+      ;; Reuse any cached comments so a revisit shows them without a flash.
+      (gp--render-detail-into buf pr gp--detail-comments
+                              gp--detail-stats gp--detail-diff
+                              gp--detail-pipelines)
       (gp--detail-show-loading))
     ;; reuse the current window so a full-frame helm leads to a full-frame
     ;; detail view instead of splitting
     (pop-to-buffer-same-window buf)
+    (gp--detail-load-async buf pr)
+    buf))
+
+(defun gp--detail-load-async (buf pr)
+  "Load BUF's PR detail off the main thread, folding results in as they arrive.
+Fetches the PR object and comments asynchronously, then defers the
+heavier stats/diff and pipelines so the visible render is never
+blocked.  A monotonic token (`gp--detail-refresh-token') guards
+against stale callbacks from a previously-shown PR rendering into
+this buffer.  Cached fetches make a revisit cheap; callers wanting
+fresh data bind `bitbucket-cache-ttl' to 0 around the call."
+  (with-current-buffer buf
+    (cl-incf gp--detail-refresh-token)
+    (let ((token gp--detail-refresh-token)
+          (full-name (gp-pr-full-name pr))
+          (id (alist-get 'id pr))
+          (old-pr gp--pr)
+          (old-comments gp--detail-comments)
+          (new-pr nil)
+          (new-comments nil)
+          (pending 2)
+          (failed nil)
+          ;; freeze the cache policy in effect at call time so the deferred
+          ;; stats/diff fetch honours a `g'-refresh's TTL=0 binding too
+          (ttl bitbucket-cache-ttl))
+      (cl-labels ((current-p ()
+                    (and (buffer-live-p buf)
+                         (= token (buffer-local-value 'gp--detail-refresh-token buf))))
+                  (finish-one (ok value kind)
+                    (when (current-p)
+                      (unless ok (setq failed t))
+                      (pcase kind
+                        ('pr (setq new-pr value))
+                        ('comments (setq new-comments value)))
+                      (setq pending (1- pending))
+                      (when (zerop pending)
+                        (with-current-buffer buf
+                          (gp--detail-clear-loading)
+                          (let ((pr (or new-pr old-pr))
+                                (comments (or new-comments old-comments)))
+                            (when failed
+                              (gp-log-error "detail load: a fetch failed; showing best-effort content"))
+                            (gp--render-detail-into
+                             buf pr comments
+                             gp--detail-stats gp--detail-diff gp--detail-pipelines)
+                            ;; heavier data, deferred so it never blocks the paint
+                            (gp--detail-load-stats-diff buf pr ttl)
+                            (when gp-detail-show-pipelines
+                              (gp--detail-load-pipelines buf pr))))))))
+        (bitbucket-pull-request-async
+         full-name id
+         (lambda (ok value) (finish-one ok value 'pr)))
+        (bitbucket-pull-request-comments-async
+         full-name id
+         (lambda (ok value) (finish-one ok value 'comments)))))))
+
+(defun gp--detail-load-stats-diff (buf pr ttl)
+  "Fetch PR's stats and diff on an idle timer and fold them into BUF.
+Kept out of the visible-render path: stats/diff are cached by source
+commit, so a revisit is instant, but a cold fetch is synchronous and
+must not block the first paint.  Relevance is checked by PR id (see
+`gp--detail-buffer-shows-p'), not a refresh token.  TTL carries the
+caller's cache policy (0 forces fresh on `g')."
+  (when (or gp-detail-show-stats gp-detail-show-file-diffs)
     (run-with-idle-timer
-     0.05 nil
+     0.1 nil
      (lambda ()
-       (when (buffer-live-p buf)
+       ;; Proceed as long as BUF is still showing THIS PR.  We deliberately
+       ;; do NOT require the captured TOKEN to still be current: a rapid
+       ;; series of refreshes queues several one-shot idle timers, and only
+       ;; the last-scheduled token would match -- if an earlier timer fires
+       ;; last, a strict token check would drop its result and leave stats/
+       ;; diff empty forever (nothing reschedules them).  Keying on the PR id
+       ;; is the real invariant: same PR -> the fetched stats/diff are valid.
+       (when (and (buffer-live-p buf)
+                  (gp--detail-buffer-shows-p buf pr))
          (condition-case e
-             (let* ((full-name (gp-pr-full-name pr))
+             (let* ((bitbucket-cache-ttl ttl)
+                    (full-name (gp-pr-full-name pr))
                     (id (alist-get 'id pr))
-                    (comments (gp-pull-request-comments full-name id))
+                    (commit (gp-pr-source-commit pr))
                     (stats (when gp-detail-show-stats
-                             (ignore-errors
-                               (gp-pull-request-stats full-name id))))
+                             (ignore-errors (gp-pull-request-stats full-name id pr))))
                     (diff (when gp-detail-show-file-diffs
                             (ignore-errors
                               (gp-split-diff-by-file
-                               (gp-pull-request-diff full-name id))))))
-               ;; render the main content first; pipelines (N+1 calls) are
-               ;; fetched in a SEPARATE deferred step so they never delay or
-               ;; block the comments/diff view.
-               (gp--render-detail-into buf pr comments stats diff
-                                       (with-current-buffer buf
-                                         gp--detail-pipelines))
-               (with-current-buffer buf (gp--detail-clear-loading))
-               (when gp-detail-show-pipelines
-                 (gp--detail-load-pipelines buf pr)))
+                               (gp-pull-request-diff full-name id commit))))))
+               (when (and (buffer-live-p buf)
+                          (gp--detail-buffer-shows-p buf pr))
+                 (with-current-buffer buf
+                   (setq gp--detail-stats stats gp--detail-diff diff)
+                   (gp--detail-rerender buf))))
            (error
-            (with-current-buffer buf
-              (gp--detail-clear-loading)
-              (let ((inhibit-read-only t))
-                (goto-char (point-max))
-                (insert (propertize
-                         (format "\n  error: %s\n" (error-message-string e))
-                         'face 'error))))
-            (gp-log-error "detail load failed: %s"
-                                 (error-message-string e)))))))
-    buf))
+            (gp-log-error "stats/diff load failed: %s"
+                          (error-message-string e)))))))))
 
 (defun gp--detail-load-pipelines (buf pr)
   "Fetch PR's pipelines on a separate idle timer and fold them into BUF.
@@ -1110,66 +1203,44 @@ live deployment without a manual refresh."
        (condition-case e
            (let ((data (gp-pipeline-fetch-for-pr pr)))
              (with-current-buffer buf
-               (setq gp--detail-pipelines data)
-               (gp--detail-rerender buf)
-               (gp--detail-cancel-pipeline-timer)
-               (when (and (> gp-detail-pipeline-poll-interval 0)
-                          (gp--detail-pipelines-running-p data))
-                 (setq gp--detail-pipeline-timer
-                       (run-with-timer
-                        gp-detail-pipeline-poll-interval nil
-                        #'gp--detail-load-pipelines buf pr)))))
+               ;; `gp-pipeline-fetch-for-pr' returns nil on ANY error (it can't
+               ;; tell a transient API hiccup from a genuinely pipeline-less
+               ;; PR).  So an empty result must NOT clobber pipelines we already
+               ;; have -- otherwise a flaky refetch/poll blanks the section
+               ;; until the next successful fetch.  Keep the old data instead;
+               ;; only adopt an empty result on a first-ever load.
+               (let ((keep (and (gp--detail-pipelines-empty-p data)
+                                (not (gp--detail-pipelines-empty-p
+                                      gp--detail-pipelines)))))
+                 (unless keep
+                   (setq gp--detail-pipelines data)
+                   (gp--detail-rerender buf))
+                 (gp--detail-cancel-pipeline-timer)
+                 ;; keep polling against whatever we're actually showing
+                 (when (and (> gp-detail-pipeline-poll-interval 0)
+                            (gp--detail-pipelines-running-p
+                             gp--detail-pipelines))
+                   (setq gp--detail-pipeline-timer
+                         (run-with-timer
+                          gp-detail-pipeline-poll-interval nil
+                          #'gp--detail-load-pipelines buf pr))))))
          (error
            (gp-log-error "pipeline load failed: %s"
                          (error-message-string e))))))))
 
 (defun gp--detail-refresh-async (buf pr)
-  "Refresh BUF's PR detail asynchronously, preserving existing content.
-This refreshes the PR object and comments in the background, then rerenders
-using the buffer's already-cached stats, diff and pipelines."
-  (with-current-buffer buf
-    (cl-incf gp--detail-refresh-token)
-    (let ((token gp--detail-refresh-token)
-          (full-name (gp-pr-full-name pr))
-          (id (alist-get 'id pr))
-          (old-pr gp--pr)
-          (old-comments gp--detail-comments)
-          (new-pr nil)
-          (new-comments nil)
-          (pending 2)
-          (failed nil))
-      (cl-labels ((finish-one (ok value kind)
-                    (when (and (buffer-live-p buf)
-                               (= token (buffer-local-value 'gp--detail-refresh-token buf)))
-                      (unless ok (setq failed t))
-                      (pcase kind
-                        ('pr (setq new-pr value))
-                        ('comments (setq new-comments value)))
-                      (setq pending (1- pending))
-                      (when (zerop pending)
-                        (with-current-buffer buf
-                          (gp--detail-clear-loading)
-                          (if failed
-                              (let ((inhibit-read-only t))
-                                (goto-char (point-max))
-                                (insert (propertize "\n  refresh failed; showing cached content\n"
-                                                    'face 'error)))
-                            (gp--render-detail-into
-                             buf (or new-pr old-pr) (or new-comments old-comments)
-                             gp--detail-stats gp--detail-diff gp--detail-pipelines)
-                            (when gp-detail-show-pipelines
-                              (gp--detail-load-pipelines buf (or new-pr old-pr)))))))))
-        (bitbucket-pull-request-async
-         full-name id
-         (lambda (ok value) (finish-one ok value 'pr)))
-        (bitbucket-pull-request-comments-async
-         full-name id
-         (lambda (ok value) (finish-one ok value 'comments)))))))
+  "Refresh BUF's PR detail asynchronously, bypassing the result cache.
+Existing content stays visible while a fresh PR object, comments,
+stats, diff and pipelines are fetched.  Binding `bitbucket-cache-ttl'
+to 0 makes the shared loader (`gp--detail-load-async') and its
+deferred stats/diff fetch ignore the cache, so `g' always re-fetches."
+  (let ((bitbucket-cache-ttl 0))
+    (gp--detail-load-async buf pr)))
 
 (defun gp-detail-refresh ()
-  "Re-fetch and redraw the current detail buffer (non-blocking)."
+  "Re-fetch and redraw the current detail buffer (non-blocking, force-fresh)."
   (interactive)
-  (if (and gp--pr gp--detail-comments)
+  (if gp--pr
       (progn
         (gp--detail-show-loading)
         (gp--detail-refresh-async (current-buffer) gp--pr))
