@@ -567,9 +567,19 @@ what to keep (e.g. excluding their own)."
     (bitbucket-scan-repos-async q repos on-batch on-done)))
 
 (defun bitbucket-pull-request (full-name id)
-  "Return the full PR object for FULL-NAME (\"ws/slug\") and PR ID."
-  (bitbucket-api-request
-   "GET" (format "/repositories/%s/pullrequests/%s" full-name id)))
+  "Return the full PR object for FULL-NAME (\"ws/slug\") and PR ID.
+The PR object (title, branches, author, state) changes rarely, so a
+non-nil result is cached under `bitbucket-cache-ttl'; a `g' refresh
+bypasses the cache by binding that TTL to 0.  A nil/error result is
+not cached, so a later open re-fetches."
+  (let ((key (list 'pull-request full-name id)))
+    (let ((hit (bitbucket-cache-get key)))
+      (if (car hit)
+          (cdr hit)
+        (let ((pr (bitbucket-api-request
+                   "GET" (format "/repositories/%s/pullrequests/%s" full-name id))))
+          (when pr (bitbucket-cache-put key pr))
+          pr)))))
 
 (defun bitbucket-pull-request-async (full-name id callback)
   "Fetch PR ID in FULL-NAME asynchronously, calling CALLBACK with (OK PR)."
@@ -815,9 +825,25 @@ nor requested changes (or is not a participant)."
 The diffstat lives at a per-PR signed URL exposed as the PR's
 `links.diffstat.href' (the constructed path 404s), so fetch the
 PR object (or accept it via PR) and follow that link.  Commits
-come from the commits endpoint."
+come from the commits endpoint.
+
+Stats only change when the PR's source commit does, so a non-nil
+result is cached keyed by that commit hash (a `g' refresh binds
+`bitbucket-cache-ttl' to 0 to force a fresh fetch).  When the
+commit hash is unavailable the result is not cached."
   (let* ((pr (or pr (bitbucket-pull-request full-name id)))
-         (diffstat-url (let-alist pr .links.diffstat.href))
+         (commit (let-alist pr .source.commit.hash))
+         (key (and commit (list 'pr-stats full-name id commit)))
+         (hit (and key (bitbucket-cache-get key))))
+    (if (and hit (car hit))
+        (cdr hit)
+      (let ((stats (bitbucket--pull-request-stats-1 full-name id pr)))
+        (when (and key stats) (bitbucket-cache-put key stats))
+        stats))))
+
+(defun bitbucket--pull-request-stats-1 (full-name id pr)
+  "Compute the diffstat plist for PR (uncached).  See `bitbucket-pull-request-stats'."
+  (let* ((diffstat-url (let-alist pr .links.diffstat.href))
          (stat (when diffstat-url
                  (bitbucket-api-paged diffstat-url nil)))
          (commits (bitbucket-api-paged
@@ -837,13 +863,36 @@ Uses the new path, falling back to the old (for deletions)."
         :added (or (alist-get 'lines_added s) 0)
         :removed (or (alist-get 'lines_removed s) 0)))
 
-(defun bitbucket-pull-request-diff (full-name id)
-  "Return the unified diff text for PR ID in FULL-NAME."
+(defun bitbucket-pull-request-diff (full-name id &optional commit)
+  "Return the unified diff text for PR ID in FULL-NAME.
+A PR's diff only changes when its source commit does, so when the
+source COMMIT hash is supplied a non-empty result is cached under
+that key; a `g' refresh binds `bitbucket-cache-ttl' to 0 to force
+fresh.  Without COMMIT the result is not cached (we can't key it
+safely).  An empty diff is not cached, so a transient empty
+response is re-fetched."
+  (let* ((key (and commit (list 'pr-diff full-name id commit)))
+         (hit (and key (bitbucket-cache-get key))))
+    (if (and hit (car hit))
+        (cdr hit)
+      (let ((diff (bitbucket--pull-request-diff-1 full-name id)))
+        (when (and key diff (not (string-empty-p diff)))
+          (bitbucket-cache-put key diff))
+        diff))))
+
+(defun bitbucket--pull-request-diff-1 (full-name id)
+  "Fetch the unified diff text for PR ID in FULL-NAME (uncached)."
   ;; The diff endpoint returns text/plain, not JSON; reuse the request
-  ;; machinery but read the raw body.
-  (let* ((url (bitbucket--build-url
-               (format "/repositories/%s/pullrequests/%s/diff" full-name id)
-               nil))
+  ;; machinery but read the raw body.  The constructed
+  ;; /pullrequests/ID/diff path is rejected (\"you may not have access\")
+  ;; -- like diffstat, the working URL is the PR's pre-signed
+  ;; `links.diff.href', so prefer that and fall back to the path.
+  (let* ((url (or (ignore-errors
+                    (let-alist (bitbucket-pull-request full-name id)
+                      .links.diff.href))
+                  (bitbucket--build-url
+                   (format "/repositories/%s/pullrequests/%s/diff" full-name id)
+                   nil)))
          (url-request-method "GET")
          (url-request-extra-headers
           `(("Authorization" . ,(bitbucket--auth-header))))

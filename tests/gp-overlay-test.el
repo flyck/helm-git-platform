@@ -134,6 +134,7 @@
 
 (ert-deftest gp-test-overlay-hides-resolved ()
   "Resolved comments are dropped from the grouped overlays by default."
+  (clrhash gp--comment-outdated-cache)
   (let ((comments
          '(((id . 1) (inline (path . "a.el") (to . 2)) (content (raw . "open")))
            ((id . 2) (inline (path . "a.el") (to . 5)) (content (raw . "done"))
@@ -143,6 +144,50 @@
                      '(2))))                       ;; only line 2 (the open one)
     (let ((gp-overlay-show-resolved t))
       (should (= (length (cdr (assoc "a.el" (gp-overlay-comments-by-file comments)))) 2)))))
+
+(ert-deftest gp-test-overlay-hides-outdated ()
+  "Comments anchored to lines absent from the diff are dropped by default.
+Outdated-ness is computed from the diff: line 2 is in the hunk
+\(present), line 5 is not (outdated)."
+  (clrhash gp--comment-outdated-cache)
+  (let* ((comments
+          '(((id . 1) (inline (path . "a.el") (to . 2)) (content (raw . "open")))
+            ((id . 2) (inline (path . "a.el") (to . 5)) (content (raw . "stale")))))
+         ;; a hunk covering new-side lines 1-3 only; line 5 is not present
+         (diff "diff --git a/a.el b/a.el
+--- a/a.el
++++ b/a.el
+@@ -1,3 +1,3 @@
+ one
+-two-old
++two-new
+ three
+")
+         (dbf (gp-split-diff-by-file diff)))
+    (let ((gp-overlay-show-outdated nil))
+      (should (equal (mapcar #'car (cdr (assoc "a.el" (gp-overlay-comments-by-file comments dbf))))
+                     '(2))))                       ;; only line 2 (still in the diff)
+    (let ((gp-overlay-show-outdated t))
+      (should (= (length (cdr (assoc "a.el" (gp-overlay-comments-by-file comments dbf)))) 2)))
+    ;; with no diff and a cold cache, nothing is treated as outdated
+    ;; (graceful degrade); use fresh ids so the monotonic cache is empty
+    (clrhash gp--comment-outdated-cache)
+    (let ((fresh '(((id . 91) (inline (path . "a.el") (to . 2)) (content (raw . "open")))
+                   ((id . 92) (inline (path . "a.el") (to . 5)) (content (raw . "stale"))))))
+      (should (= (length (cdr (assoc "a.el" (gp-overlay-comments-by-file fresh)))) 2)))))
+
+(ert-deftest gp-test-comment-outdated-cache-is-monotonic ()
+  "Once proven outdated, a comment stays outdated even with no diff."
+  (clrhash gp--comment-outdated-cache)
+  (let ((c '((id . 7) (inline (path . "a.el") (to . 5)) (content (raw . "stale"))))
+        (dbf (gp-split-diff-by-file "diff --git a/a.el b/a.el
+--- a/a.el
++++ b/a.el
+@@ -1,1 +1,1 @@
+ one
+")))
+    (should (gp-comment-outdated-p c dbf))      ;; proven outdated from the diff
+    (should (gp-comment-outdated-p c nil))))    ;; sticky: cached, no diff needed
 
 (ert-deftest gp-test-overlay-global-toggle-suppresses-draw ()
   "With overlays globally off, apply-to-buffer draws nothing but keeps lines."

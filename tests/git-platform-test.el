@@ -71,5 +71,46 @@
       ;; would error if gp-user-uuid still required a backend arg
       (should (stringp (gp-user-uuid))))))
 
+(ert-deftest git-platform-test-diff-chunk-new-lines ()
+  "New-side line set counts context and added lines, not deletions."
+  (let* ((chunk "diff --git a/f b/f
+--- a/f
++++ b/f
+@@ -10,4 +10,4 @@
+ ctx10
+-removed11
++added11
+ ctx12
+")
+         (present (gp-diff-chunk-new-lines chunk)))
+    ;; new side body lines: 10 ctx, 11 added, 12 ctx (removed line is old-only)
+    (should (gethash 10 present))
+    (should (gethash 11 present))
+    (should (gethash 12 present))
+    (should-not (gethash 13 present))
+    (should-not (gethash 9 present))))
+
+(ert-deftest git-platform-test-comment-outdated-p ()
+  "A comment is outdated only when its file is in the diff but its line is not."
+  (let* ((diff "diff --git a/a.el b/a.el
+--- a/a.el
++++ b/a.el
+@@ -1,3 +1,3 @@
+ one
+-two-old
++two-new
+ three
+")
+         (dbf (gp-split-diff-by-file diff))
+         (in-diff   '((inline (path . "a.el") (to . 2))))   ;; line 2 present
+         (stale     '((inline (path . "a.el") (to . 99))))  ;; line gone
+         (other     '((inline (path . "z.el") (to . 1))))   ;; file not in diff
+         (general   '((content (raw . "hi")))))             ;; not inline
+    (should-not (gp-comment-outdated-p in-diff dbf))
+    (should     (gp-comment-outdated-p stale dbf))
+    (should-not (gp-comment-outdated-p other dbf))   ;; can't prove -> not outdated
+    (should-not (gp-comment-outdated-p general dbf))
+    (should-not (gp-comment-outdated-p stale nil)))) ;; no diff -> not outdated
+
 (provide 'git-platform-test)
 ;;; git-platform-test.el ends here

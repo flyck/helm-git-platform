@@ -84,8 +84,9 @@ ARGLIST may contain &optional; &rest is not supported here."
   "Return the full PR object for FULL-NAME/ID.")
 (gp-defop pull-request-comments (full-name id &optional max-items)
   "Return comments for PR FULL-NAME/ID.")
-(gp-defop pull-request-diff (full-name id)
-  "Return the unified diff text for PR FULL-NAME/ID.")
+(gp-defop pull-request-diff (full-name id &optional commit)
+  "Return the unified diff text for PR FULL-NAME/ID.
+COMMIT, the source commit hash, lets the backend cache the diff.")
 (gp-defop pull-request-stats (full-name id &optional pr)
   "Return a stats plist for PR FULL-NAME/ID.")
 (gp-defop create-comment (full-name id text &optional inline parent-id)
@@ -247,6 +248,76 @@ old side for deletions.  CHUNK is that file's full diff text."
                       (when path
                         (push (cons (string-trim-right path) full) result)))))
       (nreverse result))))
+
+(defun gp-diff-chunk-new-lines (chunk)
+  "Return a hash-set of the new-side line numbers present in diff CHUNK.
+Walks the `@@ -a,b +c,d @@' hunk headers and counts context and
+added lines (the lines that exist on the new side), so a comment
+anchored to any of them is still on current code.  Deleted lines
+are not counted -- they no longer exist on the new side."
+  (let ((present (make-hash-table :test 'eq))
+        (case-fold-search nil))
+    (with-temp-buffer
+      (insert (or chunk ""))
+      (goto-char (point-min))
+      (let ((lineno nil))
+        (while (not (eobp))
+          (let ((line (buffer-substring-no-properties
+                       (line-beginning-position) (line-end-position))))
+            (cond
+             ;; hunk header: reset the new-side counter to its start line
+             ((string-match "^@@ -[0-9]+\\(?:,[0-9]+\\)? \\+\\([0-9]+\\)" line)
+              (setq lineno (string-to-number (match-string 1 line))))
+             ((null lineno) nil)                       ;; preamble before any hunk
+             ((string-prefix-p "-" line) nil)          ;; old side only
+             ((string-prefix-p "\\" line) nil)         ;; "\ No newline at end"
+             (t                                        ;; context (" ") or added ("+")
+              (puthash lineno t present)
+              (setq lineno (1+ lineno)))))
+          (forward-line 1))))
+    present))
+
+(defvar gp--diff-lines-cache (make-hash-table :test 'eq :weakness 'key)
+  "Per-render memo: diff CHUNK string -> its new-line hash-set.
+Keyed by object identity (`eq') and weak on the key, so the entries
+vanish once a render's DIFF-BY-FILE alist is dropped.  Avoids
+re-parsing a file's hunk once per comment on that file.")
+
+(defun gp-diff-chunk-new-lines--cached (chunk)
+  "Return `gp-diff-chunk-new-lines' for CHUNK, memoised by identity."
+  (or (gethash chunk gp--diff-lines-cache)
+      (puthash chunk (gp-diff-chunk-new-lines chunk) gp--diff-lines-cache)))
+
+(defvar gp--comment-outdated-cache (make-hash-table :test 'eql)
+  "Comment id -> t once it has been proven outdated.
+Outdatedness is monotonic: once a comment's anchor line has dropped
+out of the diff, later commits can only move it further away, never
+restore that exact anchor.  So a true verdict is cached permanently
+(for the session); a false verdict is never cached, since the next
+commit can still make the comment stale.")
+
+(defun gp-comment-outdated-p (comment diff-by-file)
+  "Return non-nil when inline COMMENT is anchored to a stale line.
+DIFF-BY-FILE is the alist from `gp-split-diff-by-file'.  A comment
+is outdated when its file is in the diff but its anchored new-side
+line is no longer present in any hunk (it was changed away under
+the comment).  Returns nil when COMMENT is not inline, when the
+diff is unknown (nil), or when the comment's file is absent from
+the diff -- we only flag outdated when we can prove it.
+
+A true verdict is memoised by comment id (see
+`gp--comment-outdated-cache') and short-circuits future checks even
+across diff refreshes, since outdatedness never reverses."
+  (let ((id (alist-get 'id comment)))
+    (or (and id (gethash id gp--comment-outdated-cache))
+        (let* ((path (let-alist comment .inline.path))
+               (line (let-alist comment (or .inline.to .inline.from)))
+               (chunk (and path diff-by-file (cdr (assoc path diff-by-file))))
+               (outdated (and path line chunk
+                              (not (gethash line (gp-diff-chunk-new-lines--cached chunk))))))
+          (when (and outdated id)
+            (puthash id t gp--comment-outdated-cache))
+          outdated))))
 
 ;;;; Markdown / emoji rendering helpers ---------------------------------------
 

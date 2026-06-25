@@ -358,5 +358,105 @@
     (bitbucket-scan-repos-async "q" nil #'ignore (lambda () (cl-incf done)))
     (should (= done 1))))
 
+;;;; Detail-view per-operation caching ----------------------------------------
+
+(ert-deftest bitbucket-test-pull-request-cached ()
+  "The PR object is cached: a second fetch hits no network."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-cache-ttl 300))
+      (bitbucket-cache-clear)
+      (let ((pr (bitbucket-pull-request "acme/repo" 180)))
+        (should (= (alist-get 'id pr) 180)))
+      ;; second call must not touch the service again
+      (setq bitbucket-mock-calls nil)
+      (let ((pr (bitbucket-pull-request "acme/repo" 180)))
+        (should (= (alist-get 'id pr) 180)))
+      (should (null bitbucket-mock-calls)))))
+
+(ert-deftest bitbucket-test-pull-request-ttl-zero-bypasses ()
+  "With TTL 0 (the `g'-refresh policy) the PR object is always re-fetched."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-cache-ttl 0))
+      (bitbucket-cache-clear)
+      (bitbucket-pull-request "acme/repo" 180)
+      (setq bitbucket-mock-calls nil)
+      (bitbucket-pull-request "acme/repo" 180)
+      (should bitbucket-mock-calls))))
+
+(ert-deftest bitbucket-test-pull-request-nil-not-cached ()
+  "A nil PR result is not cached; a later fetch retries and can succeed."
+  (let ((bitbucket-cache-ttl 300)
+        (calls 0))
+    (bitbucket-cache-clear)
+    (cl-letf (((symbol-function 'bitbucket-api-request)
+               (lambda (&rest _)
+                 (cl-incf calls)
+                 (if (= calls 1) nil '((id . 180))))))
+      (should (null (bitbucket-pull-request "acme/repo" 180)))
+      ;; not cached -> retried, now succeeds
+      (should (equal (bitbucket-pull-request "acme/repo" 180) '((id . 180))))
+      (should (= calls 2))
+      ;; now cached -> no third call
+      (should (equal (bitbucket-pull-request "acme/repo" 180) '((id . 180))))
+      (should (= calls 2)))))
+
+(ert-deftest bitbucket-test-comments-not-cached ()
+  "Comments are deliberately NOT cached: every call hits the service."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-cache-ttl 300))
+      (bitbucket-cache-clear)
+      (bitbucket-pull-request-comments "acme/repo" 180)
+      (setq bitbucket-mock-calls nil)
+      (bitbucket-pull-request-comments "acme/repo" 180)
+      ;; a fresh fetch happened (comments change constantly during review)
+      (should bitbucket-mock-calls))))
+
+(ert-deftest bitbucket-test-stats-cached-by-commit ()
+  "Stats are cached keyed by the PR's source commit (one compute per commit)."
+  (let ((bitbucket-cache-ttl 300)
+        (computes 0)
+        (pr '((id . 180) (source (commit (hash . "abc123"))))))
+    (bitbucket-cache-clear)
+    (cl-letf (((symbol-function 'bitbucket--pull-request-stats-1)
+               (lambda (&rest _) (cl-incf computes) (list :files 2))))
+      (should (equal (bitbucket-pull-request-stats "acme/repo" 180 pr) '(:files 2)))
+      (should (equal (bitbucket-pull-request-stats "acme/repo" 180 pr) '(:files 2)))
+      (should (= computes 1))
+      ;; a new commit -> a fresh key -> recompute
+      (let ((pr2 '((id . 180) (source (commit (hash . "def456"))))))
+        (bitbucket-pull-request-stats "acme/repo" 180 pr2)
+        (should (= computes 2))))))
+
+(ert-deftest bitbucket-test-diff-cached-by-commit ()
+  "The diff is cached when a commit hash is supplied; absent it, never cached."
+  (let ((bitbucket-cache-ttl 300)
+        (fetches 0))
+    (bitbucket-cache-clear)
+    (cl-letf (((symbol-function 'bitbucket--pull-request-diff-1)
+               (lambda (&rest _) (cl-incf fetches) "DIFFTEXT")))
+      ;; with a commit -> cached
+      (should (equal (bitbucket-pull-request-diff "acme/repo" 180 "abc123") "DIFFTEXT"))
+      (should (equal (bitbucket-pull-request-diff "acme/repo" 180 "abc123") "DIFFTEXT"))
+      (should (= fetches 1))
+      ;; without a commit -> not cacheable, always re-fetched
+      (setq fetches 0)
+      (bitbucket-pull-request-diff "acme/repo" 181)
+      (bitbucket-pull-request-diff "acme/repo" 181)
+      (should (= fetches 2)))))
+
+(ert-deftest bitbucket-test-diff-empty-not-cached ()
+  "An empty diff is not cached, so a transient empty response is re-fetched."
+  (let ((bitbucket-cache-ttl 300)
+        (calls 0))
+    (bitbucket-cache-clear)
+    (cl-letf (((symbol-function 'bitbucket--pull-request-diff-1)
+               (lambda (&rest _)
+                 (cl-incf calls)
+                 (if (= calls 1) "" "REAL DIFF"))))
+      (should (equal (bitbucket-pull-request-diff "acme/repo" 180 "abc") ""))
+      ;; empty wasn't cached -> retried, now gets the real diff
+      (should (equal (bitbucket-pull-request-diff "acme/repo" 180 "abc") "REAL DIFF"))
+      (should (= calls 2)))))
+
 (provide 'bitbucket-api-test)
 ;;; bitbucket-api-test.el ends here

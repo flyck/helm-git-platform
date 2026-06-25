@@ -83,11 +83,22 @@ Off by default: resolved threads are hidden to keep the code view
 focused on what still needs attention."
   :type 'boolean :group 'bitbucket)
 
-(defun gp-overlay-comments-by-file (comments)
+(defcustom gp-overlay-show-outdated nil
+  "When non-nil, outdated comments are also drawn as overlays.
+Off by default: an outdated comment is anchored to a line no
+longer present in the PR's current diff, so its overlay would land
+on unrelated code.  Outdated-ness is computed from the diff (see
+`gp-comment-outdated-p'); with no diff available nothing is treated
+as outdated.  Hidden to keep the view accurate."
+  :type 'boolean :group 'bitbucket)
+
+(defun gp-overlay-comments-by-file (comments &optional diff-by-file)
   "Group inline COMMENTS into an alist keyed by file path.
 Returns ((PATH . ((LINE . (COMMENT...)) ...)) ...).  Non-inline
 comments and those without a line are skipped; resolved comments
-are skipped unless `gp-overlay-show-resolved' is set.  Lines and
+are skipped unless `gp-overlay-show-resolved' is set, and -- when
+DIFF-BY-FILE (from `gp-split-diff-by-file') is supplied -- outdated
+comments unless `gp-overlay-show-outdated' is set.  Lines and
 files are kept in ascending / insertion order."
   (let ((by-file '()))
     (dolist (c comments)
@@ -95,7 +106,9 @@ files are kept in ascending / insertion order."
             (line (gp-overlay--inline-line c)))
         (when (and path line
                    (or gp-overlay-show-resolved
-                       (not (gp-comment-resolved-p c))))
+                       (not (gp-comment-resolved-p c)))
+                   (or gp-overlay-show-outdated
+                       (not (gp-comment-outdated-p c diff-by-file))))
           (let* ((file-entry (or (assoc path by-file)
                                  (car (push (cons path '()) by-file))))
                  (line-entry (assq line (cdr file-entry))))
@@ -485,7 +498,15 @@ comments.  Returns the total number of overlays drawn."
          (id (alist-get 'id pr))
          (dir (gp-local-resolve-dir full-name t))
          (comments (gp-pull-request-comments full-name id))
-         (by-file (gp-overlay-comments-by-file comments))
+         ;; fetch the diff so outdated comments (anchored to lines no
+         ;; longer in the diff) can be filtered out; nil on any error
+         ;; just disables the outdated filter, never breaks overlays.
+         (diff-by-file (unless gp-overlay-show-outdated
+                         (ignore-errors
+                           (gp-split-diff-by-file
+                            (gp-pull-request-diff
+                             full-name id (gp-pr-source-commit pr))))))
+         (by-file (gp-overlay-comments-by-file comments diff-by-file))
          (total 0))
     (pcase-dolist (`(,path . ,lines) by-file)
       (let ((file (expand-file-name path dir)))
