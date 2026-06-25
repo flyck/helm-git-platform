@@ -484,8 +484,14 @@ Set to nil to always get the PR list."
 
 (defun gp-helm--magit-create-context ()
   "Return (DIR FULL-NAME BRANCH) to offer PR creation, or nil.
-Non-nil only in a magit buffer whose repo+branch resolve and have
-no open PR, and whose branch is not the repo's default branch."
+Non-nil only in a magit buffer whose repo+branch resolve, whose
+branch is not the repo's default branch, AND that has no open PR.
+
+The \"has no open PR\" check uses the SAME source as
+`gp-helm--magit-branch-prs' (the actual repo PR list filtered by
+source branch), not a separate lookup -- so the create-vs-open
+decision can never disagree with itself and drop you into the
+create mask for a branch that already has a PR."
   (when (and gp-helm-create-from-magit
              (derived-mode-p 'magit-mode)
              default-directory)
@@ -496,7 +502,7 @@ no open PR, and whose branch is not the repo's default branch."
       (when (and full-name branch
                  (not (member branch '("main" "master")))
                  (not (equal branch (gp-repo-default-branch full-name)))
-                 (not (gp-watch--pr-for full-name branch)))
+                 (null (gp-helm--magit-branch-prs)))
         (let ((root (or (and (fboundp 'gp-local-find-checkout)
                              (gp-local-find-checkout full-name))
                         (locate-dominating-file dir ".git")
@@ -524,19 +530,23 @@ By default only OPEN PRs are shown; with a prefix argument, or
 \\`C-c m' in the list, INCLUDE-MERGED also shows MERGED/DECLINED."
   (interactive "P")
   (require 'helm)
-  (let (matches)
+  (let (branch-prs ctx)
     (cond
-     ;; magit buffer, branch with no open PR -> offer to create one
+     ;; magit buffer, branch with exactly one open PR -> open it directly.
+     ;; Checked BEFORE create so an existing PR always wins.
      ((and (not include-merged)
-           (setq matches (gp-helm--magit-create-context)))
-      (require 'gp-create)
-      (gp-create-pr (nth 0 matches) (nth 1 matches) (nth 2 matches)))
-     ;; magit buffer, branch with exactly one open PR -> open it directly
-     ((and (not include-merged)
-           (setq matches (gp-helm--magit-branch-prs))
-           (= (length matches) 1))
+           (setq branch-prs (gp-helm--magit-branch-prs))
+           (= (length branch-prs) 1))
       (require 'gp-ui)
-      (gp-show-pr (car matches)))
+      (gp-show-pr (car branch-prs)))
+     ;; magit buffer, branch with NO open PR -> offer to create one.
+     ;; (`gp-helm--magit-create-context' re-checks branch-prs is empty.)
+     ((and (not include-merged)
+           (null branch-prs)
+           (setq ctx (gp-helm--magit-create-context)))
+      (require 'gp-create)
+      (gp-create-pr (nth 0 ctx) (nth 1 ctx) (nth 2 ctx)))
+     ;; several PRs on the branch, default branch, or non-magit -> full list
      (t (gp-helm--list include-merged)))))
 
 (defun gp-helm--magit-branch-prs ()
