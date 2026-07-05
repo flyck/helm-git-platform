@@ -231,8 +231,9 @@ Bitbucket :shortcode: emojis are resolved first."
 (defun gp--comment-threads (comments)
   "Order COMMENTS into a depth-tagged list ((COMMENT . DEPTH) ...).
 Replies (those with a parent) are placed directly after their
-parent and one level deeper, recursively.  Orphans/top-level
-comments keep their original order."
+parent and one level deeper, recursively.  Top-level comments are
+ordered newest first; replies within a thread keep their
+original (chronological) order."
   (let ((children (make-hash-table :test 'eql))   ;; parent-id -> (child...)
         (ids (make-hash-table :test 'eql))
         (roots '())
@@ -249,7 +250,12 @@ comments keep their original order."
                   (push (cons c depth) result)
                   (dolist (kid (gethash (alist-get 'id c) children))
                     (walk kid (1+ depth)))))
-      (dolist (root (nreverse roots)) (walk root 0)))
+      ;; newest root first; ISO-8601 strings compare chronologically
+      (dolist (root (sort (nreverse roots)
+                          (lambda (a b)
+                            (string> (or (alist-get 'created_on a) "")
+                                     (or (alist-get 'created_on b) "")))))
+        (walk root 0)))
     (nreverse result)))
 
 (defun gp--detail-comment-marked-p (comment)
@@ -291,6 +297,10 @@ reply threads."
              "  "
              (propertize (gp--comment-location comment)
                          'face 'gp-branch-face)
+             (let ((ts (or .created_on .updated_on)))
+               (if ts (propertize (concat "  " (gp--relative-time ts))
+                                  'face 'shadow)
+                 ""))
              (if resolved (propertize "  ✓ resolved" 'face 'success) "")
              (if outdated (propertize "  ⊘ outdated" 'face 'shadow) "")))
           (when (and pr .inline.path)

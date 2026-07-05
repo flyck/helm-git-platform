@@ -83,6 +83,34 @@
     ;; depth-first: 1, 2(reply), 4(reply-of-reply), 5(reply), then root 3
     (should (equal order '((1 . 0) (2 . 1) (4 . 2) (5 . 1) (3 . 0))))))
 
+(ert-deftest gp-test-comment-threads-newest-first ()
+  "Top-level comments sort newest first; replies stay chronological."
+  (let* ((comments '(((id . 1) (created_on . "2026-07-01T10:00:00+00:00"))
+                     ((id . 2) (created_on . "2026-07-03T09:00:00+00:00"))
+                     ((id . 3) (parent (id . 1))
+                      (created_on . "2026-07-02T08:00:00+00:00"))
+                     ((id . 4) (parent (id . 1))
+                      (created_on . "2026-07-02T09:00:00+00:00"))))
+         (order (mapcar (lambda (cd) (cons (alist-get 'id (car cd)) (cdr cd)))
+                        (gp--comment-threads comments))))
+    ;; root 2 (newer) before root 1; 1's replies keep chronological order
+    (should (equal order '((2 . 0) (1 . 0) (3 . 1) (4 . 1))))))
+
+(ert-deftest gp-test-comment-heading-relative-time ()
+  "The comment heading shows a relative timestamp."
+  (with-temp-buffer
+    (magit-section-mode)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (magit-section)
+        (gp--insert-comment
+         `((id . 1)
+           (created_on . ,(format-time-string
+                           "%Y-%m-%dT%H:%M:%S+00:00"
+                           (time-subtract (current-time) (* 5 60)) t))
+           (user (display_name . "Alice"))
+           (content (raw . "hi"))))))
+    (should (string-match-p "5 minutes ago" (buffer-string)))))
+
 (ert-deftest gp-test-comment-threads-orphan-parent ()
   "A reply whose parent isn't in the set is treated as a root."
   (let ((threads (gp--comment-threads
