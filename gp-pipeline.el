@@ -227,13 +227,19 @@ with each pipeline's steps fetched.
 :recent is a short list of (PIPELINE . COMMIT-SUMMARY) conses for
 the branch's other recent commits (newest first, no steps fetched)
 -- a lightweight status summary.  Both may be nil.  Returns nil on
-any error (the detail view degrades gracefully)."
-  (ignore-errors
+any error (the detail view degrades gracefully; the error is logged)."
+  (condition-case e
     (let* ((full-name (gp-pr-full-name pr))
            (branch (gp-pr-source-branch pr))
            (commit (gp-pr-source-commit pr))
-           ;; one branch fetch; partition into current-commit vs the rest
-           (all (gp-pipelines-for-branch full-name branch gp-pipeline-max))
+           ;; one branch fetch; partition into current-commit vs the rest.
+           ;; Paged fetches can duplicate a run when a new pipeline starts
+           ;; mid-pagination (the pages shift) -- dedupe by uuid.
+           (all (cl-remove-duplicates
+                 (gp-pipelines-for-branch full-name branch gp-pipeline-max)
+                 :key (lambda (p) (alist-get 'uuid p))
+                 :test #'equal
+                 :from-end t))
            (current (gp-pipelines-match-commit all commit))
            (current-uuids (mapcar (lambda (p) (alist-get 'uuid p)) current))
            (recent (cl-remove-if
@@ -257,7 +263,10 @@ any error (the detail view degrades gracefully)."
                       (cons p (gp-commit-summary
                                (gp-commit-message
                                 full-name (gp-pipeline-commit p)))))
-                    (seq-take recent gp-pipeline-recent-max))))))
+                    (seq-take recent gp-pipeline-recent-max))))
+    (error
+     (gp-log-error "pipeline fetch failed: %s" (error-message-string e))
+     nil)))
 
 (defun gp-pipelines-match-commit (pipelines commit)
   "Return PIPELINES whose target commit matches COMMIT (delegates to backend)."
