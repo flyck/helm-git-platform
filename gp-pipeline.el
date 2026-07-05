@@ -45,6 +45,8 @@
   "Face for a failed pipeline/step." :group 'bitbucket-faces)
 (defface gp-pipeline-stopped-face '((t :inherit shadow))
   "Face for a stopped/halted pipeline/step." :group 'bitbucket-faces)
+(defface gp-pipeline-paused-face '((t :inherit warning :weight bold))
+  "Face for a pipeline paused at an open manual gate." :group 'bitbucket-faces)
 
 (defcustom gp-pipeline-max 20
   "How many recent branch pipelines to fetch before partitioning by commit."
@@ -66,10 +68,16 @@
 
 ;;;; Status formatting (pure) --------------------------------------------------
 
-(defun gp-pipeline--status-glyph (state result)
-  "Return (GLYPH . FACE) for a pipeline/step STATE and RESULT string."
+(defun gp-pipeline--status-glyph (state result &optional step)
+  "Return (GLYPH . FACE) for a pipeline/step STATE and RESULT string.
+A pipeline paused at an open manual gate (stage PAUSED) gets its own
+⏸ glyph instead of the running one.  With STEP non-nil an in-progress
+entry renders as ⟳, so a step actually executing is distinguishable
+from its enclosing running pipeline's ▶."
   (cond
-   ((equal state "IN_PROGRESS") (cons "▶" 'gp-pipeline-running-face))
+   ((equal result "PAUSED") (cons "⏸" 'gp-pipeline-paused-face))
+   ((equal state "IN_PROGRESS")
+    (cons (if step "⟳" "▶") 'gp-pipeline-running-face))
    ((member state '("PENDING" "READY" "BUILDING" nil))
     (cons "…" 'gp-pipeline-running-face))
    ((equal result "SUCCESSFUL") (cons "✔" 'gp-pipeline-success-face))
@@ -79,24 +87,51 @@
     (cons "■" 'gp-pipeline-stopped-face))
    (t (cons "•" 'shadow))))
 
-(defun gp-pipeline--format-duration (step)
-  "Return a short human duration string for STEP, or \"\"."
-  (let ((secs (alist-get 'duration_in_seconds step)))
-    (cond
-     ((null secs) "")
-     ((< secs 60) (format "%ds" secs))
-     ((< secs 3600) (format "%dm%02ds" (/ secs 60) (% secs 60)))
-     (t (format "%dh%02dm" (/ secs 3600) (/ (% secs 3600) 60))))))
+(defun gp-pipeline--format-secs (secs)
+  "Format SECS (a nonnegative integer) as a short human duration string."
+  (cond
+   ((< secs 60) (format "%ds" secs))
+   ((< secs 3600) (format "%dm%02ds" (/ secs 60) (% secs 60)))
+   (t (format "%dh%02dm" (/ secs 3600) (/ (% secs 3600) 60)))))
 
-(defun gp-pipeline--label (pipeline)
-  "Return a one-line label string for PIPELINE (number + status)."
+(defun gp-pipeline--format-duration (step)
+  "Return a short human duration string for STEP, or \"\".
+Bitbucket only fills `duration_in_seconds' once a step completes, so
+for a step still running the elapsed time is computed from its
+`started_on' timestamp instead."
+  (let ((secs (alist-get 'duration_in_seconds step))
+        (started (alist-get 'started_on step)))
+    (cond
+     ((and started (gp-pipeline-step-running-p step))
+      (gp-pipeline--format-secs
+       (max 0 (floor (- (float-time) (float-time (date-to-time started)))))))
+     (secs (gp-pipeline--format-secs secs))
+     (t ""))))
+
+(defun gp-pipeline--manual-gate-open-p (pipeline steps)
+  "Non-nil when PIPELINE is only waiting on an open manual gate.
+Bitbucket keeps reporting stage RUNNING for such pipelines, so the
+gate has to be read off STEPS: nothing is executing, but a manual
+step is startable."
+  (and (not (gp-pipeline-finished-p pipeline))
+       (not (cl-some #'gp-pipeline-step-running-p steps))
+       (cl-some #'gp-pipeline-step-runnable-manual-p steps)))
+
+(defun gp-pipeline--label (pipeline &optional steps)
+  "Return a one-line label string for PIPELINE (number + status).
+When STEPS reveal an open manual gate, show ⏸ and say so instead of
+the indistinguishable running state."
   (let* ((state (gp-pipeline-state pipeline))
          (result (gp-pipeline-result pipeline))
-         (g (gp-pipeline--status-glyph state result))
+         (gated (gp-pipeline--manual-gate-open-p pipeline steps))
+         (g (if gated
+                (cons "⏸" 'gp-pipeline-paused-face)
+              (gp-pipeline--status-glyph state result)))
          (num (gp-pipeline-number pipeline)))
     (concat (propertize (car g) 'face (cdr g))
             (format " Pipeline #%s" (or num "?"))
-            (propertize (format "  %s" (or result state ""))
+            (propertize (format "  %s" (if gated "manual gate open"
+                                         (or result state "")))
                         'face 'shadow))))
 
 ;;;; Rendering -----------------------------------------------------------------
@@ -105,7 +140,7 @@
   "Insert one STEP line as a `gp-pipeline-step-section'."
   (let* ((state (gp-pipeline-step-state step))
          (result (gp-pipeline-step-result step))
-         (g (gp-pipeline--status-glyph state result))
+         (g (gp-pipeline--status-glyph state result 'step))
          (name (or (alist-get 'name step) "step"))
          (dur (gp-pipeline--format-duration step))
          (runnable (gp-pipeline-step-runnable-manual-p step))
@@ -144,7 +179,7 @@ list of prior-commit pipelines shown as a one-line status summary."
                 (magit-insert-section
                     (gp-pipeline-section (cons pipeline steps) collapsed)
                   (magit-insert-heading
-                    (concat "  " (gp-pipeline--label pipeline)
+                    (concat "  " (gp-pipeline--label pipeline steps)
                             (propertize "   s:stop  T:trigger"
                                         'face 'shadow)))
                   (if steps

@@ -24,11 +24,66 @@
   (should (eq (cdr (gp-pipeline--status-glyph "COMPLETED" "STOPPED"))
               'gp-pipeline-stopped-face)))
 
+(ert-deftest gp-test-pipeline-status-glyph-paused-and-step ()
+  "Paused-at-manual-gate pipelines and in-progress steps get own glyphs."
+  ;; a paused pipeline (state IN_PROGRESS, stage PAUSED) is not \"running\"
+  (should (equal (gp-pipeline--status-glyph "IN_PROGRESS" "PAUSED")
+                 '("⏸" . gp-pipeline-paused-face)))
+  ;; an executing step renders ⟳, distinct from the pipeline's ▶
+  (should (equal (car (gp-pipeline--status-glyph "IN_PROGRESS" nil)) "▶"))
+  (should (equal (car (gp-pipeline--status-glyph "IN_PROGRESS" nil 'step)) "⟳"))
+  ;; finished glyphs are unaffected by the step flag
+  (should (equal (car (gp-pipeline--status-glyph "COMPLETED" "SUCCESSFUL" 'step)) "✔")))
+
+(ert-deftest gp-test-pipeline-label-manual-gate ()
+  "A running pipeline stalled at an open manual gate shows ⏸, not ▶.
+Bitbucket reports stage RUNNING for these, so the gate is read off
+the steps."
+  (let* ((p '((build_number . 728)
+              (state (name . "IN_PROGRESS") (stage (name . "RUNNING")))))
+         (done '((state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
+                 (trigger (type . "pipeline_step_trigger_automatic"))))
+         (gate '((state (name . "PENDING") (stage (name . "PAUSED")))
+                 (trigger (type . "pipeline_step_trigger_manual"))))
+         (running '((state (name . "IN_PROGRESS"))
+                    (trigger (type . "pipeline_step_trigger_automatic")))))
+    ;; done + open gate, nothing executing: paused
+    (should (gp-pipeline--manual-gate-open-p p (list done gate)))
+    (let ((label (substring-no-properties
+                  (gp-pipeline--label p (list done gate)))))
+      (should (string-prefix-p "⏸" label))
+      (should (string-match-p "manual gate open" label)))
+    ;; a step is actually executing: still the running glyph
+    (should-not (gp-pipeline--manual-gate-open-p p (list running gate)))
+    (should (string-prefix-p "▶" (substring-no-properties
+                                  (gp-pipeline--label p (list running gate)))))
+    ;; no steps at hand: unchanged running label
+    (should (string-prefix-p "▶" (substring-no-properties
+                                  (gp-pipeline--label p))))))
+
 (ert-deftest gp-test-pipeline-format-duration ()
   (should (equal (gp-pipeline--format-duration '((duration_in_seconds . 5))) "5s"))
   (should (equal (gp-pipeline--format-duration '((duration_in_seconds . 95))) "1m35s"))
   (should (equal (gp-pipeline--format-duration '((duration_in_seconds . 3700))) "1h01m"))
   (should (equal (gp-pipeline--format-duration '((name . "x"))) "")))
+
+(ert-deftest gp-test-pipeline-format-duration-running-step ()
+  ;; A running step has no duration_in_seconds yet; elapsed time comes
+  ;; from started_on.
+  (let* ((started (format-time-string "%Y-%m-%dT%H:%M:%S%z"
+                                      (time-subtract (current-time) 90)))
+         (step `((state (name . "IN_PROGRESS"))
+                 (started_on . ,started))))
+    (should (string-match-p "\\`1m3[01]s\\'"
+                            (gp-pipeline--format-duration step)))
+    ;; live elapsed wins over a stale zero duration while running
+    (should (string-match-p "\\`1m3[01]s\\'"
+                            (gp-pipeline--format-duration
+                             (cons '(duration_in_seconds . 0) step))))
+    ;; a running step without started_on still renders nothing extra
+    (should (equal (gp-pipeline--format-duration
+                    '((state (name . "IN_PROGRESS"))))
+                   ""))))
 
 (ert-deftest gp-test-pipeline-label-has-number-and-status ()
   (let ((p '((build_number . 42) (state (name . "COMPLETED")
