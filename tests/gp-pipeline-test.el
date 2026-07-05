@@ -35,6 +35,15 @@
   ;; finished glyphs are unaffected by the step flag
   (should (equal (car (gp-pipeline--status-glyph "COMPLETED" "SUCCESSFUL" 'step)) "✔")))
 
+(ert-deftest gp-test-pipeline-web-url ()
+  "Web URL deep-links to the pipeline run and optionally the step."
+  (let ((p '((build_number . 728)))
+        (step '((uuid . "{step-3}"))))
+    (should (equal (bitbucket-pipeline-web-url "acme/x" p)
+                   "https://bitbucket.org/acme/x/pipelines/results/728"))
+    (should (equal (bitbucket-pipeline-web-url "acme/x" p step)
+                   "https://bitbucket.org/acme/x/pipelines/results/728/steps/{step-3}"))))
+
 (ert-deftest gp-test-pipeline-label-manual-gate ()
   "A running pipeline stalled at an open manual gate shows ⏸, not ▶.
 Bitbucket reports stage RUNNING for these, so the gate is read off

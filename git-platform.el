@@ -132,6 +132,8 @@ DESCRIPTION/DRAFT/CLOSE-SOURCE-BRANCH/REVIEWER-UUIDS are optional.")
   "Trigger a pipeline in FULL-NAME for BRANCH (pipeline-level).")
 (gp-defop pipeline-run-manual-step (full-name branch pipeline step)
   "Run a waiting manual STEP of PIPELINE in FULL-NAME on BRANCH.")
+(gp-defop pipeline-web-url (full-name pipeline &optional step)
+  "Return the web-UI URL for PIPELINE in FULL-NAME (deep-linked to STEP).")
 (gp-defop pipeline-step-log (full-name pipeline-uuid step-uuid)
   "Return the captured log text for STEP-UUID of PIPELINE-UUID.")
 

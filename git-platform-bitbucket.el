@@ -83,6 +83,8 @@
   (bitbucket-pipeline-trigger full-name branch selector variables))
 (cl-defmethod gp--pipeline-run-manual-step ((_ git-platform-bitbucket) full-name branch pipeline step)
   (bitbucket-pipeline-run-manual-step full-name branch pipeline step))
+(cl-defmethod gp--pipeline-web-url ((_ git-platform-bitbucket) full-name pipeline &optional step)
+  (bitbucket-pipeline-web-url full-name pipeline step))
 (cl-defmethod gp--pipeline-step-log ((_ git-platform-bitbucket) full-name pipeline-uuid step-uuid)
   (bitbucket-pipeline-step-log full-name pipeline-uuid step-uuid))
 

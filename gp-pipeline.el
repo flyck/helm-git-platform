@@ -333,11 +333,13 @@ point is not within a pipeline."
       (gp-detail-pipeline-trigger))))
 
 (defun gp-detail-pipeline-run-manual ()
-  "Start the waiting manual step at point.
-Bitbucket has no public \"advance this step\" API, so this triggers a
-fresh pipeline run targeting the step's pipeline definition (with a
-custom selector when the pipeline has one).  Only offered on a
-manual step that is still waiting."
+  "Run the waiting manual step at point.
+Bitbucket's public API cannot resume a step in place (BCLOUD-20050,
+open since 2020) -- only the web UI can.  So the default action opens
+the step's pipeline page in the browser, where one click runs it
+in place.  Spawning a NEW pipeline run (which re-executes everything
+up to the gate) stays available as an explicit choice.  Only offered
+on a manual step that is still waiting."
   (interactive)
   (let* ((step (gp-pipeline--step-at-point))
          (pp (gp-pipeline--at-point))
@@ -350,15 +352,22 @@ manual step that is still waiting."
     (unless (gp-pipeline-step-runnable-manual-p step)
       (user-error "Manual step %S is not waiting (state: %s)"
                   name (or (gp-pipeline-step-state step) "?")))
-    (when (yes-or-no-p
-           (format "Bitbucket can't resume a step in place; trigger a NEW pipeline run for manual step %S? " name))
-      (condition-case e
-          (progn
-            (gp-pipeline-run-manual-step full-name branch pipeline step)
-            (message "Triggered a new pipeline run for %S" name)
-            (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
-        (error (message "Could not run manual step: %s"
-                        (error-message-string e)))))))
+    (pcase (car (read-multiple-choice
+                 (format "Run manual step %S (API can't resume it in place):"
+                         name)
+                 '((?b "browser"
+                       "open the pipeline in the web UI and run the step there, in place")
+                   (?n "new run"
+                       "trigger a NEW pipeline run of this definition (re-runs earlier steps)")
+                   (?q "quit" "do nothing"))))
+      (?b (browse-url (gp-pipeline-web-url full-name pipeline step)))
+      (?n (condition-case e
+              (progn
+                (gp-pipeline-run-manual-step full-name branch pipeline step)
+                (message "Triggered a new pipeline run for %S" name)
+                (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
+            (error (message "Could not run manual step: %s"
+                            (error-message-string e))))))))
 
 ;;;; Step log buffer (live-polled while running) -------------------------------
 

@@ -40,6 +40,11 @@ Defaults to Bitbucket Cloud.  Override for a different deployment."
 Defaults to Bitbucket Cloud."
   :type 'string)
 
+(defcustom bitbucket-web-base "https://bitbucket.org"
+  "Base URL of the Bitbucket web UI (for browser deep links).
+Defaults to Bitbucket Cloud."
+  :type 'string)
+
 (defcustom bitbucket-workspace-env "BITBUCKET_WORKSPACE"
   "Name of the environment variable holding the default workspace slug."
   :type 'string)
@@ -1108,6 +1113,16 @@ A finished pipeline carries a `result'; a running one may carry a `stage'."
 (defun bitbucket-pipeline-number (pipeline)
   "Return PIPELINE's build number, or nil."
   (alist-get 'build_number pipeline))
+
+(defun bitbucket-pipeline-web-url (full-name pipeline &optional step)
+  "Return the web-UI URL for PIPELINE in FULL-NAME, deep-linked to STEP.
+The web UI is the only place a paused manual step can be run in
+place -- the public API has no per-step trigger (BCLOUD-20050)."
+  (concat bitbucket-web-base
+          (format "/%s/pipelines/results/%s"
+                  full-name (bitbucket-pipeline-number pipeline))
+          (when-let* ((uuid (and step (alist-get 'uuid step))))
+            (format "/steps/%s" uuid))))
 
 (defun bitbucket-pipeline-step-state (step)
   "Return STEP's coarse state string (PENDING/IN_PROGRESS/COMPLETED/…)."
