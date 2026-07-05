@@ -983,11 +983,35 @@ state updates without a manual refresh; polling stops once every
 current-commit pipeline has finished.  Set to 0 to disable."
   :type 'integer :group 'bitbucket)
 
+(defcustom gp-detail-pipeline-watch-interval 1
+  "Seconds between pipeline re-fetches while the head commit has NO run yet.
+After pushing a commit there is a window where the PR's new head has
+no pipeline; a visible detail buffer keeps watching (re-fetching the
+PR head and its pipelines) until the fresh run appears, then hands
+over to `gp-detail-pipeline-poll-interval'.  Only branches that
+already have pipeline history are watched.  Set to 0 to disable."
+  :type 'integer :group 'bitbucket)
+
 (defun gp--detail-pipelines-running-p (data)
   "Non-nil when any current-commit pipeline in DATA is not finished."
   (cl-some (lambda (entry)
              (not (gp-pipeline-finished-p (car entry))))
            (plist-get data :current)))
+
+(defun gp--detail-pipeline-poll-mode (data visible)
+  "Decide what to schedule after a pipelines load of DATA.
+Return `poll' while a current-commit run is unfinished, `watch' when
+a VISIBLE buffer shows a head commit without any run yet (but the
+branch has pipeline history), else nil."
+  (cond
+   ((and (> gp-detail-pipeline-poll-interval 0)
+         (gp--detail-pipelines-running-p data))
+    'poll)
+   ((and (> gp-detail-pipeline-watch-interval 0)
+         visible
+         (null (plist-get data :current))
+         (plist-get data :recent))
+    'watch)))
 
 (defun gp--detail-pipelines-empty-p (data)
   "Non-nil when DATA carries no pipelines at all (no :current, no :recent)."
@@ -1151,8 +1175,9 @@ fresh data bind `bitbucket-cache-ttl' to 0 around the call."
                              gp--detail-stats gp--detail-diff gp--detail-pipelines)
                             ;; heavier data, deferred so it never blocks the paint
                             (gp--detail-load-stats-diff buf pr ttl)
-                            (when gp-detail-show-pipelines
-                              (gp--detail-load-pipelines buf pr))))))))
+                            (if gp-detail-show-pipelines
+                                (gp--detail-load-pipelines buf pr)
+                              (gp-log 'info "pipelines skipped: gp-detail-show-pipelines is nil"))))))))
         (bitbucket-pull-request-async
          full-name id
          (lambda (ok value) (finish-one ok value 'pr)))
@@ -1168,7 +1193,10 @@ must not block the first paint.  Relevance is checked by PR id (see
 `gp--detail-buffer-shows-p'), not a refresh token.  TTL carries the
 caller's cache policy (0 forces fresh on `g')."
   (when (or gp-detail-show-stats gp-detail-show-file-diffs)
-    (run-with-idle-timer
+    ;; Wall-clock timer, NOT `run-with-idle-timer' -- see the twin comment in
+    ;; `gp--detail-load-pipelines': idle timers scheduled from a url sentinel
+    ;; during an ongoing idle period can silently never fire.
+    (run-at-time
      0.1 nil
      (lambda ()
        ;; Proceed as long as BUF is still showing THIS PR.  We deliberately
@@ -1206,12 +1234,21 @@ Kept separate from the main load so the N+1 pipeline calls never
 block or delay the comments/diff view.  While any current-commit
 pipeline is still running, schedules a poll so the buffer tracks a
 live deployment without a manual refresh."
-  (run-with-idle-timer
-   0.1 nil
+  (gp-log 'info "pipelines: load scheduled for %s" (buffer-name buf))
+  ;; A wall-clock timer, NOT `run-with-idle-timer': an idle timer scheduled
+  ;; from a url sentinel while Emacs is already idle can silently never fire
+  ;; (observed live; the sibling stats loader got lucky with ordering).
+  (run-at-time
+   0.2 nil
    (lambda ()
-     (when (buffer-live-p buf)
+     (if (not (buffer-live-p buf))
+         (gp-log 'info "pipelines: buffer gone before load timer fired")
        (condition-case e
            (let ((data (gp-pipeline-fetch-for-pr pr)))
+             (unless (equal data (buffer-local-value 'gp--detail-pipelines buf))
+               (gp-log 'info "pipelines: fetched %d current / %d recent"
+                       (length (plist-get data :current))
+                       (length (plist-get data :recent))))
              (with-current-buffer buf
                ;; `gp-pipeline-fetch-for-pr' returns nil on ANY error (it can't
                ;; tell a transient API hiccup from a genuinely pipeline-less
@@ -1221,22 +1258,49 @@ live deployment without a manual refresh."
                ;; only adopt an empty result on a first-ever load.
                (let ((keep (and (gp--detail-pipelines-empty-p data)
                                 (not (gp--detail-pipelines-empty-p
-                                      gp--detail-pipelines)))))
+                                      gp--detail-pipelines))))
+                     ;; a 1s watch tick usually returns identical data --
+                     ;; skip the rerender then so point/folding stay put
+                     (changed (not (equal data gp--detail-pipelines))))
                  (unless keep
                    (setq gp--detail-pipelines data)
-                   (gp--detail-rerender buf))
+                   (when changed (gp--detail-rerender buf)))
                  (gp--detail-cancel-pipeline-timer)
                  ;; keep polling against whatever we're actually showing
-                 (when (and (> gp-detail-pipeline-poll-interval 0)
-                            (gp--detail-pipelines-running-p
-                             gp--detail-pipelines))
-                   (setq gp--detail-pipeline-timer
-                         (run-with-timer
-                          gp-detail-pipeline-poll-interval nil
-                          #'gp--detail-load-pipelines buf pr))))))
+                 (pcase (gp--detail-pipeline-poll-mode
+                         gp--detail-pipelines (get-buffer-window buf))
+                   ('poll
+                    (setq gp--detail-pipeline-timer
+                          (run-with-timer
+                           gp-detail-pipeline-poll-interval nil
+                           #'gp--detail-load-pipelines buf pr)))
+                   ('watch
+                    (setq gp--detail-pipeline-timer
+                          (run-with-timer
+                           gp-detail-pipeline-watch-interval nil
+                           #'gp--detail-pipeline-watch-tick buf)))))))
          (error
            (gp-log-error "pipeline load failed: %s"
                          (error-message-string e))))))))
+
+(defun gp--detail-pipeline-watch-tick (buf)
+  "One watch cycle: re-fetch BUF's PR head, then reload its pipelines.
+Re-fetching the PR first means a just-pushed commit's fresh run shows
+up as the CURRENT run (the head hash moved), not as a recent one.
+Stops silently when BUF is gone or no longer displayed; the next
+manual refresh restarts the watch."
+  (when (and (buffer-live-p buf) (get-buffer-window buf))
+    (let ((pr (buffer-local-value 'gp--pr buf)))
+      (bitbucket-pull-request-async
+       (gp-pr-full-name pr) (alist-get 'id pr)
+       (lambda (ok new-pr)
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (when (and ok new-pr
+                        (equal (alist-get 'id new-pr) (alist-get 'id gp--pr)))
+               (setq gp--pr new-pr)))
+           (gp--detail-load-pipelines
+            buf (buffer-local-value 'gp--pr buf))))))))
 
 (defun gp--detail-refresh-async (buf pr)
   "Refresh BUF's PR detail asynchronously, bypassing the result cache.

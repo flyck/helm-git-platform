@@ -111,6 +111,29 @@
            (content (raw . "hi"))))))
     (should (string-match-p "5 minutes ago" (buffer-string)))))
 
+(ert-deftest gp-test-pipeline-poll-mode ()
+  "Poll while running; watch when a visible buffer has no current run."
+  (let ((gp-detail-pipeline-poll-interval 6)
+        (gp-detail-pipeline-watch-interval 1)
+        (running '(:current ((((state (name . "IN_PROGRESS")))) ) :recent (r)))
+        (finished '(:current ((((state (name . "COMPLETED")))) ) :recent (r)))
+        (waiting '(:current nil :recent (r)))
+        (no-history '(:current nil :recent nil)))
+    (should (eq (gp--detail-pipeline-poll-mode running t) 'poll))
+    (should (eq (gp--detail-pipeline-poll-mode running nil) 'poll))
+    ;; head commit has runs and they're done: nothing to schedule
+    (should-not (gp--detail-pipeline-poll-mode finished t))
+    ;; no run for the head commit yet: watch, but only while displayed
+    (should (eq (gp--detail-pipeline-poll-mode waiting t) 'watch))
+    (should-not (gp--detail-pipeline-poll-mode waiting nil))
+    ;; branch without any pipeline history is never watched
+    (should-not (gp--detail-pipeline-poll-mode no-history t))
+    ;; both features disabled
+    (let ((gp-detail-pipeline-poll-interval 0)
+          (gp-detail-pipeline-watch-interval 0))
+      (should-not (gp--detail-pipeline-poll-mode running t))
+      (should-not (gp--detail-pipeline-poll-mode waiting t)))))
+
 (ert-deftest gp-test-comment-threads-orphan-parent ()
   "A reply whose parent isn't in the set is treated as a root."
   (let ((threads (gp--comment-threads
