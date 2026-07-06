@@ -44,6 +44,12 @@
 (defvar helm-map)
 (defvar helm-alive-p)
 
+(defvar gp-helm--last-visited-pr-id nil
+  "Id of the last PR opened via `gp-show-pr', so the list can preselect it.
+Set from `gp-ui.el' (which has no Helm dependency) so leaving a
+detail buffer back to the overview lands the cursor back on the
+PR you came from.")
+
 ;;;; Faces --------------------------------------------------------------------
 
 (defface gp-helm-id-face '((t :inherit helm-grep-lineno))
@@ -617,7 +623,9 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
       (helm :sources sources
             :truncate-lines t
             :buffer "*helm git-platform*"
-            :full-frame gp-helm-full-frame))))
+            :full-frame gp-helm-full-frame
+            :preselect (when gp-helm--last-visited-pr-id
+                         (format "#%s " gp-helm--last-visited-pr-id))))))
 
 (defun gp-helm--scan-pipelines-async (prs)
   "Fetch each PR's latest-commit pipeline state in parallel, refreshing live.

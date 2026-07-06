@@ -63,6 +63,66 @@
           (should (string-match-p "send to terminal \\\[t\\\]" text))
           (should (string-match-p "view in browser \\\[w\\\]" text)))))))
 
+(ert-deftest gp-test-list-find-pr-point-locates-section ()
+  "`gp--list-find-pr-point' returns the start of the matching PR section."
+  (let* ((prs (gp-test--mock-prs))
+         (uuid "{21d7839d-779f-44b2-8c40-6f43ac90be06}")
+         (target-id (alist-get 'id (nth 2 prs))))
+    (with-temp-buffer
+      (gp-list-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-list prs uuid))
+      (let ((pos (gp--list-find-pr-point target-id)))
+        (should pos)
+        (goto-char pos)
+        (should (string-match-p (format "#%s" target-id)
+                                (buffer-substring-no-properties
+                                 (point) (line-end-position))))))))
+
+(ert-deftest gp-test-list-find-pr-point-nil-when-absent ()
+  (let* ((prs (gp-test--mock-prs))
+         (uuid "{21d7839d-779f-44b2-8c40-6f43ac90be06}"))
+    (with-temp-buffer
+      (gp-list-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-list prs uuid))
+      (should-not (gp--list-find-pr-point -1)))))
+
+(ert-deftest gp-test-render-detail-shows-reviewers ()
+  "The overview section lists reviewers and their approval state."
+  (let* ((base (car (gp-test--mock-prs)))
+         (pr (append
+              `((participants
+                 . (((role . "REVIEWER") (state . "approved") (approved . t)
+                     (user (display_name . "Alice")))
+                    ((role . "REVIEWER") (state . "changes_requested")
+                     (user (display_name . "Bob")))
+                    ((role . "REVIEWER") (state . nil)
+                     (user (display_name . "Carol")))
+                    ((role . "PARTICIPANT") (state . "approved") (approved . t)
+                     (user (display_name . "NotAReviewer"))))))
+              base)))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr nil))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "✅ Alice" text))
+          (should (string-match-p "❌ Bob" text))
+          (should (string-match-p "⏳ Carol" text))
+          (should-not (string-match-p "NotAReviewer" text)))))))
+
+(ert-deftest gp-test-render-detail-no-reviewers-no-line ()
+  "When PR has no participants, no reviewers line is inserted."
+  (let ((pr (car (gp-test--mock-prs))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr nil))
+        (should-not (string-match-p "👥" (buffer-string)))))))
+
 (ert-deftest gp-test-comment-location-inline-vs-general ()
   (should (equal (gp--comment-location
                   '((inline (path . "a/b.ts") (to . 42))))

@@ -36,6 +36,7 @@
 (declare-function magit-status "magit-status")
 (declare-function magit-refresh "magit-mode")
 (declare-function gp-overlay--avatar-image "gp-overlay")
+(defvar gp-helm--last-visited-pr-id)
 
 (defcustom gp-detail-show-avatars t
   "When non-nil and graphical, show author avatars in the detail buffer."
@@ -430,6 +431,32 @@ block at once.  The file name remains clickable and opens the checkout."
       (gp-ui-open-file gp--pr path)
     (user-error "Point is not on a changed file")))
 
+(defun gp--reviewer-state-badge (state approved)
+  "Return a propertized one-glyph badge for a participant's STATE/APPROVED."
+  (cond
+   ((or (equal state "approved") (eq approved t))
+    (propertize "✅" 'face 'success))
+   ((equal state "changes_requested")
+    (propertize "❌" 'face 'error))
+   (t (propertize "⏳" 'face 'shadow))))
+
+(defun gp--insert-reviewers-line (pr)
+  "Insert a line listing PR's reviewers and their approval state, if any."
+  (let ((reviewers (cl-remove-if-not
+                    (lambda (p) (equal (alist-get 'role p) "REVIEWER"))
+                    (alist-get 'participants pr))))
+    (when reviewers
+      (insert "👥 ")
+      (insert (mapconcat
+               (lambda (p)
+                 (let-alist p
+                   (concat (gp--reviewer-state-badge .state .approved)
+                           " "
+                           (propertize (or .user.display_name "?")
+                                       'face 'gp-author-face))))
+               reviewers "   "))
+      (insert "\n"))))
+
 (defun gp--render-detail (pr comments)
   "Render PR and its COMMENTS into the current detail buffer."
   (require 'button)
@@ -485,6 +512,7 @@ block at once.  The file name remains clickable and opens the checkout."
                   " "
                   (propertize (format "-%d" (plist-get s :removed)) 'face 'diff-removed)
                   "\n")))
+      (gp--insert-reviewers-line pr)
       (insert "\n")
       (gp--insert-action-button
        "← Back [b]" "Return to the pull-request list"
@@ -950,15 +978,30 @@ Includes the title and repo so buffers are easy to tell apart, e.g.
     (pop-to-buffer buf)))
 
 (defun gp-refresh ()
-  "Fetch and redraw the PR list."
+  "Fetch and redraw the PR list, restoring point to the last-visited PR."
   (interactive)
   (let* ((uuid (gp-user-uuid))
-         (prs (gp-workspace-pull-requests)))
+         (prs (gp-workspace-pull-requests))
+         (last-id (and (boundp 'gp-helm--last-visited-pr-id)
+                       gp-helm--last-visited-pr-id)))
     (setq gp--prs prs)
     (let ((inhibit-read-only t))
       (erase-buffer)
       (gp--render-list prs uuid))
-    (goto-char (point-min))))
+    (goto-char (or (and last-id (gp--list-find-pr-point last-id))
+                   (point-min)))))
+
+(defun gp--list-find-pr-point (id)
+  "Return the start of the PR section for ID in the current list buffer, or nil."
+  (when (slot-boundp magit-root-section 'children)
+    (catch 'found
+      (dolist (group (oref magit-root-section children))
+        (when (slot-boundp group 'children)
+          (dolist (sec (oref group children))
+            (when (and (object-of-class-p sec 'gp-pr-section)
+                       (equal (alist-get 'id (oref sec value)) id))
+              (throw 'found (oref sec start))))))
+      nil)))
 
 (defun gp-visit-pr ()
   "Open the detail buffer for the PR at point."
@@ -1109,6 +1152,8 @@ shows a blank or frozen page.  The full PR object and comments are
 then fetched in the background (cached where it makes sense), and
 the heavier stats/diff and pipelines fold in afterwards.  A ⏳
 spinner near the title marks the in-flight load."
+  (when (boundp 'gp-helm--last-visited-pr-id)
+    (setq gp-helm--last-visited-pr-id (alist-get 'id pr)))
   (let ((buf (get-buffer-create (gp--detail-buffer-name pr))))
     (with-current-buffer buf
       ;; Only (re)initialise the mode on a fresh buffer.  `gp-detail-mode' is a
