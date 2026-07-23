@@ -1,18 +1,16 @@
 # helm-git-platform
 
-A magit-flavoured **git-platform client** for Emacs. Browse pull requests
-across your whole workspace, drill into changed files and comments with Helm,
-jump to the matching local checkout and switch branches safely, see inline
-review comments as overlays on the code, and watch live PR counts in the mode
-line.
+A magit-flavoured **git-platform client** for Emacs. Browse pull requests across your whole
+workspace, drill into changed files and comments with Helm, jump to the matching local checkout
+and switch branches safely, see inline review comments as overlays on the code, and watch live PR
+counts in the mode line.
 
-It talks to a forge through a backend protocol (`git-platform`).
-**Bitbucket Cloud is the only backend implemented today**, but the UI, overlays,
-checkout service and Helm front-end are all platform-agnostic — adding another
-forge (GitHub, GitLab, …) is a matter of writing one backend.
+It talks to a forge through a backend protocol (`git-platform`).  **Bitbucket Cloud is the only
+backend implemented today**, but the UI, overlays, checkout service and Helm front-end are all
+platform-agnostic — adding another forge (GitHub, GitLab, …) is a matter of writing one backend.
 
-> Nothing is hardcoded to a workspace or host — every value is a `defcustom`,
-> and credentials come from the environment or `auth-source`.
+> Nothing is hardcoded to a workspace or host — every value is a `defcustom`, and credentials come
+> from the environment or `auth-source`.
 
 ## Install
 
@@ -56,9 +54,9 @@ A fuller, annotated example is in [`examples/use-package.el`](examples/use-packa
 | `markdown-mode` | the Markdown compose buffer + preview | no |
 | `emojify` | `:emoji:` shortcodes and completion | no |
 
-Only `magit-section` and `transient` are pulled in by `:vc`/`:straight`. The
-rest are soft dependencies — install the ones you want with `M-x
-package-install` (most setups already have `magit` and `helm`).
+Only `magit-section` and `transient` are pulled in by `:vc`/`:straight`. The rest are soft
+dependencies — install the ones you want with `M-x package-install` (most setups already have
+`magit` and `helm`).
 
 > The example config uses `:after (magit emojify)`, which means use-package
 > won't load the package until **both** are present. Drop names you don't
@@ -90,8 +88,8 @@ Grant the token these scopes:
 | **Pull requests: Write** | *(optional)* post / reply / resolve comments from Emacs |
 | **Pipelines: Write** | *(optional)* stop / trigger / run-manual on pipelines |
 
-Everything except the two **Write** scopes works read-only — omit them for a
-strictly read-only setup (the write actions simply 403).
+Everything except the two **Write** scopes works read-only — omit them for a strictly read-only
+setup (the write actions simply 403).
 
 > **macOS GUI Emacs** doesn't source your shell rc, so exports in `~/.zshrc`
 > are invisible. The optional `bitbucket-env` helper reads them out without
@@ -122,15 +120,14 @@ The core browsing (`gp-helm`, `gp-list`, checkout) works with none of these on.
 | `gp-watch-mode` | Global: live per-repo PR count + auto comment overlays |
 | `gp-magit-mode` | PR comments inside magit-diff buffers |
 
-In the detail buffer and on overlays, most actions show their key in
-`[brackets]` and the buttons are clickable (reply, resolve, new comment, open,
-diff). Comments are written in Markdown with `C-c C-c` to post.
+In the detail buffer and on overlays, most actions show their key in `[brackets]` and the buttons
+are clickable (reply, resolve, new comment, open, diff). Comments are written in Markdown with
+`C-c C-c` to post.
 
-The detail buffer also shows the PR branch's **CI pipelines** (the one with the
-most steps on top; finished pipelines start collapsed, `TAB` expands). On a
-pipeline or step: `s` stops the running pipeline, `T` triggers/re-runs it, `m`
-runs a waiting *manual* step, and `l` opens a step's log in a buffer (tailed
-live while it runs, historical once finished).
+The detail buffer also shows the PR branch's **CI pipelines** (the one with the most steps on top;
+finished pipelines start collapsed, `TAB` expands). On a pipeline or step: `s` stops the running
+pipeline, `T` triggers/re-runs it, `m` runs a waiting *manual* step, and `l` opens a step's log in
+a buffer (tailed live while it runs, historical once finished).
 
 > The platform allows stop and trigger only at the **whole-pipeline** level —
 > there is no per-step stop/trigger API — and step logs are fetched, not
@@ -139,12 +136,11 @@ live while it runs, historical once finished).
 
 ## Limitations
 
-- **Bitbucket Cloud is the only supported platform** today. The code sits
-  behind a backend protocol (`git-platform`) so another forge (GitHub, …)
-  could be added as a backend, but none exists yet.
-- **No side-by-side diff view.** Diffs render unified (both the inline
-  changed-file diffs and Magit's `d`). See
-  [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for why.
+- **Bitbucket Cloud is the only supported platform** today. The code sits behind a backend
+  protocol (`git-platform`) so another forge (GitHub, …)  could be added as a backend, but none
+  exists yet.
+- **No side-by-side diff view.** Diffs render unified (both the inline changed-file diffs and
+  Magit's `d`). See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for why.
 
 ## Tests
 
@@ -154,6 +150,5 @@ live while it runs, historical once finished).
 
 ## More
 
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — dev loop, testing approach,
-  architecture, the API-spec drift check, key bindings reference, and known
-  limitations.
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — dev loop, testing approach, architecture, the
+  API-spec drift check, key bindings reference, and known limitations.
