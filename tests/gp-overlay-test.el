@@ -145,6 +145,24 @@
     (let ((gp-overlay-show-resolved t))
       (should (= (length (cdr (assoc "a.el" (gp-overlay-comments-by-file comments)))) 2)))))
 
+(ert-deftest gp-test-overlay-hides-reply-to-resolved-parent ()
+  "A reply to a resolved thread is hidden even though its own
+`resolution' is unset -- Bitbucket only stamps the comment the
+resolve action targeted, usually the thread root."
+  (clrhash gp--comment-outdated-cache)
+  (let ((comments
+         '(((id . 1) (inline (path . "a.el") (to . 2)) (content (raw . "open")))
+           ((id . 2) (inline (path . "a.el") (to . 5)) (content (raw . "done"))
+            (resolution (user (display_name . "X"))))
+           ((id . 3) (inline (path . "a.el") (to . 5)) (content (raw . "thanks!"))
+            (parent (id . 2))))))
+    (let ((gp-overlay-show-resolved nil))
+      (should (equal (mapcar #'car (cdr (assoc "a.el" (gp-overlay-comments-by-file comments))))
+                     '(2))))                       ;; only line 2 (the open one)
+    (let* ((gp-overlay-show-resolved t)
+           (line5 (cdr (assq 5 (cdr (assoc "a.el" (gp-overlay-comments-by-file comments)))))))
+      (should (= (length line5) 2)))))               ;; parent + reply both shown
+
 (ert-deftest gp-test-overlay-hides-outdated ()
   "Comments anchored to lines absent from the diff are dropped by default.
 Outdated-ness is computed from the diff: line 2 is in the hunk

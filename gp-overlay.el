@@ -92,21 +92,41 @@ on unrelated code.  Outdated-ness is computed from the diff (see
 as outdated.  Hidden to keep the view accurate."
   :type 'boolean :group 'bitbucket)
 
+(defun gp-overlay--comment-thread-resolved-p (comment by-id)
+  "Return non-nil if COMMENT or its thread root is resolved.
+BY-ID is a hash table of comment id -> comment, used to walk up
+`parent.id' links -- a reply's own `resolution' is often unset even
+when the thread it belongs to has been resolved, since Bitbucket
+only sets `resolution' on the comment the resolve action targeted
+\(usually the root)."
+  (let ((c comment) (seen (make-hash-table :test 'eql)))
+    (catch 'done
+      (while c
+        (when (gp-comment-resolved-p c) (throw 'done t))
+        (let ((id (alist-get 'id c)))
+          (when (gethash id seen) (throw 'done nil))
+          (puthash id t seen))
+        (setq c (let-alist c (and .parent.id (gethash .parent.id by-id)))))
+      nil)))
+
 (defun gp-overlay-comments-by-file (comments &optional diff-by-file)
   "Group inline COMMENTS into an alist keyed by file path.
 Returns ((PATH . ((LINE . (COMMENT...)) ...)) ...).  Non-inline
 comments and those without a line are skipped; resolved comments
-are skipped unless `gp-overlay-show-resolved' is set, and -- when
-DIFF-BY-FILE (from `gp-split-diff-by-file') is supplied -- outdated
-comments unless `gp-overlay-show-outdated' is set.  Lines and
-files are kept in ascending / insertion order."
-  (let ((by-file '()))
+-- including replies whose thread root is resolved -- are skipped
+unless `gp-overlay-show-resolved' is set, and -- when DIFF-BY-FILE
+(from `gp-split-diff-by-file') is supplied -- outdated comments
+unless `gp-overlay-show-outdated' is set.  Lines and files are kept
+in ascending / insertion order."
+  (let ((by-file '())
+        (by-id (make-hash-table :test 'eql)))
+    (dolist (c comments) (puthash (alist-get 'id c) c by-id))
     (dolist (c comments)
       (let ((path (let-alist c .inline.path))
             (line (gp-overlay--inline-line c)))
         (when (and path line
                    (or gp-overlay-show-resolved
-                       (not (gp-comment-resolved-p c)))
+                       (not (gp-overlay--comment-thread-resolved-p c by-id)))
                    (or gp-overlay-show-outdated
                        (not (gp-comment-outdated-p c diff-by-file))))
           (let* ((file-entry (or (assoc path by-file)
