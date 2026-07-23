@@ -320,6 +320,36 @@
   (let ((gp-resolve-emoji-shortcodes nil))
     (should (equal (gp-resolve-emojis ":thinking:") ":thinking:"))))
 
+(ert-deftest bitbucket-test-resolve-mentions ()
+  (bitbucket-mock-with-service
+    (let ((text (gp-resolve-emojis "@{712020:7eec9d21-8053-4226-86c1-091cca977ca3} hi")))
+      (setq text (bitbucket-resolve-mentions text))
+      (should (equal text "@User 712020:7eec9d21-8053-4226-86c1-091cca977ca3 hi")))))
+
+(ert-deftest bitbucket-test-resolve-mentions-caches ()
+  (bitbucket-mock-with-service
+    (bitbucket-resolve-mentions "@{abc} and @{abc} again")
+    (let ((calls (cl-remove-if-not
+                  (lambda (c) (string-match-p "/users/" (nth 1 c)))
+                  bitbucket-mock-calls)))
+      (should (= (length calls) 1)))))
+
+(ert-deftest bitbucket-test-resolve-mentions-unresolvable-left-as-is ()
+  (bitbucket-mock-with-service
+    (cl-letf (((symbol-function 'bitbucket-api-request)
+               (lambda (&rest _) (error "not found"))))
+      (should (equal (bitbucket-resolve-mentions "@{missing} hi") "@{missing} hi")))))
+
+(ert-deftest bitbucket-test-resolve-mentions-nil-text ()
+  (should (equal (bitbucket-resolve-mentions nil) "")))
+
+(ert-deftest bitbucket-test-clear-cache-clears-mentions ()
+  (bitbucket-mock-with-service
+    (bitbucket-resolve-mentions "@{abc}")
+    (should (gethash "abc" bitbucket--mention-cache))
+    (bitbucket-clear-cache)
+    (should (= (hash-table-count bitbucket--mention-cache) 0))))
+
 (ert-deftest bitbucket-test-delete-edit-comment-verbs ()
   (bitbucket-mock-with-service
     (bitbucket-delete-comment "ws/slug" 7 55)

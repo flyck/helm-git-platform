@@ -96,6 +96,12 @@ the token in ~/.authinfo.gpg instead of the environment."
 (defvar bitbucket--uuid-cache nil
   "Cached UUID of the authenticated user, as a \"{...}\" string.")
 
+(defvar bitbucket--mention-cache (make-hash-table :test 'equal)
+  "ACCOUNT-ID -> display name, for resolving @{account_id} comment mentions.
+Unlike `bitbucket--result-cache' this never expires on its own -- a
+mentioned user's display name is effectively permanent for our purposes,
+so it is only forgotten via `bitbucket-clear-cache'.")
+
 ;;;; Credentials ------------------------------------------------------------
 
 (defun bitbucket-api-token-value ()
@@ -371,7 +377,43 @@ FOUND is nil on a miss/expiry.  Honours `bitbucket-cache-ttl' = 0
 
 (defun bitbucket-clear-cache ()
   "Forget cached identity so the next call re-resolves it."
-  (setq bitbucket--uuid-cache nil))
+  (setq bitbucket--uuid-cache nil)
+  (clrhash bitbucket--mention-cache))
+
+(defun bitbucket-user (account-id)
+  "Return the user object (alist) for ACCOUNT-ID, or nil if unresolvable.
+Failures (e.g. a deactivated or unknown account) are swallowed -- a
+mention that cannot be resolved should fall back to showing the raw
+token, not break comment rendering."
+  (ignore-errors (bitbucket-api-request "GET" (format "/users/%s" account-id))))
+
+(defun bitbucket-mention-display-name (account-id)
+  "Return the display name for ACCOUNT-ID, cached, or nil if unresolvable."
+  (let ((cached (gethash account-id bitbucket--mention-cache 'miss)))
+    (if (not (eq cached 'miss))
+        cached
+      (let ((name (alist-get 'display_name (bitbucket-user account-id))))
+        (puthash account-id name bitbucket--mention-cache)
+        name))))
+
+(defun bitbucket-resolve-mentions (text)
+  "Replace @{account_id} mention tokens in TEXT with \"@Display Name\".
+Tokens that cannot be resolved (deactivated/unknown accounts, or a
+network error) are left as-is."
+  (if (null text)
+      ""
+    (replace-regexp-in-string
+     "@{\\([^{}]+\\)}"
+     (lambda (m)
+       ;; `bitbucket-mention-display-name' runs regex ops of its own (in the
+       ;; cache lookup, the API layer, or a caller's mock); without
+       ;; `save-match-data' those clobber the match data that
+       ;; `replace-regexp-in-string' itself still needs after this function
+       ;; returns, corrupting the rest of the substitution.
+       (save-match-data
+         (let ((name (bitbucket-mention-display-name (match-string 1 m))))
+           (if name (concat "@" name) m))))
+     text t t)))
 
 (defun bitbucket-workspace-pull-requests (&optional uuid state max-items)
   "Return all pull requests in the workspace involving UUID.

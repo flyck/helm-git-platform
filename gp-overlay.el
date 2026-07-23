@@ -196,8 +196,9 @@ otherwise, followed by the action buttons."
          (collapsed (gp-overlay--collapsed-p comment))
          (face (if resolved 'gp-overlay-resolved-face 'gp-overlay-face))
          (author (let-alist comment (or .user.display_name "?")))
-         (raw (string-trim (gp-resolve-emojis
-                            (let-alist comment (or .content.raw "")))))
+         (raw (string-trim (bitbucket-resolve-mentions
+                            (gp-resolve-emojis
+                             (let-alist comment (or .content.raw ""))))))
          (first-line (car (split-string raw "\n")))
          (avatar (gp-overlay--avatar-image
                   (let-alist comment .user.links.avatar.href)))

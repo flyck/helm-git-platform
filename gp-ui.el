@@ -218,8 +218,8 @@ Handles \[label](url) (showing the label) and bare http(s) URLs."
 
 (defun gp--render-markdown (text)
   "Return TEXT fontified as GitHub-flavoured Markdown, with colored links.
-Bitbucket :shortcode: emojis are resolved first."
-  (setq text (gp-resolve-emojis text))
+Bitbucket :shortcode: emojis and @{account_id} mentions are resolved first."
+  (setq text (bitbucket-resolve-mentions (gp-resolve-emojis text)))
   (if (and text (require 'markdown-mode nil t))
       (with-temp-buffer
         (insert text)
