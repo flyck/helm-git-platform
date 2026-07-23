@@ -19,6 +19,7 @@ emacs --batch -Q \
   -l gp-create.el \
   -l gp-helm-terminal.el \
   -l gp-helm-terminal-iterm2.el \
+  -l gp-helm-terminal-ghostty.el \
   -l gp-pipeline.el \
   -l gp-overlay.el \
   -l gp-watch.el \
@@ -37,6 +38,7 @@ emacs --batch -Q \
   -l tests/gp-compose-test.el \
   -l tests/gp-create-test.el \
   -l tests/gp-helm-terminal-test.el \
+  -l tests/gp-helm-terminal-ghostty-test.el \
   -l tests/gp-ui-test.el \
   -l tests/gp-pipeline-test.el \
   -l tests/gp-overlay-test.el \

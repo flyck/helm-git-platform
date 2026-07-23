@@ -3,9 +3,10 @@
 ;;; Commentary:
 
 ;; A small service layer for handing a PR comment off to a local AI terminal
-;; session. The current backend is iTerm2 only: it reuses a matching session in
-;; the repo when it finds one running Claude/OpenCode, otherwise it opens a new
-;; window in that checkout and sends the prompt there.
+;; session. It reuses a matching session in the repo when it finds one running
+;; Claude/OpenCode, otherwise it opens a new window in that checkout and sends
+;; the prompt there. Two backends are supported: iTerm2 (tty/job-name based
+;; session discovery) and Ghostty (native AppleScript `terminal' ids).
 
 ;;; Code:
 
@@ -18,13 +19,17 @@
 (declare-function gp-helm-terminal-iterm2-list-sessions "gp-helm-terminal-iterm2")
 (declare-function gp-helm-terminal-iterm2-open-session "gp-helm-terminal-iterm2")
 (declare-function gp-helm-terminal-iterm2-send-text "gp-helm-terminal-iterm2")
+(declare-function gp-helm-terminal-ghostty-list-sessions "gp-helm-terminal-ghostty")
+(declare-function gp-helm-terminal-ghostty-open-session "gp-helm-terminal-ghostty")
+(declare-function gp-helm-terminal-ghostty-send-text "gp-helm-terminal-ghostty")
 
 (cl-defstruct gp-helm-terminal-session
   id path job-name name promptp)
 
 (defcustom gp-helm-terminal-backend 'iterm2
   "Backend used for terminal handoff."
-  :type '(choice (const :tag "iTerm2" iterm2))
+  :type '(choice (const :tag "iTerm2" iterm2)
+                 (const :tag "Ghostty" ghostty))
   :group 'bitbucket)
 
 (defcustom gp-helm-terminal-ai-job-regexp "\\`\\(?:claude\\|opencode\\)\\'"
@@ -175,6 +180,9 @@ only matching sessions are reused; otherwise a fresh session is opened."
     ('iterm2
      (require 'gp-helm-terminal-iterm2)
      (gp-helm-terminal-iterm2-list-sessions))
+    ('ghostty
+     (require 'gp-helm-terminal-ghostty)
+     (gp-helm-terminal-ghostty-list-sessions))
     (_ (user-error "Unsupported terminal backend: %S" gp-helm-terminal-backend))))
 
 (defun gp-helm-terminal--safe-list-sessions ()
@@ -202,6 +210,21 @@ terminal session instead of aborting the handoff."
          text gp-helm-terminal-submit-immediately))
        ('open
         (gp-helm-terminal-iterm2-open-session
+         (plist-get plan :directory)
+         text
+         (plist-get plan :command)
+         (plist-get plan :delay)
+         gp-helm-terminal-submit-immediately))
+       (_ (user-error "Unknown terminal action: %S" (plist-get plan :action)))))
+    ('ghostty
+     (require 'gp-helm-terminal-ghostty)
+     (pcase (plist-get plan :action)
+       ('reuse
+        (gp-helm-terminal-ghostty-send-text
+         (gp-helm-terminal-session-id (plist-get plan :session))
+         text gp-helm-terminal-submit-immediately))
+       ('open
+        (gp-helm-terminal-ghostty-open-session
          (plist-get plan :directory)
          text
          (plist-get plan :command)

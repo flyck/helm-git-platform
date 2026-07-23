@@ -105,6 +105,7 @@ strictly read-only setup (the write actions simply 403).
 | **Comments in magit diffs** | `(gp-magit-mode 1)` | omit it |
 | **CI pipelines in the detail view** — the PR branch's pipelines, tabbable, with stop / trigger / manual-run / logs | on by default | `(setq gp-detail-show-pipelines nil)` |
 | **Shell-rc env import** (macOS convenience) | `(require 'bitbucket-env)` + `(bitbucket-env-load)` | omit it (default) |
+| **Send a PR comment to an AI terminal session** (iTerm2 or Ghostty) | `(setq gp-helm-terminal-backend 'iterm2)` or `'ghostty` | omit it (default) |
 
 The core browsing (`gp-helm`, `gp-list`, checkout) works with none of these on.
 
