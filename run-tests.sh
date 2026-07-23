@@ -13,6 +13,7 @@ emacs --batch -Q \
   -l bitbucket-api.el \
   -l git-platform.el \
   -l git-platform-bitbucket.el \
+  -l git-platform-mock.el \
   -l gp-local.el \
   -l gp-checkout.el \
   -l gp-compose.el \
@@ -32,6 +33,7 @@ emacs --batch -Q \
   -l tests/bitbucket-api-test.el \
   -l tests/bitbucket-pipeline-test.el \
   -l tests/git-platform-test.el \
+  -l tests/git-platform-mock-test.el \
   -l tests/gp-api-drift-test.el \
   -l tests/gp-local-test.el \
   -l tests/gp-checkout-test.el \
