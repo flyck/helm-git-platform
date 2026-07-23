@@ -16,12 +16,18 @@ The short version:
   remote, with byte-compiled `.elc` files). Reloading `.el` from this working
   tree only patches the running session — it does **not** update the installed
   copy, so the change is lost on the next Emacs restart. When the user wants
-  the latest version "installed" / "in my `~/.emacs.d`", you must also sync
-  that copy: `cd ~/.emacs.d/elpa/helm-git-platform && git fetch <this-repo>
-  main && git reset --hard <commit>`, **preserving** the untracked
-  package-manager files (`*-autoloads.el`, `*-pkg.el`), then byte-recompile
-  (`emacsclient -e '(byte-recompile-directory "<that-dir>/" 0 t)'`) so no stale
-  `.elc` shadows the new source.
+  the latest version "installed" / "in my `~/.emacs.d`", the correct tool is
+  `package-vc-upgrade` — it fetches the remote, resets the checkout, and
+  byte-recompiles in one step, e.g. via the live session:
+  `emacsclient -e '(package-vc-upgrade (cadr (assq (quote helm-git-platform)
+  package-alist)))'`. Note it only pulls what has been **pushed** to the
+  remote — commit and push first if the change you want reflected is still
+  local-only. Do **not** hand-edit or `rsync` files into `~/.emacs.d/elpa/...`
+  directly; that fights the package manager and leaves it out of sync with its
+  own git state. A manual `git fetch`/`git reset --hard` in that directory
+  works too but is easy to get wrong (e.g. clobbering the untracked
+  `*-autoloads.el`/`*-pkg.el` package-manager files) — prefer
+  `package-vc-upgrade`.
 - **Every new behaviour ships with an ERT test in the same change.** The suite
   is fully offline (Bitbucket is mocked); a green run precedes every reload.
 - **One network choke-point** (`bitbucket-api-request`); **pure core, impure

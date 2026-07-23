@@ -443,7 +443,7 @@ so empty sections are omitted."
       :keymap (or keymap (gp-helm--list-keymap nil))
       :header-name (lambda (name)
                      (concat (gp-helm--header name prs)
-                             "   (C-c g reload · C-c m merged)")))))
+                             "   (C-c g reload · C-c G refresh · C-c m merged)")))))
 
 (defun gp-helm--prs-for-branch (prs branch)
   "Return the PRs from PRS whose source branch is BRANCH."
@@ -453,14 +453,22 @@ so empty sections are omitted."
 
 (defun gp-helm--list-keymap (include-merged)
   "Keymap for the main PR list.
-C-c g reloads; C-c m toggles whether MERGED/DECLINED PRs are shown
-\(currently INCLUDE-MERGED)."
+C-c g reloads (clearing the PR-list cache only); C-c G does a full
+refresh (clearing every cache across all layers, see
+`gp-reset-caches') -- use this when a repo or PR is missing
+because a stale cache (e.g. the 24h repo-list cache) predates it.
+C-c m toggles whether MERGED/DECLINED PRs are shown \(currently
+INCLUDE-MERGED)."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map helm-map)
     (define-key map (kbd "C-c g")
                 (lambda () (interactive)
                   (helm-run-after-exit
                    (lambda () (bitbucket-cache-clear) (gp-helm--list include-merged)))))
+    (define-key map (kbd "C-c G")
+                (lambda () (interactive)
+                  (helm-run-after-exit
+                   (lambda () (gp-reset-caches) (gp-helm--list include-merged)))))
     (define-key map (kbd "C-c m")
                 (lambda () (interactive)
                   (helm-run-after-exit
@@ -595,7 +603,7 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                        (if (listp gp-helm--reviewing-cache)
                            (format " (%d)" (length gp-helm--reviewing-cache))
                          " (…)")
-                       "   (C-c g reload · C-c m merged)"))))
+                       "   (C-c g reload · C-c G refresh · C-c m merged)"))))
           (sources nil))
       (setq sources
             (cons reviewing-source

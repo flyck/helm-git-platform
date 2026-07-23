@@ -38,6 +38,9 @@ Install straight from GitHub — no manual clone needed.
 **Emacs 29 or earlier** — same form, but with [straight.el](https://github.com/radian-software/straight.el):
 swap `:vc (...)` for `:straight (helm-git-platform :host github :repo "flyck/helm-git-platform")`.
 
+**Updating** — with `:vc`, run `M-x package-vc-upgrade RET helm-git-platform RET`
+to pull the latest pushed commit and rebuild it.
+
 **Manual clone** — clone anywhere (e.g. `~/.emacs.d/lisp/helm-git-platform`)
 and replace the recipe line with `:load-path "~/.emacs.d/lisp/helm-git-platform"`.
 

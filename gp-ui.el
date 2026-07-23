@@ -586,6 +586,7 @@ block at once.  The file name remains clickable and opens the checkout."
 (defvar-keymap gp-list-mode-map
   :parent magit-section-mode-map
   "g"   #'gp-refresh
+  "G"   #'gp-refresh-full
   "RET" #'gp-visit-pr
   "o"   #'gp-open-local
   "b"   #'gp-checkout-branch
@@ -990,6 +991,42 @@ Includes the title and repo so buffers are easy to tell apart, e.g.
       (gp--render-list prs uuid))
     (goto-char (or (and last-id (gp--list-find-pr-point last-id))
                    (point-min)))))
+
+(defun gp-reset-caches ()
+  "Clear every cache across the API, watch, helm, overlay and local layers.
+Use this when a repo or PR is missing from the list because a stale
+cache (e.g. the 24h repo-list cache used for \"needs my review\"
+scans) predates it.  Callers that are not loaded are skipped via
+`fboundp'/`boundp' checks, so this is safe to call regardless of
+which optional layers (gp-watch, gp-helm) are in use."
+  (interactive)
+  (when (fboundp 'bitbucket-cache-clear)
+    (bitbucket-cache-clear))
+  (when (fboundp 'bitbucket-clear-cache)
+    (bitbucket-clear-cache))
+  (when (fboundp 'gp-watch-clear-cache)
+    (gp-watch-clear-cache))
+  (when (fboundp 'gp-local-clear-cache)
+    (gp-local-clear-cache))
+  (when (boundp 'gp-overlay--avatar-cache)
+    (clrhash gp-overlay--avatar-cache))
+  (when (boundp 'gp--diff-lines-cache)
+    (clrhash gp--diff-lines-cache))
+  (when (boundp 'gp--comment-outdated-cache)
+    (clrhash gp--comment-outdated-cache))
+  (when (boundp 'gp-helm--pipeline-cache)
+    (clrhash gp-helm--pipeline-cache))
+  (when (boundp 'gp-helm--reviewing-cache)
+    (setq gp-helm--reviewing-cache nil))
+  (when (boundp 'gp-helm--others-cache)
+    (setq gp-helm--others-cache nil))
+  (message "gp: all caches cleared"))
+
+(defun gp-refresh-full ()
+  "Clear all caches, then refresh the PR list from scratch."
+  (interactive)
+  (gp-reset-caches)
+  (gp-refresh))
 
 (defun gp--list-find-pr-point (id)
   "Return the start of the PR section for ID in the current list buffer, or nil."
