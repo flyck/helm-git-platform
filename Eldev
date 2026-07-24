@@ -1,0 +1,22 @@
+; -*- mode: emacs-lisp; lexical-binding: t -*-
+
+(eldev-use-package-archive 'gnu-elpa)
+(eldev-use-package-archive 'melpa)
+
+(setq eldev-project-main-file "helm-git-platform.el")
+
+;; Several *-test.el files `require' mock/support files that live in
+;; tests/ (bitbucket-mock, github-mock) using unqualified names, exactly
+;; like run-tests.sh's `-L tests'.  Without this, Eldev's `test' command
+;; only adds the roots it discovers *-test.el in, not this directory
+;; itself, and loading fails with "Cannot open load file: bitbucket-mock".
+(eldev-add-loading-roots 'test "tests")
+
+;; Fixture JSON isn't Elisp source; keep it (and the mock services, which
+;; are dev-only support code, not part of the installable package) out of
+;; the package fileset.  examples/ is a documentation snippet meant to be
+;; copied into a user's init, not a standalone module -- it isn't wrapped
+;; the way a real init.el would be, so byte-compiling it in isolation
+;; produces false-positive free-function warnings.
+(setf eldev-standard-excludes
+      `(:or ,eldev-standard-excludes "./tests/fixtures" "./examples"))

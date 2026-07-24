@@ -9,6 +9,10 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'gp-local)
+;; Not just for the functions: the resolve-dir tests `let'-bind
+;; `gp-checkout-clone-base', and a runtime-only `require' leaves the
+;; compiler treating that as an unused lexical variable.
+(require 'gp-checkout)
 (require 'bitbucket-mock)
 (require 'git-platform-bitbucket)
 (require 'git-platform-github)
@@ -158,10 +162,12 @@ We never touch the filesystem -- git reports it is a work tree."
   "Outside a work tree (git says so), resolution yields nil -- no crash."
   (gp-local-clear-cache)
   (cl-letf (((symbol-function 'gp-local--git-output)
-             (lambda (&rest args)
-               (pcase args
-                 (`("rev-parse" "--is-inside-work-tree") nil) ; non-zero exit
-                 (_ nil)))))
+             ;; Every git call fails here -- `rev-parse --is-inside-work-tree'
+             ;; exits non-zero outside a work tree, and nothing past it should
+             ;; be reached.  A `pcase' singling that one call out would compile
+             ;; to a dead `equal' (Emacs 30 errors on the unused value), since
+             ;; both branches answer nil anyway.
+             (lambda (&rest _) nil)))
     (should (null (gp-local--dir-remote "/tmp/nope")))))
 
 (ert-deftest gp-test-find-checkout-missing ()
