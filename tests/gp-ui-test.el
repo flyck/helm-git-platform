@@ -11,6 +11,8 @@
 (require 'cl-lib)
 (require 'gp-ui)
 (require 'bitbucket-mock)
+(require 'github-mock)
+(require 'git-platform-github)
 
 (defun gp-test--mock-prs ()
   (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json")))
@@ -47,6 +49,74 @@
   (cons section
         (cl-mapcan #'gp-test--all-sections
                    (oref section children))))
+
+;;;; GitHub-shaped PRs render correctly, not just Bitbucket's ----------------
+;;
+;; Regression coverage for a real bug: gp--pr-heading/gp--insert-pr/
+;; gp--render-detail used to read .source.branch.name/.destination.branch.
+;; name/.author.display_name/.state directly off the PR alist via
+;; let-alist -- correct for Bitbucket's shape, but GitHub's PRs nest
+;; branches under .head/.base and the author under .user.login, and use
+;; a lowercase "open" state, so every one of those fields silently read
+;; as nil and rendered as "?".  These assert against the real GitHub
+;; mock fixture (git-platform-github + github-mock--pr-1) specifically
+;; so a future call site that bypasses the gp-pr-* accessors again would
+;; fail here, not just look fine against Bitbucket's shape.
+
+(defun gp-test--github-backend-pr ()
+  "Return (git-platform-github . github-mock--pr-1), for use inside
+`github-mock-with-service'."
+  (cons (git-platform-github) github-mock--pr-1))
+
+(ert-deftest gp-test-pr-heading-shows-real-author-and-repo-slug-for-github-pr ()
+  (github-mock-with-service
+    (let* ((git-platform-current-backend (git-platform-github))
+           (pr github-mock--pr-1)
+           (h (substring-no-properties (gp--pr-heading pr))))
+      (should (string-match-p "ada" h))
+      (should (string-match-p (regexp-quote "[web]") h)))))
+
+(ert-deftest gp-test-insert-pr-shows-real-branches-for-github-pr ()
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (pr github-mock--pr-1))
+      (with-temp-buffer
+        (gp-list-mode)
+        (let ((inhibit-read-only t))
+          (gp--insert-pr pr))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "feature/widget" text))
+          (should (string-match-p "main" text))
+          (should-not (string-match-p (regexp-quote "? → ?") text)))))))
+
+(ert-deftest gp-test-render-detail-shows-real-branches-and-author-for-github-pr ()
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (pr github-mock--pr-1))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "someone-else")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail pr nil))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "feature/widget → main" text))
+            (should (string-match-p "👤 ada" text))
+            (should-not (string-match-p (regexp-quote "? → ?") text))
+            (should-not (string-match-p (regexp-quote "👤 ?") text))))))))
+
+(ert-deftest gp-test-render-detail-shows-mark-ready-for-open-github-pr-authored-by-me ()
+  "The draft-toggle button must key off `gp-pr-open-p', not a raw
+\"OPEN\" string comparison -- GitHub's `state' is lowercase \"open\"."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (pr (append '((draft . t)) github-mock--pr-1)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail pr nil))
+          (should (string-match-p "Mark ready \\[D\\]"
+                                  (substring-no-properties (buffer-string)))))))))
 
 (ert-deftest gp-test-render-detail-shows-comments ()
   (let ((pr (car (gp-test--mock-prs)))

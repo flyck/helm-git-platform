@@ -24,6 +24,7 @@
 (require 'cl-lib)
 (require 'auth-source)
 (require 'gp-log)
+(require 'git-platform)
 
 (defgroup bitbucket nil
   "Browse Bitbucket Cloud pull requests from Emacs."
@@ -98,7 +99,7 @@ the token in ~/.authinfo.gpg instead of the environment."
 
 (defvar bitbucket--mention-cache (make-hash-table :test 'equal)
   "ACCOUNT-ID -> display name, for resolving @{account_id} comment mentions.
-Unlike `bitbucket--result-cache' this never expires on its own -- a
+Unlike `gp--result-cache' (git-platform.el) this never expires on its own -- a
 mentioned user's display name is effectively permanent for our purposes,
 so it is only forgotten via `bitbucket-clear-cache'.")
 
@@ -321,47 +322,24 @@ when that argument is non-nil."
 
 ;;;; TTL result cache ---------------------------------------------------------
 
-(defcustom bitbucket-cache-ttl 300
-  "Seconds to cache PR-list results (default 5 minutes).
-Set to 0 to disable caching."
-  :type 'integer
-  :group 'bitbucket)
+;; The cache itself is provider-agnostic and now lives in git-platform.el
+;; as `gp-cache-*'/`gp-cache-ttl', shared with the GitHub backend and the
+;; UI layers.  These names are kept as aliases so existing callers (and
+;; the dynamic `(let ((bitbucket-cache-ttl 0)) ...)' rebindings sprinkled
+;; through gp-ui.el/git-platform-mock.el/the test suite) keep working
+;; unchanged.
+(defvaralias 'bitbucket-cache-ttl 'gp-cache-ttl)
+(defalias 'bitbucket-cache-get #'gp-cache-get)
+(defalias 'bitbucket-cache-put #'gp-cache-put)
+(defalias 'bitbucket-with-cache #'gp-cache-with-cache)
 
-(defvar bitbucket--result-cache (make-hash-table :test 'equal)
-  "KEY -> (EXPIRY . VALUE) cache for PR-list fetches.")
-
-(defvar bitbucket--repo-list-cache nil)   ;; defined fully further down
+(defvar bitbucket--repo-list-cache nil)   ;; defined fully further down; Bitbucket-only
 
 (defun bitbucket-cache-clear ()
-  "Clear cached PR-list results and the repo list (forces a fresh fetch)."
+  "Clear cached PR-list results and Bitbucket's repo list (forces a fresh fetch)."
   (interactive)
-  (clrhash bitbucket--result-cache)
+  (gp-cache-clear)
   (setq bitbucket--repo-list-cache nil))
-
-(defun bitbucket-cache-get (key)
-  "Return (FOUND . VALUE) for KEY from the result cache.
-FOUND is nil on a miss/expiry.  Honours `bitbucket-cache-ttl' = 0
-\(always a miss)."
-  (if (<= bitbucket-cache-ttl 0)
-      (cons nil nil)
-    (let ((entry (gethash key bitbucket--result-cache)))
-      (if (and entry (< (float-time) (car entry)))
-          (progn (gp-log 'cache "hit %S" key) (cons t (cdr entry)))
-        (cons nil nil)))))
-
-(defun bitbucket-cache-put (key value)
-  "Cache VALUE under KEY for `bitbucket-cache-ttl' seconds (no-op if 0)."
-  (when (> bitbucket-cache-ttl 0)
-    (puthash key (cons (+ (float-time) bitbucket-cache-ttl) value)
-             bitbucket--result-cache))
-  value)
-
-(defun bitbucket-with-cache (key thunk)
-  "Return cached value for KEY, or call THUNK, caching for `bitbucket-cache-ttl'."
-  (let ((hit (bitbucket-cache-get key)))
-    (if (car hit)
-        (cdr hit)
-      (bitbucket-cache-put key (funcall thunk)))))
 
 ;;;; High-level endpoints ----------------------------------------------------
 
@@ -837,7 +815,7 @@ Requires Pull-requests:Write.  Returns the updated comment."
   (equal (let-alist comment .user.uuid) uuid))
 
 (defun bitbucket-approve-pr (full-name id &optional unapprove)
-  "Approve PR ID in FULL-NAME ("ws/slug").
+  "Approve PR ID in FULL-NAME (\"ws/slug\").
 With UNAPPROVE non-nil, retract a previous approval instead.
 Requires Pull-requests:Write."
   (bitbucket-api-request
@@ -845,7 +823,7 @@ Requires Pull-requests:Write."
    (format "/repositories/%s/pullrequests/%s/approve" full-name id)))
 
 (defun bitbucket-request-changes-pr (full-name id &optional unrequest)
-  "Request changes on PR ID in FULL-NAME ("ws/slug").
+  "Request changes on PR ID in FULL-NAME (\"ws/slug\").
 With UNREQUEST non-nil, retract a previous changes-request instead.
 Requires Pull-requests:Write."
   (bitbucket-api-request
@@ -889,7 +867,8 @@ commit hash is unavailable the result is not cached."
         stats))))
 
 (defun bitbucket--pull-request-stats-1 (full-name id pr)
-  "Compute the diffstat plist for PR (uncached).  See `bitbucket-pull-request-stats'."
+  "Compute the diffstat plist for PR (uncached).
+See `bitbucket-pull-request-stats'."
   (let* ((diffstat-url (let-alist pr .links.diffstat.href))
          (stat (when diffstat-url
                  (bitbucket-api-paged diffstat-url nil)))

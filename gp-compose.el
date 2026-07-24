@@ -36,7 +36,7 @@
   "Plist describing where the composed comment goes:
 \(:full-name S :id N :inline (PATH . LINE) :parent ID
  :submit-function FN :on-success FN).
-SUBMIT-FUNCTION defaults to `bitbucket-create-comment'.")
+SUBMIT-FUNCTION defaults to `gp-create-comment' on the active backend.")
 
 (defvar-local gp-compose--return-window nil
   "Window configuration to restore after the compose buffer closes.")
@@ -117,17 +117,33 @@ and adds :emoji: shortcode completion via `completion-at-point'."
 
 (defun gp-compose-render-markdown (text)
   "Render TEXT as Markdown into a fontified buffer, returning that buffer.
-Uses `markdown-mode' fontification when available, else inserts
-TEXT verbatim.  Pure enough to test: it touches only its own
-temporary-ish buffer."
+Uses `markdown-mode' with `markdown-hide-markup' turned on when
+available (so `**bold**'/`# heading' actually LOOK bold/large, markup
+characters hidden, not just syntax-colored) else inserts TEXT
+verbatim.  Pure enough to test: it touches only its own
+temporary-ish buffer.
+
+Turns `view-mode' off before erasing: a stale preview buffer left in
+`view-mode' from a previous call can leave `buffer-read-only' set in
+a way `inhibit-read-only' around just the erase/insert doesn't
+reliably unwind before `view-mode' is re-enabled at the end, so the
+mode is explicitly toggled off first rather than relied upon to stay
+inert."
   (let ((buf (get-buffer-create gp-compose-preview-buffer)))
     (with-current-buffer buf
+      (when view-mode (view-mode -1))
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert (or text ""))
-        (when (require 'markdown-mode nil t)
-          (delay-mode-hooks (gfm-mode))
-          (font-lock-ensure))
+        (if (require 'markdown-mode nil t)
+            (progn
+              ;; `gfm-mode' runs `kill-all-local-variables' on entry, so
+              ;; `markdown-hide-markup' must be set AFTER the mode is
+              ;; active, not before -- setting it first is silently wiped.
+              (delay-mode-hooks (gfm-mode))
+              (setq-local markdown-hide-markup t)
+              (font-lock-ensure))
+          (text-mode))
         (goto-char (point-min))
         (view-mode 1)))
     buf))
@@ -137,6 +153,13 @@ temporary-ish buffer."
   (interactive)
   (let ((text (buffer-string)))
     (display-buffer (gp-compose-render-markdown text))))
+
+(defun gp-compose--kill-preview-buffer ()
+  "Kill the Markdown preview buffer, if one exists.
+Called on submit/cancel so a stray preview from this session doesn't
+linger (and doesn't carry stale content into the next compose)."
+  (when-let* ((buf (get-buffer gp-compose-preview-buffer)))
+    (kill-buffer buf)))
 
 ;;;; Submit / cancel ---------------------------------------------------------
 
@@ -201,6 +224,7 @@ Lines that are blank, already end in two spaces, or sit inside a
       (let ((on-success (plist-get target :on-success)))
         (when on-success (funcall on-success created)))
       (kill-buffer (current-buffer))
+      (gp-compose--kill-preview-buffer)
       (when winconf (set-window-configuration winconf))
       (message "Comment posted")
       created)))
@@ -210,6 +234,7 @@ Lines that are blank, already end in two spaces, or sit inside a
   (interactive)
   (let ((winconf gp-compose--return-window))
     (kill-buffer (current-buffer))
+    (gp-compose--kill-preview-buffer)
     (when winconf (set-window-configuration winconf))
     (message "Comment discarded")))
 

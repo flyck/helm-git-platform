@@ -10,10 +10,12 @@ emacs --batch -Q \
   -L . -L tests \
   -l bitbucket-env.el \
   -l gp-log.el \
-  -l bitbucket-api.el \
   -l git-platform.el \
+  -l bitbucket-api.el \
   -l git-platform-bitbucket.el \
   -l git-platform-mock.el \
+  -l github-api.el \
+  -l git-platform-github.el \
   -l gp-local.el \
   -l gp-checkout.el \
   -l gp-compose.el \
@@ -28,9 +30,11 @@ emacs --batch -Q \
   -l gp-magit.el \
   -l gp-helm.el \
   -l tests/bitbucket-mock.el \
+  -l tests/github-mock.el \
   -l tests/bitbucket-env-test.el \
   -l tests/gp-log-test.el \
   -l tests/bitbucket-api-test.el \
+  -l tests/github-api-test.el \
   -l tests/bitbucket-pipeline-test.el \
   -l tests/git-platform-test.el \
   -l tests/git-platform-mock-test.el \

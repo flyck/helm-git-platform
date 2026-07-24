@@ -11,3 +11,6 @@ eln-cache/
 
 # Test/spec drift cache (written to /tmp by default, but just in case)
 /swagger.json
+
+# Eldev workspace
+/.eldev/

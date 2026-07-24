@@ -27,6 +27,7 @@
 (declare-function gp-helm-terminal-send-comments "gp-helm-terminal")
 (declare-function gp-compose "gp-compose")
 (declare-function gp-overlay-pr "gp-overlay")
+(declare-function gfm-mode "markdown-mode")
 (declare-function magit-section-toggle "magit-section")
 (declare-function magit-section-hide "magit-section")
 (defvar magit-root-section)
@@ -135,10 +136,10 @@
      " "
      (propertize (or .title "(no title)") 'face 'gp-pr-title-face)
      "  "
-     (propertize (format "[%s]" .destination.repository.slug)
+     (propertize (format "[%s]" (or (gp-pr-repo-slug pr) "?"))
                  'face 'gp-branch-face)
      " "
-     (propertize (or .author.display_name "?") 'face 'gp-author-face)
+     (propertize (or (gp-pr-author-name pr) "?") 'face 'gp-author-face)
      (if (and .comment_count (> .comment_count 0))
          (format "  💬%d" .comment_count) ""))))
 
@@ -146,12 +147,11 @@
   "Insert a collapsible section for PR into the current buffer."
   (magit-insert-section (gp-pr-section pr)
     (magit-insert-heading (gp--pr-heading pr))
-    (let-alist pr
-      (insert (format "  %s → %s\n"
-                      (propertize (or .source.branch.name "?")
-                                  'face 'gp-branch-face)
-                      (propertize (or .destination.branch.name "?")
-                                  'face 'gp-branch-face))))))
+    (insert (format "  %s → %s\n"
+                    (propertize (or (gp-pr-source-branch pr) "?")
+                                'face 'gp-branch-face)
+                    (propertize (or (gp-pr-destination-branch pr) "?")
+                                'face 'gp-branch-face)))))
 
 (defun gp--insert-group (title prs)
   "Insert a magit section grouping PRS under TITLE."
@@ -333,14 +333,15 @@ reply threads."
              "send to terminal [t]"
              "Send this comment to the matching AI terminal session"
              (lambda () (gp-ui-send-comment-to-terminal pr comment)))
-            (insert " ")
-            (if resolved
+            (when (gp-comment-resolvable-p comment)
+              (insert " ")
+              (if resolved
+                  (gp--insert-action-button
+                   "reopen [x]" "Reopen this comment on the PR"
+                   (lambda () (gp-ui-set-resolution pr comment nil)))
                 (gp--insert-action-button
-                 "reopen [x]" "Reopen this comment on the PR"
-                 (lambda () (gp-ui-set-resolution pr comment nil)))
-              (gp--insert-action-button
-               "resolve [x]" "Resolve this comment on the PR"
-               (lambda () (gp-ui-set-resolution pr comment t))))
+                 "resolve [x]" "Resolve this comment on the PR"
+                 (lambda () (gp-ui-set-resolution pr comment t)))))
             (when (gp-comment-own-p comment (gp-user-uuid))
               (insert " ")
               (gp--insert-action-button
@@ -348,7 +349,7 @@ reply threads."
                (lambda () (gp-ui-edit-comment pr comment)))
               (insert " ")
               (gp--insert-action-button
-               "delete" "Delete this comment"
+               "delete [X]" "Delete this comment"
                (lambda () (gp-ui-delete-comment pr comment))))
             (insert "\n"))
           (insert "\n"))
@@ -464,8 +465,8 @@ block at once.  The file name remains clickable and opens the checkout."
     (let-alist pr
       (insert (propertize
                (concat (cond ((gp-pr-draft-p pr) "📝 ")
-                             ((equal .state "MERGED") "🟣 ")
-                             ((equal .state "DECLINED") "🔴 ")
+                             ((gp-pr-merged-p pr) "🟣 ")
+                             ((not (gp-pr-open-p pr)) "🔴 ")
                              (t "🟢 "))
                        (format "#%s" .id))
                'face 'gp-pr-id-face))
@@ -475,13 +476,13 @@ block at once.  The file name remains clickable and opens the checkout."
       (insert "\n")
       (insert "🔀 "
               (propertize (format "%s → %s"
-                                  (or .source.branch.name "?")
-                                  (or .destination.branch.name "?"))
+                                  (or (gp-pr-source-branch pr) "?")
+                                  (or (gp-pr-destination-branch pr) "?"))
                           'face 'gp-branch-face)
               "    "
-              (gp--avatar-string .author.links.avatar.href "👤")
+              (gp--avatar-string (gp-pr-author-avatar pr) "👤")
               " "
-              (propertize (or .author.display_name "?")
+              (propertize (or (gp-pr-author-name pr) "?")
                           'face 'gp-author-face))
       (insert "\n")
       (when (or .created_on .updated_on)
@@ -541,7 +542,7 @@ block at once.  The file name remains clickable and opens the checkout."
          (lambda () (gp-detail-send-to-terminal))))
       ;; draft toggle, only on the user's own open PRs
       (when (and (gp-pr-authored-by-p pr (gp-user-uuid))
-                 (member .state '("OPEN" nil)))
+                 (gp-pr-open-p pr))
         (insert "   ")
         (if (gp-pr-draft-p pr)
             (gp--insert-action-button
@@ -551,13 +552,17 @@ block at once.  The file name remains clickable and opens the checkout."
            "📝 Convert to draft [D]" "Convert this PR back to a draft"
            (lambda () (gp-ui-set-draft pr t)))))
       ;; review actions, only on others' open PRs you can review
-      (when (and (member .state '("OPEN" nil))
+      (when (and (gp-pr-open-p pr)
                  (not (gp-pr-authored-by-p pr (gp-user-uuid))))
-        (let ((mine (gp-pr-my-review-state pr (gp-user-uuid))))
+        (let* ((mine (gp-pr-my-review-state pr (gp-user-uuid)))
+               (dismiss (eq (gp-review-retraction-kind) 'dismiss)))
           (insert "\n   ")
           (if (eq mine 'approved)
               (gp--insert-action-button
-               "↩ Unapprove [a]" "Retract your approval of this PR"
+               (if dismiss "↩ Dismiss approval [a]" "↩ Unapprove [a]")
+               (if dismiss
+                   "Dismiss your approval (stays visible on the PR timeline with a reason)"
+                 "Retract your approval of this PR")
                (lambda () (gp-ui-set-review pr 'approved t)))
             (gp--insert-action-button
              "✅ Approve [a]" "Approve this pull request"
@@ -565,7 +570,10 @@ block at once.  The file name remains clickable and opens the checkout."
           (insert "   ")
           (if (eq mine 'changes)
               (gp--insert-action-button
-               "↩ Clear request [c]" "Retract your request for changes"
+               (if dismiss "↩ Dismiss request [c]" "↩ Clear request [c]")
+               (if dismiss
+                   "Dismiss your changes-requested review (stays visible on the PR timeline with a reason)"
+                 "Retract your request for changes")
                (lambda () (gp-ui-set-review pr 'changes t)))
             (gp--insert-action-button
              "🚫 Request changes [c]" "Request changes on this pull request"
@@ -617,6 +625,7 @@ block at once.  The file name remains clickable and opens the checkout."
   ;; pipelines (pipeline-level stop/trigger; per-step log + manual run)
   "s"   #'gp-detail-pipeline-stop
   "T"   #'gp-detail-pipeline-trigger-or-run-manual
+  "R"   #'gp-detail-pipeline-rerun-step
   "m"   #'gp-detail-toggle-mark
   "l"   #'gp-detail-pipeline-step-log)
 
@@ -777,6 +786,8 @@ block at once.  The file name remains clickable and opens the checkout."
 
 (defun gp-ui-set-resolution (pr comment resolve)
   "Resolve (RESOLVE non-nil) or reopen COMMENT on PR, then refresh the buffer."
+  (unless (gp-comment-resolvable-p comment)
+    (user-error "This comment cannot be resolved/reopened"))
   (let ((full-name (gp-pr-full-name pr))
         (pid (alist-get 'id pr))
         (cid (alist-get 'id comment)))
@@ -850,22 +861,32 @@ block at once.  The file name remains clickable and opens the checkout."
 (defun gp-ui-set-review (pr kind retract)
   "Set your review on PR.
 KIND is `approved' or `changes'; RETRACT non-nil withdraws it.
-Refreshes the detail buffer afterwards."
-  (let ((full-name (gp-pr-full-name pr))
-        (id (alist-get 'id pr)))
+When withdrawing and `gp-review-retraction-kind' reports `dismiss'
+\(GitHub: the withdrawal is a visible timeline event, not a silent
+retraction), prompts for a dismissal reason first.  Refreshes the
+detail buffer afterwards."
+  (let* ((full-name (gp-pr-full-name pr))
+         (id (alist-get 'id pr))
+         (dismiss (and retract (eq (gp-review-retraction-kind) 'dismiss)))
+         (reason (when dismiss
+                   (read-string "Dismissal reason (shown on the PR): "))))
     (pcase kind
-      ('approved (gp-approve-pr full-name id retract))
-      ('changes  (gp-request-changes-pr full-name id retract)))
+      ('approved (gp-approve-pr full-name id retract reason))
+      ('changes  (gp-request-changes-pr full-name id retract reason)))
     (message "PR #%s %s" id
-             (pcase (cons kind retract)
-               ('(approved . nil) "approved")
-               ('(approved . t)   "approval retracted")
-               ('(changes . nil)  "changes requested")
-               ('(changes . t)    "changes-request cleared")))
+             (pcase (list kind retract dismiss)
+               (`(approved nil ,_) "approved")
+               (`(approved t t)    "approval dismissed")
+               (`(approved t ,_)   "approval retracted")
+               (`(changes nil ,_)  "changes requested")
+               (`(changes t t)     "changes-request dismissed")
+               (`(changes t ,_)    "changes-request cleared")))
     (gp-detail-refresh)))
 
 (defun gp-detail-approve ()
-  "Approve the current PR, or retract if you already approved it."
+  "Approve the current PR, or withdraw if you already approved it.
+Withdrawal reads as \"unapprove\" or \"dismiss\" depending on what
+the active backend actually supports -- see `gp-review-retraction-kind'."
   (interactive)
   (let ((pr gp--pr))
     (when (gp-pr-authored-by-p pr (gp-user-uuid))
@@ -874,7 +895,7 @@ Refreshes the detail buffer afterwards."
                       (eq (gp-pr-my-review-state pr (gp-user-uuid)) 'approved))))
 
 (defun gp-detail-request-changes ()
-  "Request changes on the current PR, or retract if you already did."
+  "Request changes on the current PR, or withdraw if you already did."
   (interactive)
   (let ((pr gp--pr))
     (when (gp-pr-authored-by-p pr (gp-user-uuid))
@@ -1004,6 +1025,8 @@ which optional layers (gp-watch, gp-helm) are in use."
     (bitbucket-cache-clear))
   (when (fboundp 'bitbucket-clear-cache)
     (bitbucket-clear-cache))
+  (when (fboundp 'github-clear-cache)
+    (github-clear-cache))
   (when (fboundp 'gp-watch-clear-cache)
     (gp-watch-clear-cache))
   (when (fboundp 'gp-local-clear-cache)
@@ -1220,7 +1243,7 @@ heavier stats/diff and pipelines so the visible render is never
 blocked.  A monotonic token (`gp--detail-refresh-token') guards
 against stale callbacks from a previously-shown PR rendering into
 this buffer.  Cached fetches make a revisit cheap; callers wanting
-fresh data bind `bitbucket-cache-ttl' to 0 around the call."
+fresh data bind `gp-cache-ttl' to 0 around the call."
   (with-current-buffer buf
     (cl-incf gp--detail-refresh-token)
     (let ((token gp--detail-refresh-token)
@@ -1234,7 +1257,7 @@ fresh data bind `bitbucket-cache-ttl' to 0 around the call."
           (failed nil)
           ;; freeze the cache policy in effect at call time so the deferred
           ;; stats/diff fetch honours a `g'-refresh's TTL=0 binding too
-          (ttl bitbucket-cache-ttl))
+          (ttl gp-cache-ttl))
       (cl-labels ((current-p ()
                     (and (buffer-live-p buf)
                          (= token (buffer-local-value 'gp--detail-refresh-token buf))))
@@ -1260,10 +1283,10 @@ fresh data bind `bitbucket-cache-ttl' to 0 around the call."
                             (if gp-detail-show-pipelines
                                 (gp--detail-load-pipelines buf pr)
                               (gp-log 'info "pipelines skipped: gp-detail-show-pipelines is nil"))))))))
-        (bitbucket-pull-request-async
+        (gp-pull-request-async
          full-name id
          (lambda (ok value) (finish-one ok value 'pr)))
-        (bitbucket-pull-request-comments-async
+        (gp-pull-request-comments-async
          full-name id
          (lambda (ok value) (finish-one ok value 'comments)))))))
 
@@ -1291,7 +1314,7 @@ caller's cache policy (0 forces fresh on `g')."
        (when (and (buffer-live-p buf)
                   (gp--detail-buffer-shows-p buf pr))
          (condition-case e
-             (let* ((bitbucket-cache-ttl ttl)
+             (let* ((gp-cache-ttl ttl)
                     (full-name (gp-pr-full-name pr))
                     (id (alist-get 'id pr))
                     (commit (gp-pr-source-commit pr))
@@ -1373,7 +1396,7 @@ Stops silently when BUF is gone or no longer displayed; the next
 manual refresh restarts the watch."
   (when (and (buffer-live-p buf) (get-buffer-window buf))
     (let ((pr (buffer-local-value 'gp--pr buf)))
-      (bitbucket-pull-request-async
+      (gp-pull-request-async
        (gp-pr-full-name pr) (alist-get 'id pr)
        (lambda (ok new-pr)
          (when (buffer-live-p buf)
@@ -1387,10 +1410,10 @@ manual refresh restarts the watch."
 (defun gp--detail-refresh-async (buf pr)
   "Refresh BUF's PR detail asynchronously, bypassing the result cache.
 Existing content stays visible while a fresh PR object, comments,
-stats, diff and pipelines are fetched.  Binding `bitbucket-cache-ttl'
+stats, diff and pipelines are fetched.  Binding `gp-cache-ttl'
 to 0 makes the shared loader (`gp--detail-load-async') and its
 deferred stats/diff fetch ignore the cache, so `g' always re-fetches."
-  (let ((bitbucket-cache-ttl 0))
+  (let ((gp-cache-ttl 0))
     (gp--detail-load-async buf pr)))
 
 (defun gp-detail-refresh ()

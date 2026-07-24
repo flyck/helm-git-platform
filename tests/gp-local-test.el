@@ -10,24 +10,60 @@
 (require 'cl-lib)
 (require 'gp-local)
 (require 'bitbucket-mock)
+(require 'git-platform-bitbucket)
+(require 'git-platform-github)
 
 (ert-deftest gp-test-parse-remote-ssh ()
-  (should (equal (gp-local--parse-remote
-                  "git@bitbucket.org:acme/web-frontend.git")
-                 "acme/web-frontend")))
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (equal (gp-local--parse-remote
+                    "git@bitbucket.org:acme/web-frontend.git")
+                   "acme/web-frontend"))))
 
 (ert-deftest gp-test-parse-remote-https ()
-  (should (equal (gp-local--parse-remote
-                  "https://ada@bitbucket.org/acme/api.git")
-                 "acme/api"))
-  ;; trailing slash, no .git
-  (should (equal (gp-local--parse-remote
-                  "https://bitbucket.org/acme/api/")
-                 "acme/api")))
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (equal (gp-local--parse-remote
+                    "https://ada@bitbucket.org/acme/api.git")
+                   "acme/api"))
+    ;; trailing slash, no .git
+    (should (equal (gp-local--parse-remote
+                    "https://bitbucket.org/acme/api/")
+                   "acme/api"))))
 
-(ert-deftest gp-test-parse-remote-non-bitbucket ()
-  (should (null (gp-local--parse-remote
-                 "git@github.com:foo/bar.git"))))
+(ert-deftest gp-test-parse-remote-bitbucket-url-while-github-active ()
+  "A Bitbucket remote resolves to nil while the GitHub backend is
+active -- no network call against the active backend could ever
+reach it, so it should read as \"no repo here\", not a full-name."
+  (let ((git-platform-current-backend (git-platform-github)))
+    (should (null (gp-local--parse-remote
+                   "git@bitbucket.org:acme/web-frontend.git")))))
+
+(ert-deftest gp-test-parse-remote-github-ssh ()
+  (let ((git-platform-current-backend (git-platform-github)))
+    (should (equal (gp-local--parse-remote
+                    "git@github.com:foo/bar.git")
+                   "foo/bar"))))
+
+(ert-deftest gp-test-parse-remote-github-https ()
+  (let ((git-platform-current-backend (git-platform-github)))
+    (should (equal (gp-local--parse-remote
+                    "https://ada@github.com/foo/bar.git")
+                   "foo/bar"))
+    (should (equal (gp-local--parse-remote
+                    "https://github.com/foo/bar/")
+                   "foo/bar"))))
+
+(ert-deftest gp-test-parse-remote-github-url-while-bitbucket-active ()
+  "A GitHub remote resolves to nil while the Bitbucket backend is
+active -- the mirror case of
+`gp-test-parse-remote-bitbucket-url-while-github-active'."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (null (gp-local--parse-remote
+                   "git@github.com:foo/bar.git")))))
+
+(ert-deftest gp-test-parse-remote-unrecognised-host ()
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (null (gp-local--parse-remote
+                   "git@gitlab.com:foo/bar.git")))))
 
 (defmacro gp-test-with-fake-tree (specs &rest body)
   "Run BODY with a temp git root populated per SPECS.
@@ -104,14 +140,14 @@ We never touch the filesystem -- git reports it is a work tree."
     (should (equal (gp-local--dir-remote "/tmp/wt") "acme/api"))))
 
 (ert-deftest gp-test-dir-remote-falls-back-to-other-remote ()
-  "When `origin' is not Bitbucket, scan other remotes for one that is."
+  "When `origin' is not a recognised forge, scan other remotes for one that is."
   (gp-local-clear-cache)
   (cl-letf (((symbol-function 'gp-local--git-output)
              (lambda (&rest args)
                (pcase args
                  (`("rev-parse" "--is-inside-work-tree") "true")
                  (`("remote" "get-url" "origin")
-                  "git@github.com:fork/api.git")  ; fork on GitHub
+                  "git@gitlab.com:fork/api.git")  ; not Bitbucket or GitHub
                  (`("remote") "origin\nbitbucket")
                  (`("remote" "get-url" "bitbucket")
                   "git@bitbucket.org:acme/api.git")

@@ -82,10 +82,23 @@ Three layers:
    name.
 2. **Generic core** — the `git-platform` protocol (`git-platform.el`) and the
    backend-free `gp-*` UI/overlay/helm/checkout layers. Consumers call
-   `gp-*` functions, which dispatch to the active backend; a different forge is
-   just another backend.
+   `gp-*` functions, which dispatch to the active backend (set via
+   `git-platform-default-backend`); a different forge is just another backend.
+   The TTL result cache (`gp-cache-*`) also lives here, shared by every backend.
 3. **Bitbucket backend** — `bitbucket-api.el` and `git-platform-bitbucket.el`,
    plus the `bitbucket-*` customs. These are deliberately Bitbucket-specific.
+4. **GitHub backend** — `github-api.el` and `git-platform-github.el`, plus the
+   `github-*` customs (`github-api-token`/`GITHUB_TOKEN`). GitHub's REST v3
+   API alone can't do everything Bitbucket's can (no native comment-thread
+   resolution, no review retraction, no draft-state toggle in either
+   direction, no per-job manual pipeline step) but GraphQL covers comment
+   resolution and both draft-toggle directions; only review retraction, a
+   true default-reviewers list, and per-job manual-step triggering remain
+   real gaps — see the Commentary block at the top of `github-api.el` for
+   the full list and the reasoning behind each workaround (a clear
+   `user-error` or a documented nil where nothing can substitute).
+   CI maps to GitHub Actions workflow runs (`/actions/runs`), with a run's
+   jobs standing in for Bitbucket's pipeline "steps".
 
 `bitbucket-env.el` (importing `BITBUCKET_*` from a shell rc file) is an opt-in
 convenience and is **not** required by the umbrella.
@@ -126,7 +139,8 @@ actions uppercase; buttons are clickable):
 | `x` | Resolve / reopen the comment at point |
 | `X` | Delete your own comment at point |
 | `D` | Convert to draft / mark ready (your own PRs) |
-| `s` `T` `m` `l` | Pipeline: stop · trigger · run-manual · step log |
+| `s` `T` `m` `l` | Pipeline: stop · trigger/run-manual · toggle mark · step log |
+| `R` | Re-run the finished pipeline step at point (GitHub Actions only) |
 
 On an inline comment **overlay** (in a checked-out file), under the `C-c b`
 prefix so they don't collide with the file's own bindings:

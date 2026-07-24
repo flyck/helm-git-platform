@@ -1,8 +1,8 @@
-;;; helm-git-platform.el --- Browse Bitbucket Cloud pull requests in Emacs -*- lexical-binding: t; -*-
+;;; helm-git-platform.el --- Browse Bitbucket/GitHub pull requests in Emacs -*- lexical-binding: t; -*-
 
 ;; Author: Felix Brilej
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (magit-section "3.0") (transient "0.3"))
+;; Package-Requires: ((emacs "28.1") (magit-section "3.0") (transient "0.3") (helm "3.0"))
 ;; Keywords: tools, vc
 ;; URL: https://github.com/flyck/helm-git-platform
 
@@ -49,6 +49,8 @@
 (require 'bitbucket-api)
 (require 'git-platform)
 (require 'git-platform-bitbucket)
+(require 'github-api)
+(require 'git-platform-github)
 (require 'gp-local)
 (require 'gp-checkout)
 (require 'gp-compose)

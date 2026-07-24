@@ -59,7 +59,6 @@
       (should (= (length (cdr split)) 0))
       ;; flip one author and re-check
       (let ((prs2 (copy-tree prs)))
-        (setf (let-alist (car prs2) .author.uuid) "{other}")
         (setf (alist-get 'uuid (alist-get 'author (car prs2))) "{other}")
         (let ((split2 (bitbucket-partition-pull-requests prs2 uuid)))
           (should (= (length (cdr split2)) 1)))))))
@@ -184,7 +183,7 @@
 
 (ert-deftest bitbucket-test-with-cache-hits-and-expires ()
   (let ((bitbucket-cache-ttl 300)
-        (bitbucket--result-cache (make-hash-table :test 'equal))
+        (gp--result-cache (make-hash-table :test 'equal))
         (calls 0))
     (cl-flet ((thunk () (cl-incf calls) 'value))
       (should (eq (bitbucket-with-cache 'k #'thunk) 'value))
@@ -193,7 +192,7 @@
 
 (ert-deftest bitbucket-test-with-cache-disabled ()
   (let ((bitbucket-cache-ttl 0)
-        (bitbucket--result-cache (make-hash-table :test 'equal))
+        (gp--result-cache (make-hash-table :test 'equal))
         (calls 0))
     (cl-flet ((thunk () (cl-incf calls) 'v))
       (bitbucket-with-cache 'k #'thunk)

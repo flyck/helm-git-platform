@@ -421,16 +421,19 @@ CREATE TABLE IF NOT EXISTS participants (
   (gp-mock--touch-pr pr-id))
 
 (cl-defmethod gp--approve-pr ((_ git-platform-mock) full-name id
-                              &optional unapprove)
-  (ignore full-name)
+                              &optional unapprove reason)
+  (ignore full-name reason)
   (gp-mock--set-my-review id (unless unapprove "approved"))
   t)
 
 (cl-defmethod gp--request-changes-pr ((_ git-platform-mock) full-name id
-                                      &optional unrequest)
-  (ignore full-name)
+                                      &optional unrequest reason)
+  (ignore full-name reason)
   (gp-mock--set-my-review id (unless unrequest "changes_requested"))
   t)
+
+(cl-defmethod gp--review-retraction-kind ((_ git-platform-mock))
+  'retract)
 
 (cl-defmethod gp--set-pull-request-draft ((_ git-platform-mock) full-name id draft
                                           &optional title)

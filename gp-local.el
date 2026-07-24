@@ -5,10 +5,12 @@
 ;; Bridges a pull request to a local working copy under
 ;; `gp-local-git-root' (default ~/git).
 ;;
-;; A PR carries its repository as "workspace/slug" (full_name).  We find
+;; A PR carries its repository as "owner/slug" (full_name).  We find
 ;; the local directory whose git "origin" remote points at that same repo
 ;; -- matching on the parsed remote, not just the folder name, so a
 ;; checkout living under a differently named directory still resolves.
+;; Bitbucket and GitHub remotes are both recognised (see
+;; `gp-local--forge-hosts').
 ;;
 ;; Once resolved we can open the project, fetch, and check out the PR's
 ;; source branch, all without leaving Emacs.
@@ -16,7 +18,6 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'bitbucket-api)
 (require 'git-platform)
 
 (declare-function gp-checkout-run "gp-checkout")
@@ -41,12 +42,48 @@ e.g. `magit-status' or a projectile switch to taste."
 
 ;;;; Remote parsing ----------------------------------------------------------
 
+(defconst gp-local--forge-hosts '("bitbucket\\.org" "github\\.com")
+  "Regexps matching the remote hosts recognised as a code-review forge.")
+
+(defun gp-local--forge-host-p (url)
+  "Return non-nil if URL's host matches one of `gp-local--forge-hosts'."
+  (and url (cl-some (lambda (re) (string-match-p re url)) gp-local--forge-hosts)))
+
+(defconst gp-local--backend-host-alist
+  '((git-platform-bitbucket . "bitbucket\\.org")
+    (git-platform-github . "github\\.com"))
+  "Backend class -> the remote host regexp it actually talks to.
+Only one `git-platform' backend is active at a time (see
+`git-platform-backend'), so a repo whose remote is on the OTHER
+forge cannot be queried through it -- there is no Bitbucket-shaped
+call that succeeds against api.github.com or vice versa.  Used by
+`gp-local--active-backend-host-p' to recognise that mismatch and
+show nothing instead of letting a doomed API call 404.")
+
+(defun gp-local--active-backend-host-p (url)
+  "Return non-nil if URL's host matches the currently active backend.
+Nil for a URL on a different (but still recognised) forge, and nil
+for an unrecognised URL -- both cases should read as \"no repo here\"
+to callers, not surface a network error for a repo the active
+backend can never reach.  A backend class with no entry in
+`gp-local--backend-host-alist' (e.g. `git-platform-mock', which
+isn't tied to any real remote at all) matches nothing here; mock
+PRs are never resolved via a local git remote in the first place."
+  (when url
+    (when-let* ((re (alist-get (eieio-object-class (git-platform-backend))
+                                gp-local--backend-host-alist)))
+      (string-match-p re url))))
+
 (defun gp-local--parse-remote (url)
-  "Return \"workspace/slug\" parsed from a git remote URL, or nil.
-Handles SSH (git@bitbucket.org:ws/slug.git) and HTTPS
-(https://x@bitbucket.org/ws/slug.git) forms."
-  (when (and url (string-match-p "bitbucket\\.org" url))
-    (when (string-match "bitbucket\\.org[:/]\\([^/]+\\)/\\([^/]+?\\)\\(?:\\.git\\)?/?\\'" url)
+  "Return \"owner/slug\" parsed from a git remote URL, or nil.
+Handles SSH (git@HOST:owner/slug.git) and HTTPS
+(https://x@HOST/owner/slug.git) forms, but only when HOST matches
+the CURRENTLY ACTIVE backend (see `gp-local--active-backend-host-p')
+-- a Bitbucket remote resolves to nil while the GitHub backend is
+active, and vice versa, rather than resolving to a full-name no
+network call against the active backend could ever reach."
+  (when (gp-local--active-backend-host-p url)
+    (when (string-match "\\(?:bitbucket\\.org\\|github\\.com\\)[:/]\\([^/]+\\)/\\([^/]+?\\)\\(?:\\.git\\)?/?\\'" url)
       (concat (match-string 1 url) "/" (match-string 2 url)))))
 
 (defun gp-local--git-output (&rest args)
@@ -58,41 +95,42 @@ Nil on any non-zero exit or empty output."
            (let ((out (string-trim (buffer-string))))
              (unless (string-empty-p out) out))))))
 
-(defun gp-local--bitbucket-remote-url (dir)
-  "Return a Bitbucket remote URL for DIR, preferring `origin', or nil.
+(defun gp-local--forge-remote-url (dir)
+  "Return a recognised forge remote URL for DIR, preferring `origin', or nil.
 Asks git itself whether DIR is inside a work tree -- so this also
 works in worktrees and submodules, where `.git' is a FILE (a
 gitdir pointer) rather than a directory.  If `origin' is not a
-Bitbucket remote, falls back to the first remote whose URL is."
+recognised forge remote (Bitbucket or GitHub), falls back to the
+first remote whose URL is."
   (let ((default-directory (file-name-as-directory
                             (directory-file-name (expand-file-name dir)))))
     (when (equal "true" (gp-local--git-output
                          "rev-parse" "--is-inside-work-tree"))
       (let ((origin (gp-local--git-output "remote" "get-url" "origin")))
-        (if (and origin (string-match-p "bitbucket\\.org" origin))
+        (if (gp-local--forge-host-p origin)
             origin
-          ;; origin missing or not Bitbucket -> scan every remote's URL
+          ;; origin missing or not a recognised forge -> scan every remote's URL
           (let ((remotes (gp-local--git-output "remote")))
             (catch 'hit
               (dolist (r (and remotes (split-string remotes "\n" t)))
                 (let ((url (gp-local--git-output "remote" "get-url" r)))
-                  (when (and url (string-match-p "bitbucket\\.org" url))
+                  (when (gp-local--forge-host-p url)
                     (throw 'hit url))))
-              ;; nothing Bitbucket; still hand back origin so the parse
-              ;; (which rejects non-Bitbucket URLs) decides, keeping old
-              ;; behaviour for non-Bitbucket repos.
+              ;; nothing recognised; still hand back origin so the parse
+              ;; (which rejects unrecognised URLs) decides, keeping old
+              ;; behaviour for other remotes.
               origin)))))))
 
 (defun gp-local--dir-remote (dir)
-  "Return the parsed \"ws/slug\" of DIR's Bitbucket remote, cached.
-Prefers `origin'; falls back to any other Bitbucket remote.  Works
-in plain clones, worktrees and submodules."
+  "Return the parsed \"owner/slug\" of DIR's forge remote, cached.
+Prefers `origin'; falls back to any other recognised forge remote.
+Works in plain clones, worktrees and submodules."
   (let* ((key (directory-file-name (expand-file-name dir)))
          (cached (gethash key gp-local--remote-cache 'miss)))
     (if (not (eq cached 'miss))
         cached
       (let ((parsed (gp-local--parse-remote
-                     (gp-local--bitbucket-remote-url key))))
+                     (gp-local--forge-remote-url key))))
         (puthash key parsed gp-local--remote-cache)
         parsed))))
 

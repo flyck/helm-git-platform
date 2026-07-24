@@ -144,7 +144,8 @@ the indistinguishable running state."
          (name (or (alist-get 'name step) "step"))
          (dur (gp-pipeline--format-duration step))
          (runnable (gp-pipeline-step-runnable-manual-p step))
-         (manual (gp-pipeline-step-manual-p step)))
+         (manual (gp-pipeline-step-manual-p step))
+         (rerunnable (gp-pipeline-step-rerunnable-p step)))
     (magit-insert-section (gp-pipeline-step-section step)
       (magit-insert-heading
         (concat "    "
@@ -154,6 +155,8 @@ the indistinguishable running state."
                  (cond
                   (runnable (propertize "  [manual ▸ T]" 'face 'gp-pipeline-running-face))
                   (manual (propertize "  [manual]" 'face 'shadow)))
+                (when rerunnable
+                  (propertize "  [rerun ▸ R]" 'face 'gp-pipeline-running-face))
                 (unless (string-empty-p dur)
                   (propertize (format "  %s" dur) 'face 'shadow))
                 (propertize "   l:log" 'face 'shadow))))))
@@ -368,6 +371,28 @@ on a manual step that is still waiting."
                 (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
             (error (message "Could not run manual step: %s"
                             (error-message-string e))))))))
+
+(defun gp-detail-pipeline-rerun-step ()
+  "Re-run the finished step at point in place.
+Distinct from `gp-detail-pipeline-run-manual': this restarts an
+already-finished (typically failed) step via the backend's own
+per-step rerun capability (GitHub Actions supports this; Bitbucket
+Pipelines does not, so `gp-pipeline-step-rerunnable-p' is always nil
+there).  Only offered when the backend reports the step rerunnable."
+  (interactive)
+  (let* ((step (gp-pipeline--step-at-point))
+         (pp (gp-pipeline--at-point))
+         (pipeline (car pp))
+         (full-name (gp-pr-full-name gp--pr))
+         (name (or (alist-get 'name step) "?")))
+    (unless (gp-pipeline-step-rerunnable-p step)
+      (user-error "Step %S cannot be re-run individually on this backend" name))
+    (condition-case e
+        (progn
+          (gp-pipeline-step-rerun full-name (alist-get 'uuid pipeline) step)
+          (message "Re-running step %S" name)
+          (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
+      (error (message "Could not re-run step: %s" (error-message-string e))))))
 
 ;;;; Step log buffer (live-polled while running) -------------------------------
 

@@ -29,16 +29,21 @@ The short version:
   `*-autoloads.el`/`*-pkg.el` package-manager files) — prefer
   `package-vc-upgrade`.
 - **Every new behaviour ships with an ERT test in the same change.** The suite
-  is fully offline (Bitbucket is mocked); a green run precedes every reload.
-- **One network choke-point** (`bitbucket-api-request`); **pure core, impure
-  shell**; **no hardcoded workspace/host** — everything is a `defcustom` with a
-  Bitbucket-Cloud default, credentials resolve customs → env → `auth-source`.
+  is fully offline (Bitbucket and GitHub are both mocked); a green run
+  precedes every reload.
+- **One network choke-point per backend** (`bitbucket-api-request` /
+  `github-api-request`); **pure core, impure shell**; **no hardcoded
+  workspace/host** — everything is a `defcustom` with a Bitbucket-Cloud
+  default, credentials resolve customs → env → `auth-source` (same pattern
+  for GitHub's `github-*` customs).
 - **Byte-compile clean** before declaring done.
 - **Read the `*gp-log*` buffer** before guessing at a reported bug.
 
 ## Layout
 
 `helm-git-platform.el` is the umbrella / `use-package` entry point. The generic
-`gp-*` / `git-platform-*` layer is backend-free; the `bitbucket-*` files are the
-Bitbucket backend. Each file's header comment states its responsibility, with a
-matching `tests/<name>-test.el`. See `README.md` for the user-facing overview.
+`gp-*` / `git-platform-*` layer is backend-free; `bitbucket-*` and `github-*`
+files are the two backends (select via `git-platform-default-backend`). Each
+file's header comment states its responsibility, with a matching
+`tests/<name>-test.el`. See `README.md` for the user-facing overview, including
+GitHub's known capability gaps relative to Bitbucket.

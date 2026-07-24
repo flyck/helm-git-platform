@@ -16,6 +16,8 @@
 (require 'git-platform)
 (require 'git-platform-bitbucket)
 (require 'bitbucket-mock)
+(require 'git-platform-github)
+(require 'github-mock)
 
 (defun git-platform-test--run ()
   "Run protocol assertions against the active backend (mock must be live)."
@@ -31,6 +33,11 @@
       (should (stringp (gp-pr-destination-branch pr)))
       (should (memq (gp-pr-draft-p pr) '(t nil)))
       (should (memq (gp-pr-authored-by-p pr uuid) '(t nil)))
+      (should (memq (gp-pr-open-p pr) '(t nil)))
+      (should (memq (gp-pr-merged-p pr) '(t nil)))
+      (should (or (null (gp-pr-author-name pr)) (stringp (gp-pr-author-name pr))))
+      (should (or (null (gp-pr-author-avatar pr)) (stringp (gp-pr-author-avatar pr))))
+      (should (or (null (gp-pr-repo-slug pr)) (stringp (gp-pr-repo-slug pr))))
       (let ((tally (gp-pr-review-tally pr)))
         (should (integerp (plist-get tally :approved)))
         (should (integerp (plist-get tally :changes)))
@@ -50,12 +57,19 @@
         (should (listp comments))
         (when comments
           (should (memq (gp-comment-resolved-p (car comments)) '(t nil)))
+          (should (memq (gp-comment-resolvable-p (car comments)) '(t nil)))
           (should (memq (gp-comment-own-p (car comments) uuid) '(t nil))))))))
 
 (ert-deftest git-platform-test-bitbucket-conformance ()
   "The Bitbucket backend satisfies the git-platform protocol."
   (let ((git-platform-current-backend (git-platform-bitbucket)))
     (bitbucket-mock-with-service
+      (git-platform-test--run))))
+
+(ert-deftest git-platform-test-github-conformance ()
+  "The GitHub backend satisfies the git-platform protocol."
+  (let ((git-platform-current-backend (git-platform-github)))
+    (github-mock-with-service
       (git-platform-test--run))))
 
 (ert-deftest git-platform-test-backend-lazy-default ()

@@ -125,5 +125,54 @@
                      '(((uuid . "{u1}") (display_name . "Alice")))))
       (should (= calls 2)))))
 
+;;;; Default vs. suggested reviewer checkboxes ---------------------------------
+
+(ert-deftest gp-create-test-default-reviewers-checked-by-default ()
+  "Default reviewers get a checked checkbox."
+  (require 'wid-edit)
+  (cl-letf (((symbol-function 'gp-repo-default-reviewers)
+             (lambda (_) '(((uuid . "alice") (display_name . "Alice")))))
+            ((symbol-function 'gp-repo-suggested-reviewers)
+             (lambda (_) nil)))
+    (with-temp-buffer
+      (let ((alist (gp-create--insert-reviewers "acme/web")))
+        (should (equal (mapcar #'car alist) '("alice")))
+        (should (widget-value (cdr (assoc "alice" alist))))))))
+
+(ert-deftest gp-create-test-suggested-reviewers-unchecked-by-default ()
+  "Suggested reviewers (GitHub collaborators) get an unchecked checkbox."
+  (require 'wid-edit)
+  (cl-letf (((symbol-function 'gp-repo-default-reviewers)
+             (lambda (_) nil))
+            ((symbol-function 'gp-repo-suggested-reviewers)
+             (lambda (_) '(((uuid . "bob") (display_name . "Bob"))))))
+    (with-temp-buffer
+      (let ((alist (gp-create--insert-reviewers "acme/web")))
+        (should (equal (mapcar #'car alist) '("bob")))
+        (should-not (widget-value (cdr (assoc "bob" alist))))))))
+
+(ert-deftest gp-create-test-default-and-suggested-reviewers-combined ()
+  "Both groups render together, defaults checked and suggestions not,
+and `gp-create--selected-reviewer-uuids' only picks up checked ones."
+  (require 'wid-edit)
+  (cl-letf (((symbol-function 'gp-repo-default-reviewers)
+             (lambda (_) '(((uuid . "alice") (display_name . "Alice")))))
+            ((symbol-function 'gp-repo-suggested-reviewers)
+             (lambda (_) '(((uuid . "bob") (display_name . "Bob"))))))
+    (with-temp-buffer
+      (setq-local gp-create--w-reviewers (gp-create--insert-reviewers "acme/web"))
+      (should (equal (mapcar #'car gp-create--w-reviewers) '("alice" "bob")))
+      (should (equal (gp-create--selected-reviewer-uuids) '("alice"))))))
+
+(ert-deftest gp-create-test-no-reviewers-blank-section ()
+  "Neither defaults nor suggestions: a friendly empty message, no widgets."
+  (require 'wid-edit)
+  (cl-letf (((symbol-function 'gp-repo-default-reviewers) (lambda (_) nil))
+            ((symbol-function 'gp-repo-suggested-reviewers) (lambda (_) nil)))
+    (with-temp-buffer
+      (should (null (gp-create--insert-reviewers "acme/web")))
+      (should (string-match-p "no default or suggested reviewers"
+                              (buffer-string))))))
+
 (provide 'gp-create-test)
 ;;; gp-create-test.el ends here

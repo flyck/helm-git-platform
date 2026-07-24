@@ -10,7 +10,9 @@
 ;;   * a DESCRIPTION listing those commit summaries;
 ;;   * toggles for "create as draft" and "delete source branch after
 ;;     merge"; and
-;;   * a checkbox per default reviewer the repo configures.
+;;   * a checkbox per reviewer candidate: default reviewers (checked --
+;;     the platform auto-adds these) and, where the backend has them,
+;;     suggested reviewers (unchecked -- an opt-in).
 ;;
 ;; The destination defaults to the repo's main branch.  `C' (or the
 ;; "Create PR" button / C-c C-c) creates the PR -- pushing the branch to
@@ -169,25 +171,43 @@ and buttons those keys stay the global create/cancel actions
 
 ;;;; Form construction --------------------------------------------------------
 
+(defun gp-create--insert-reviewer-list (reviewers checked)
+  "Insert one CHECKBOX per entry in REVIEWERS, each defaulting to CHECKED.
+Returns an alist (UUID . CHECKBOX-WIDGET) in REVIEWERS order."
+  (mapcar
+   (lambda (r)
+     (let* ((uuid (alist-get 'uuid r))
+            (name (or (alist-get 'display_name r)
+                      (alist-get 'nickname r) uuid))
+            (cb (widget-create 'checkbox checked)))
+       (widget-insert " " (or name "?") "\n")
+       (cons uuid cb)))
+   reviewers))
+
 (defun gp-create--insert-reviewers (full-name)
-  "Insert the default-reviewers section for FULL-NAME, returning the alist.
-Each reviewer gets a checkbox (checked by default); returns an
-alist (UUID . CHECKBOX-WIDGET).  A blank section if none/error."
-  (let ((reviewers (gp-repo-default-reviewers full-name))
-        (acc '()))
+  "Insert the reviewers section for FULL-NAME, returning the alist.
+Default reviewers (the platform auto-adds them; Bitbucket) are
+checked by default -- opting out is the unusual case.  Suggested
+reviewers (GitHub's repo collaborators, standing in for a real
+per-PR suggestion the create form can't ask for yet -- see
+`gp-repo-suggested-reviewers') are unchecked -- picking one is an
+explicit opt-in.  Returns the combined alist (UUID . CHECKBOX-WIDGET)
+across both groups.  A blank section if neither backend has anything
+to offer for this repo."
+  (let ((defaults (gp-repo-default-reviewers full-name))
+        (suggested (gp-repo-suggested-reviewers full-name)))
     (widget-insert (propertize "Reviewers" 'face 'gp-create-section) "\n")
-    (if (null reviewers)
-        (widget-insert
-         (propertize "  (no default reviewers configured for this repo)\n"
-                     'face 'shadow))
-      (dolist (r reviewers)
-        (let* ((uuid (alist-get 'uuid r))
-               (name (or (alist-get 'display_name r)
-                         (alist-get 'nickname r) uuid))
-               (cb (widget-create 'checkbox t)))
-          (widget-insert " " (or name "?") "\n")
-          (push (cons uuid cb) acc))))
-    (nreverse acc)))
+    (if (and (null defaults) (null suggested))
+        (progn
+          (widget-insert
+           (propertize "  (no default or suggested reviewers for this repo)\n"
+                       'face 'shadow))
+          nil)
+      (append
+       (gp-create--insert-reviewer-list defaults t)
+       (when suggested
+         (widget-insert (propertize "Suggested (unchecked)" 'face 'shadow) "\n")
+         (gp-create--insert-reviewer-list suggested nil))))))
 
 (defun gp-create--build-form (ctx)
   "Render the widget form for CTX into the current buffer."

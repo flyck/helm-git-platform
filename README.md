@@ -5,12 +5,53 @@ workspace, drill into changed files and comments with Helm, jump to the matching
 and switch branches safely, see inline review comments as overlays on the code, and watch live PR
 counts in the mode line.
 
-It talks to a forge through a backend protocol (`git-platform`).  **Bitbucket Cloud is the only
-backend implemented today**, but the UI, overlays, checkout service and Helm front-end are all
-platform-agnostic — adding another forge (GitHub, GitLab, …) is a matter of writing one backend.
+## Why I build this
+
+- Managing pull requests (review and feedback) right in my IDE allows me to work on them
+  faster. Less context switches and less clicking.
+- The helm interface makes for great search, sometimes exceeding the original search capability of
+  the official UIs (bitbucket, github, etc.)
+- The underlying git-platform becomes exchangeable. My workflow needs to be great independent
+  while the underlying system stays replacable. Especially true when the employer picks bitbucket.
+
+## Extensibility
+
+It talks to a forge through a backend protocol (`git-platform`).  **Bitbucket Cloud and GitHub are
+both implemented**; the UI, overlays, checkout service and Helm front-end are all
+platform-agnostic — adding another forge (GitLab, …) is a matter of writing one backend.
 
 > Nothing is hardcoded to a workspace or host — every value is a `defcustom`, and credentials come
 > from the environment or `auth-source`.
+
+Set `git-platform-default-backend` to `'github` to talk to GitHub instead of Bitbucket, and
+configure a token via `github-api-token`, the `GITHUB_TOKEN` environment variable, or an
+`auth-source` entry for host `api.github.com`.  A token is optional for read-only access to public
+repos (GitHub's unauthenticated rate limit applies); write operations require one.
+
+**Token permissions.** For a fine-grained PAT scoped to the repo(s) you want to use:
+
+| Permission | Access | Why |
+|---|---|---|
+| Contents | Read and write | Reading files/diffs; pushing branches when creating a PR |
+| Pull requests | Read and write | List/view/create PRs, reviews, approve/request-changes, draft toggle |
+| Issues | Read and write | General (non-inline) PR comments go through the Issues API |
+| Actions | Read and write | Workflow runs/jobs/logs, re-running a job, dispatching a workflow |
+| Commit statuses | Read | Combined commit status for build-state badges |
+| Metadata | Read | Mandatory default, always required |
+
+Comment resolution goes through GraphQL rather than REST, but needs no separate scope — GraphQL
+mutations are gated by the same underlying permission (Pull requests: write).
+
+With a classic PAT, the closest equivalent is the `repo` scope plus `workflow` (the latter needed
+specifically for dispatching/re-running Actions runs).
+
+The one thing GitHub's API genuinely cannot do, at all, regardless of implementation: a queryable
+repo-level "default reviewers" list (closest is CODEOWNERS, which isn't one).
+
+Everything else — comment resolution, withdrawing a review, converting a PR back to draft,
+re-running a CI step — works, just routed through whatever GitHub API actually supports it
+(REST where it can, GraphQL where REST has no equivalent — see `github-api.el`'s Commentary for
+specifics), with the UI adapting itself to what's available rather than guessing.
 
 ## Install
 
@@ -136,9 +177,10 @@ a buffer (tailed live while it runs, historical once finished).
 
 ## Limitations
 
-- **Bitbucket Cloud is the only supported platform** today. The code sits behind a backend
-  protocol (`git-platform`) so another forge (GitHub, …)  could be added as a backend, but none
-  exists yet.
+- **Bitbucket Cloud and GitHub are supported today**; the code sits behind a backend protocol
+  (`git-platform`) so another forge (GitLab, …) could be added the same way. GitHub has a handful
+  of documented gaps relative to Bitbucket (see [Extensibility](#extensibility) above) stemming
+  from real product/API differences, not missing implementation effort.
 - **No side-by-side diff view.** Diffs render unified (both the inline changed-file diffs and
   Magit's `d`). See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for why.
 

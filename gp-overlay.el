@@ -30,6 +30,11 @@
 (declare-function gp-pr-full-name "gp-local")
 (declare-function gp-compose "gp-compose")
 
+;; Forward declaration: `gp-overlay-enabled' is a defcustom defined further
+;; down in this same file (after the toggle command that reads it), so the
+;; byte-compiler needs this to avoid a free-variable warning/error.
+(defvar gp-overlay-enabled)
+
 (defface gp-overlay-face
   '((t :inherit font-lock-comment-face :extend t))
   "Face for inline PR comment overlays."
@@ -216,7 +221,7 @@ otherwise, followed by the action buttons."
          (collapsed (gp-overlay--collapsed-p comment))
          (face (if resolved 'gp-overlay-resolved-face 'gp-overlay-face))
          (author (let-alist comment (or .user.display_name "?")))
-         (raw (string-trim (bitbucket-resolve-mentions
+         (raw (string-trim (gp-resolve-mentions
                             (gp-resolve-emojis
                              (let-alist comment (or .content.raw ""))))))
          (first-line (car (split-string raw "\n")))
@@ -232,7 +237,8 @@ otherwise, followed by the action buttons."
                 ": "))
          (body (gp-overlay--face-body
                 (gp-linkify-string (if collapsed first-line raw)) face))
-         (buttons (gp-overlay--comment-buttons comment resolved collapsed)))
+         (buttons (gp-overlay--comment-buttons comment resolved collapsed
+                                               (gp-comment-resolvable-p comment))))
     (concat (gp-overlay--face-body head face) body
             "\n" buttons "\n")))
 
@@ -247,20 +253,25 @@ Keeps embedded link faces visible instead of overriding them."
         (setq i next)))
     s))
 
-(defun gp-overlay--comment-buttons (comment resolved collapsed)
-  "Return the action-button line for COMMENT given RESOLVED/COLLAPSED state."
+(defun gp-overlay--comment-buttons (comment resolved collapsed resolvable)
+  "Return the action-button line for COMMENT given RESOLVED/COLLAPSED state.
+RESOLVABLE, when nil, hides the resolve/reopen action entirely (the
+backend has no resolve concept for this comment, e.g. a GitHub
+general/issue comment)."
   (string-join
-   (list "      "
-         (gp-overlay--button "[reply]" "Reply to this comment"
-                                    'gp-overlay-reply comment)
-         (if resolved
-             (gp-overlay--button "[reopen]" "Reopen on the PR"
-                                        'gp-overlay-reopen comment)
-           (gp-overlay--button "[resolve]" "Resolve on the PR"
-                                      'gp-overlay-resolve comment))
-         (gp-overlay--button (if collapsed "[+]" "[−]")
-                                    "Minimise / expand this comment"
-                                    'gp-overlay-toggle-collapse comment))
+   (delq nil
+         (list "      "
+               (gp-overlay--button "[reply]" "Reply to this comment"
+                                          'gp-overlay-reply comment)
+               (when resolvable
+                 (if resolved
+                     (gp-overlay--button "[reopen]" "Reopen on the PR"
+                                                'gp-overlay-reopen comment)
+                   (gp-overlay--button "[resolve]" "Resolve on the PR"
+                                              'gp-overlay-resolve comment)))
+               (gp-overlay--button (if collapsed "[+]" "[−]")
+                                          "Minimise / expand this comment"
+                                          'gp-overlay-toggle-collapse comment)))
    " "))
 
 (defun gp-overlay--format (comments)
@@ -393,6 +404,8 @@ INLINE is a (PATH . LINE) cons; PARENT a comment id."
          (full-name (gp-pr-full-name pr))
          (id (alist-get 'id pr))
          (cid (alist-get 'id c)))
+    (unless (gp-comment-resolvable-p c)
+      (user-error "This comment cannot be resolved/reopened"))
     (if resolve
         (gp-resolve-comment full-name id cid)
       (gp-reopen-comment full-name id cid))

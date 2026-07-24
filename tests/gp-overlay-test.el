@@ -82,6 +82,18 @@
         (should (string-match-p "\\[reopen\\]" s))
         (should-not (string-match-p "\\[resolve\\]" s))))))
 
+(ert-deftest gp-test-non-resolvable-comment-hides-resolve-button ()
+  "A comment the backend reports as non-resolvable shows neither
+[resolve] nor [reopen] (e.g. a GitHub general/issue comment)."
+  (let ((c '((id . 10) (user (display_name . "Ann"))
+             (content (raw . "just a note")))))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'gp-comment-resolvable-p) (lambda (_) nil)))
+        (let ((s (gp-overlay--comment-string c)))
+          (should-not (string-match-p "\\[resolve\\]" s))
+          (should-not (string-match-p "\\[reopen\\]" s))
+          (should (string-match-p "\\[reply\\]" s)))))))
+
 (ert-deftest gp-test-toggle-collapse-shortens-render ()
   "Collapsing a multi-line comment renders only its first line."
   (with-temp-buffer

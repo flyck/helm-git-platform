@@ -20,6 +20,7 @@
 
 (require 'eieio)
 (require 'cl-lib)
+(require 'gp-log)
 
 (defclass git-platform () ()
   :abstract t
@@ -27,13 +28,15 @@
 
 (defcustom git-platform-default-backend 'bitbucket
   "Which backend `git-platform-backend' builds by default."
-  :type '(choice (const :tag "Bitbucket Cloud" bitbucket))
+  :type '(choice (const :tag "Bitbucket Cloud" bitbucket)
+                 (const :tag "GitHub" github))
   :group 'bitbucket)
 
 (defvar git-platform-current-backend nil
   "The active `git-platform' backend instance, or nil (built lazily).")
 
 (declare-function git-platform-bitbucket "git-platform-bitbucket")
+(declare-function git-platform-github "git-platform-github")
 
 (defun git-platform-backend ()
   "Return the active backend, constructing the default lazily.
@@ -45,6 +48,8 @@ once to choose the platform; callers then use the backend-free
             (pcase git-platform-default-backend
               ('bitbucket (require 'git-platform-bitbucket)
                           (git-platform-bitbucket))
+              ('github (require 'git-platform-github)
+                       (git-platform-github))
               (other (error "Unknown git-platform backend: %s" other))))))
 
 ;;;; Protocol definition helper ----------------------------------------------
@@ -82,8 +87,12 @@ ARGLIST may contain &optional; &rest is not supported here."
   "Scan all open PRs, calling ON-BATCH/ON-DONE.")
 (gp-defop pull-request (full-name id)
   "Return the full PR object for FULL-NAME/ID.")
+(gp-defop pull-request-async (full-name id callback)
+  "Fetch PR FULL-NAME/ID asynchronously; CALLBACK gets (OK PR).")
 (gp-defop pull-request-comments (full-name id &optional max-items)
   "Return comments for PR FULL-NAME/ID.")
+(gp-defop pull-request-comments-async (full-name id callback &optional max-items)
+  "Fetch comments for PR FULL-NAME/ID asynchronously; CALLBACK gets (OK COMMENTS).")
 (gp-defop pull-request-diff (full-name id &optional commit)
   "Return the unified diff text for PR FULL-NAME/ID.
 COMMIT, the source commit hash, lets the backend cache the diff.")
@@ -101,16 +110,38 @@ COMMIT, the source commit hash, lets the backend cache the diff.")
   "Delete COMMENT-ID on PR FULL-NAME/ID.")
 (gp-defop set-pull-request-draft (full-name id draft &optional title)
   "Set PR FULL-NAME/ID draft flag to DRAFT.")
-(gp-defop approve-pr (full-name id &optional unapprove)
-  "Approve PR FULL-NAME/ID (UNAPPROVE non-nil retracts it).")
-(gp-defop request-changes-pr (full-name id &optional unrequest)
-  "Request changes on PR FULL-NAME/ID (UNREQUEST non-nil retracts it).")
+(gp-defop approve-pr (full-name id &optional unapprove reason)
+  "Approve PR FULL-NAME/ID (UNAPPROVE non-nil retracts it).
+REASON is a message shown alongside the retraction, used only when
+`gp-review-retraction-kind' reports `dismiss' for this backend
+(ignored otherwise).")
+(gp-defop request-changes-pr (full-name id &optional unrequest reason)
+  "Request changes on PR FULL-NAME/ID (UNREQUEST non-nil retracts it).
+REASON is as in `gp-approve-pr'.")
+(gp-defop review-retraction-kind ()
+  "Return how withdrawing your own review reads to other viewers.
+`retract' means it disappears without a trace (Bitbucket).  `dismiss'
+means it stays visible in the PR's timeline as an explicit dismissal
+event, generally with a reason attached (GitHub, which has no true
+retraction API -- see `github--dismiss-own-review').  Callers should
+label the retract action accordingly (e.g. \"Unapprove\" vs. \"Dismiss
+approval\") and prompt for REASON only when this is `dismiss'.")
 (gp-defop open-pr-for-branch (full-name branch)
   "Return the open PR in FULL-NAME whose source branch is BRANCH.")
 (gp-defop repo-default-branch (full-name)
   "Return repo FULL-NAME's default (main) branch name, or nil.")
 (gp-defop repo-default-reviewers (full-name)
-  "Return repo FULL-NAME's default reviewers (list of user alists).")
+  "Return repo FULL-NAME's default reviewers (list of user alists).
+These are pre-selected in the create-PR form: the platform itself
+auto-adds them as reviewers on every new PR, so opting out is the
+unusual case.  Contrast `gp-repo-suggested-reviewers'.")
+(gp-defop repo-suggested-reviewers (full-name)
+  "Return candidate reviewers for FULL-NAME the platform merely
+suggests rather than auto-selects (list of user alists, same shape
+as `gp-repo-default-reviewers').  Left unchecked in the create-PR
+form -- picking one is an explicit opt-in, not an opt-out.  Bitbucket
+has no separate \"suggested\" concept beyond its real defaults, so
+its backend always returns nil here.")
 (gp-defop create-pull-request (full-name source dest title &optional description draft close-source-branch reviewer-uuids)
   "Open a PR in FULL-NAME from SOURCE into DEST with TITLE.
 DESCRIPTION/DRAFT/CLOSE-SOURCE-BRANCH/REVIEWER-UUIDS are optional.")
@@ -120,6 +151,15 @@ DESCRIPTION/DRAFT/CLOSE-SOURCE-BRANCH/REVIEWER-UUIDS are optional.")
   "Return the open PRs in repo FULL-NAME.")
 (gp-defop commit-build-states (full-name hash)
   "Return the build state strings for commit HASH in FULL-NAME.")
+(gp-defop commit-build-states-async (full-name hash callback)
+  "Fetch the build state strings for commit HASH in FULL-NAME asynchronously.
+CALLBACK receives the list of state strings (possibly empty), or nil
+on error.")
+(gp-defop resolve-mentions (text)
+  "Return TEXT with any platform-specific mention tokens resolved to names.
+Bitbucket encodes mentions as opaque \"@{account_id}\" tokens needing
+a lookup; GitHub's are already literal \"@username\" text, so its
+implementation is the identity function.")
 
 ;;;; CI pipelines --------------------------------------------------------------
 (gp-defop pipelines-for-branch (full-name branch &optional max-items commit)
@@ -132,6 +172,13 @@ DESCRIPTION/DRAFT/CLOSE-SOURCE-BRANCH/REVIEWER-UUIDS are optional.")
   "Trigger a pipeline in FULL-NAME for BRANCH (pipeline-level).")
 (gp-defop pipeline-run-manual-step (full-name branch pipeline step)
   "Run a waiting manual STEP of PIPELINE in FULL-NAME on BRANCH.")
+(gp-defop pipeline-step-rerun (full-name pipeline-uuid step)
+  "Re-run just STEP of PIPELINE-UUID in FULL-NAME, in place.
+Distinct from `pipeline-run-manual-step': this restarts a single
+already-finished (typically failed) step, not a gated step waiting
+for its first run.  Only call this when `gp-pipeline-step-rerunnable-p'
+is non-nil for STEP; a backend with no such capability signals a
+clear `user-error' instead of silently no-oping.")
 (gp-defop pipeline-web-url (full-name pipeline &optional step)
   "Return the web-UI URL for PIPELINE in FULL-NAME (deep-linked to STEP).")
 (gp-defop pipeline-step-log (full-name pipeline-uuid step-uuid)
@@ -151,12 +198,38 @@ DESCRIPTION/DRAFT/CLOSE-SOURCE-BRANCH/REVIEWER-UUIDS are optional.")
   "Return non-nil if PR is a draft.")
 (gp-defop pr-authored-by-p (pr uuid)
   "Return non-nil if PR was authored by UUID.")
+(gp-defop pr-author-name (pr)
+  "Return PR's author display name, or nil.")
+(gp-defop pr-author-avatar (pr)
+  "Return PR's author avatar image URL, or nil.")
+(gp-defop pr-open-p (pr)
+  "Return non-nil if PR is open.
+Bitbucket's PR `state' is uppercase (\"OPEN\"); GitHub's is lowercase
+(\"open\") -- this exists so callers never compare `state' as a raw
+string against a platform-specific literal.")
+(gp-defop pr-merged-p (pr)
+  "Return non-nil if PR was merged.
+Bitbucket reports this as `state' = \"MERGED\"; GitHub as a separate
+boolean `merged' field alongside `state' = \"closed\" -- so \"merged\"
+and \"closed-but-not-merged\" cannot both be read off one `state'
+string across backends.")
+(gp-defop pr-repo-slug (pr)
+  "Return PR's bare repository slug (no owner/workspace prefix), or nil.
+Used for a compact list-view label; contrast `gp-pr-full-name', which
+includes the owner/workspace.")
 (gp-defop pr-review-tally (pr)
   "Return a plist (:approved :changes :pending) over PR's reviewers.")
 (gp-defop pr-my-review-state (pr uuid)
   "Return UUID's own review state on PR: `approved', `changes', or nil.")
 (gp-defop comment-resolved-p (comment)
   "Return non-nil if COMMENT is resolved.")
+(gp-defop comment-resolvable-p (comment)
+  "Return non-nil if COMMENT supports resolve/reopen at all.
+Bitbucket comments are always resolvable.  GitHub has no \"resolve\"
+concept for plain issue (general discussion) comments -- only inline
+review comments belong to a resolvable review thread -- so callers
+should hide the resolve/reopen action entirely when this is nil
+rather than let it fail on click.")
 (gp-defop comment-own-p (comment uuid)
   "Return non-nil if COMMENT was written by UUID.")
 
@@ -185,10 +258,62 @@ DESCRIPTION/DRAFT/CLOSE-SOURCE-BRANCH/REVIEWER-UUIDS are optional.")
   "Return non-nil if STEP is a manual (on-demand) step.")
 (gp-defop pipeline-step-runnable-manual-p (step)
   "Return non-nil if STEP is a manual step waiting to be started.")
+(gp-defop pipeline-step-rerunnable-p (step)
+  "Return non-nil if STEP can be individually re-run in place.
+Bitbucket has no per-step re-run (only whole-pipeline re-trigger),
+so its backend always returns nil here.  GitHub Actions can re-run a
+single finished job via its rerun endpoint, but only once the job
+has actually finished (queued/in-progress jobs can't be rerun) --
+callers should hide the \"rerun this step\" action entirely when this
+is nil rather than let it fail on click.")
 (gp-defop pipelines-sort (pipelines step-counts)
   "Sort PIPELINES most-steps-first (STEP-COUNTS maps uuid->count).")
 (gp-defop pipelines-match-commit (pipelines commit)
   "Return the PIPELINES whose target commit matches COMMIT.")
+
+;;;; TTL result cache -----------------------------------------------------------
+
+;; Provider-agnostic so both backends (and the UI layers that fetch
+;; around the `gp-' protocol) share one cache instead of each provider
+;; needing its own.  Originally lived in bitbucket-api.el as
+;; `bitbucket-cache-*'; moved here when the GitHub backend was added.
+
+(defcustom gp-cache-ttl 300
+  "Seconds to cache PR-list results (default 5 minutes).
+Set to 0 to disable caching."
+  :type 'integer
+  :group 'bitbucket)
+
+(defvar gp--result-cache (make-hash-table :test 'equal)
+  "KEY -> (EXPIRY . VALUE) cache for PR-list fetches.")
+
+(defun gp-cache-clear ()
+  "Clear cached PR-list results (forces a fresh fetch)."
+  (interactive)
+  (clrhash gp--result-cache))
+
+(defun gp-cache-get (key)
+  "Return (FOUND . VALUE) for KEY from the result cache.
+FOUND is nil on a miss/expiry.  Honours `gp-cache-ttl' = 0 (always a miss)."
+  (if (<= gp-cache-ttl 0)
+      (cons nil nil)
+    (let ((entry (gethash key gp--result-cache)))
+      (if (and entry (< (float-time) (car entry)))
+          (progn (gp-log 'cache "hit %S" key) (cons t (cdr entry)))
+        (cons nil nil)))))
+
+(defun gp-cache-put (key value)
+  "Cache VALUE under KEY for `gp-cache-ttl' seconds (no-op if 0)."
+  (when (> gp-cache-ttl 0)
+    (puthash key (cons (+ (float-time) gp-cache-ttl) value) gp--result-cache))
+  value)
+
+(defun gp-cache-with-cache (key thunk)
+  "Return cached value for KEY, or call THUNK, caching for `gp-cache-ttl'."
+  (let ((hit (gp-cache-get key)))
+    (if (car hit)
+        (cdr hit)
+      (gp-cache-put key (funcall thunk)))))
 
 ;;;; Platform-agnostic helpers ------------------------------------------------
 

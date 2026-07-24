@@ -10,6 +10,10 @@
 (require 'cl-lib)
 (require 'gp-compose)
 
+;; Forward declaration: defined by the optional `markdown-mode' package,
+;; only referenced here under `skip-unless (require 'markdown-mode nil t)'.
+(defvar markdown-hide-markup)
+
 (ert-deftest gp-test-compose-submit-delegates-target ()
   "Submitting passes the buffer text and target fields to the submit fn."
   (let* ((captured nil)
@@ -27,6 +31,35 @@
             (gp-compose-submit))
           (should (equal captured
                          '("ws/slug" 12 "hello **world**" ("a.ts" . 5) 7))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest gp-test-compose-submit-kills-lingering-preview-buffer ()
+  "A preview opened before submitting must not linger afterwards."
+  (let* ((target (list :full-name "ws/slug" :id 12
+                       :submit-function (lambda (&rest _) '((id . 1)))))
+         (buf (gp-compose target)))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "hello **world**")
+          (gp-compose-preview)
+          (should (get-buffer gp-compose-preview-buffer))
+          (cl-letf (((symbol-function 'set-window-configuration) #'ignore))
+            (gp-compose-submit))
+          (should-not (get-buffer gp-compose-preview-buffer)))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest gp-test-compose-cancel-kills-lingering-preview-buffer ()
+  "A preview opened before cancelling must not linger afterwards."
+  (let* ((target (list :full-name "ws/slug" :id 12))
+         (buf (gp-compose target)))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "hello **world**")
+          (gp-compose-preview)
+          (should (get-buffer gp-compose-preview-buffer))
+          (cl-letf (((symbol-function 'set-window-configuration) #'ignore))
+            (gp-compose-cancel))
+          (should-not (get-buffer gp-compose-preview-buffer)))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (ert-deftest gp-test-compose-empty-is-rejected ()
@@ -70,6 +103,46 @@
           (should (string-match-p "Title" (buffer-string))))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
+(ert-deftest gp-test-compose-render-markdown-hides-markup ()
+  "The preview must actually RENDER markdown (hide `**'/`#' markup and
+show real bold/heading faces), not just syntax-color the raw
+characters -- a bug report was \"I just see colored markdown syntax\",
+traced to `markdown-hide-markup' never being turned on."
+  (skip-unless (require 'markdown-mode nil t))
+  (let ((buf (gp-compose-render-markdown "# Title\n\n**bold**")))
+    (unwind-protect
+        (with-current-buffer buf
+          (should (eq major-mode 'gfm-mode))
+          (should markdown-hide-markup))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest gp-test-compose-render-markdown-resets-stale-view-mode-buffer ()
+  "A second render into the same (already `view-mode', read-only)
+preview buffer must fully replace the old content, not append to or
+fail against it."
+  (let ((buf (gp-compose-render-markdown "first draft")))
+    (unwind-protect
+        (progn
+          (should (with-current-buffer buf view-mode))
+          (let ((buf2 (gp-compose-render-markdown "second draft")))
+            (should (eq buf buf2))
+            (with-current-buffer buf2
+              (should (equal (buffer-string) "second draft"))
+              (should-not (string-match-p "first draft" (buffer-string))))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest gp-test-compose-kill-preview-buffer-noop-when-absent ()
+  (when (get-buffer gp-compose-preview-buffer) (kill-buffer gp-compose-preview-buffer))
+  (should-not (get-buffer gp-compose-preview-buffer))
+  (gp-compose--kill-preview-buffer)  ;; must not error
+  (should-not (get-buffer gp-compose-preview-buffer)))
+
+(ert-deftest gp-test-compose-kill-preview-buffer-kills-existing ()
+  (gp-compose-render-markdown "some text")
+  (should (get-buffer gp-compose-preview-buffer))
+  (gp-compose--kill-preview-buffer)
+  (should-not (get-buffer gp-compose-preview-buffer)))
+
 (ert-deftest gp-test-compose-hard-breaks ()
   "Single newlines get trailing two spaces; blanks/code fences don't."
   (let ((out (gp-compose--apply-hard-breaks
@@ -91,11 +164,10 @@
     (insert "great work :thi")
     (let ((res (gp-compose-emoji-capf)))
       (should res)
-      (cl-destructuring-bind (start end cands &rest _) res
-        (should (= start (- (point) (length ":thi"))))
-        (should (= end (point)))
-        ;; candidates include :thinking: (from emojify or the fallback)
-        (should (member ":thinking:" cands))))))
+      (should (= (nth 0 res) (- (point) (length ":thi"))))
+      (should (= (nth 1 res) (point)))
+      ;; candidates include :thinking: (from emojify or the fallback)
+      (should (member ":thinking:" (nth 2 res))))))
 
 (ert-deftest gp-test-compose-emoji-capf-nil-without-colon ()
   (with-temp-buffer

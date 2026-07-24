@@ -464,7 +464,7 @@ INCLUDE-MERGED)."
     (define-key map (kbd "C-c g")
                 (lambda () (interactive)
                   (helm-run-after-exit
-                   (lambda () (bitbucket-cache-clear) (gp-helm--list include-merged)))))
+                   (lambda () (gp-cache-clear) (gp-helm--list include-merged)))))
     (define-key map (kbd "C-c G")
                 (lambda () (interactive)
                   (helm-run-after-exit
@@ -581,7 +581,7 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
   "Show the Helm workspace PR list.  See `gp-helm' for INCLUDE-MERGED."
   (let* ((uuid (gp-user-uuid))
          (states (if include-merged '("OPEN" "MERGED" "DECLINED") '("OPEN")))
-         (mine-prs (bitbucket-with-cache
+         (mine-prs (gp-cache-with-cache
                     (list 'mine uuid include-merged)
                     (lambda ()
                       (gp-workspace-pull-requests
@@ -615,7 +615,7 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                                                  (plist-get cat :drafts) actions t km)))))
       ;; reviewing PRs have no fast endpoint: serve from cache, else scan
       ;; repos in parallel (non-blocking) and fill the section as batches land
-      (let ((hit (bitbucket-cache-get (list 'reviewing uuid states))))
+      (let ((hit (gp-cache-get (list 'reviewing uuid states))))
         (if (car hit)
             (progn (setq gp-helm--reviewing-cache (cdr hit))
                    (run-with-idle-timer 0.1 nil #'gp-helm--refresh-if-alive))
@@ -639,19 +639,15 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
   "Fetch each PR's latest-commit pipeline state in parallel, refreshing live.
 Results land in `gp-helm--pipeline-cache' keyed by commit hash."
   (dolist (pr prs)
-    (let ((hash (let-alist pr .source.commit.hash)))
-      (when (and hash (eq (gethash hash gp-helm--pipeline-cache 'miss) 'miss)
-                 (let-alist pr .destination.repository.full_name))
-        (bitbucket-api-get-async
-         (format "/repositories/%s/commit/%s/statuses"
-                 (let-alist pr .destination.repository.full_name) hash)
-         '(("fields" . "values.state,next"))
-         (lambda (page)
-           (let ((states (mapcar (lambda (s) (alist-get 'state s))
-                                 (alist-get 'values page))))
-             (puthash hash (gp-build-states-summary states)
-                      gp-helm--pipeline-cache)
-             (gp-helm--refresh-if-alive))))))))
+    (let ((hash (gp-pr-source-commit pr))
+          (full-name (gp-pr-full-name pr)))
+      (when (and hash full-name (eq (gethash hash gp-helm--pipeline-cache 'miss) 'miss))
+        (gp-commit-build-states-async
+         full-name hash
+         (lambda (states)
+           (puthash hash (gp-build-states-summary states)
+                    gp-helm--pipeline-cache)
+           (gp-helm--refresh-if-alive)))))))
 
 (defun gp-helm--refresh-if-alive ()
   "Redraw the live helm session, if any."
@@ -678,7 +674,7 @@ Results land in `gp-helm--pipeline-cache' keyed by commit hash."
      (lambda ()
        (let ((final (reverse acc)))
          (setq gp-helm--reviewing-cache final)
-         (bitbucket-cache-put (list 'reviewing uuid states) final)
+         (gp-cache-put (list 'reviewing uuid states) final)
          (gp-helm--scan-pipelines-async final))
        (gp-helm--refresh-if-alive)))))
 
@@ -705,7 +701,7 @@ for those)."
   (interactive)
   (require 'helm)
   (let* ((uuid (gp-user-uuid))
-         (hit (bitbucket-cache-get (list 'others uuid))))
+         (hit (gp-cache-get (list 'others uuid))))
     (setq gp-helm--others-cache (if (car hit) (cdr hit) nil))
     (unless (car hit)
       (run-with-idle-timer
@@ -726,7 +722,7 @@ for those)."
             (lambda ()
               (let ((final (reverse acc)))
                 (setq gp-helm--others-cache final)
-                (bitbucket-cache-put (list 'others uuid) final))
+                (gp-cache-put (list 'others uuid) final))
               (gp-helm--refresh-if-alive)))))))
     (helm :sources
           (helm-build-sync-source "Open PRs (others)"
@@ -754,7 +750,7 @@ rather than full-frame -- handy from the per-repo mode-line count."
    (list (or (and (boundp 'gp-watch--repo) gp-watch--repo)
              (read-string "Repository (owner/slug): "))))
   (require 'helm)
-  (let* ((prs (bitbucket-with-cache
+  (let* ((prs (gp-cache-with-cache
                (list 'repo-prs full-name)
                (lambda () (gp-repo-pull-requests full-name))))
          (gp-helm-full-frame nil))     ;; side window, not whole frame
@@ -778,7 +774,7 @@ Uses the cached per-repo open-PR list and filters it client-side."
              (read-string "Repository (owner/slug): "))
          (read-string "Branch: ")))
   (require 'helm)
-  (let* ((prs (bitbucket-with-cache
+  (let* ((prs (gp-cache-with-cache
                (list 'repo-prs full-name)
                (lambda () (gp-repo-pull-requests full-name))))
          (matches (gp-helm--prs-for-branch prs branch))
