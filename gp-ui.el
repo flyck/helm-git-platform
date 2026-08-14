@@ -444,6 +444,27 @@ or `gp-invalidate-pr-caches' + a manual rerender\), same as today."
     (font-lock-ensure)
     (buffer-string)))
 
+(defcustom gp-detail-description-collapsed nil
+  "When non-nil, the PR description section starts collapsed."
+  :type 'boolean :group 'bitbucket)
+
+(defun gp--insert-description (pr)
+  "Insert a collapsable description section for PR, if it has one.
+Rendered through `gp--render-markdown' so it gets the same emoji,
+mention and link handling as comment bodies.  Backends disagree on
+the field name (Bitbucket `description', GitHub `body'), so the value
+comes from `gp-pr-description' rather than the alist directly."
+  (let ((desc (ignore-errors (gp-pr-description pr))))
+    (when desc
+      (magit-insert-section (gp-description nil gp-detail-description-collapsed)
+        (magit-insert-heading "Description")
+        (let ((start (point)))
+          (insert (gp--render-markdown desc))
+          (unless (bolp) (insert "\n"))
+          ;; indent the body so it reads as belonging to the heading
+          (indent-rigidly start (point) 2))
+        (insert "\n")))))
+
 (defun gp--insert-changed-files ()
   "Insert a collapsable changed-files section for the detail buffer's PR.
 Each file is a single line inside the section so `p' and `n' can skip the whole
@@ -651,6 +672,7 @@ that is exactly when you need a way to add the first one."
              (lambda () (gp--detail-run-action
                          buf 'changes (lambda () (gp-ui-set-review pr 'changes nil))))))))
       (insert "\n\n"))
+    (gp--insert-description pr)
     (gp--insert-changed-files)
     (gp--insert-pipelines gp--detail-pipelines)
     (magit-insert-section (gp-comments)

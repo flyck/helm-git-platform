@@ -164,6 +164,12 @@
   (github-pr-my-review-state pr uuid))
 (cl-defmethod gp--pr-comment-count ((_ git-platform-github) pr)
   (+ (or (alist-get 'comments pr) 0) (or (alist-get 'review_comments pr) 0)))
+(cl-defmethod gp--pr-description ((_ git-platform-github) pr)
+  ;; GitHub sends JSON null for an empty body, which the parser gives us as
+  ;; :null rather than nil.
+  (let ((b (alist-get 'body pr)))
+    (when (stringp b)
+      (unless (string-empty-p (string-trim b)) b))))
 (cl-defmethod gp--comment-resolved-p ((_ git-platform-github) comment)
   (github-comment-resolved-p comment))
 (cl-defmethod gp--comment-resolvable-p ((_ git-platform-github) comment)

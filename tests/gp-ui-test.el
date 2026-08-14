@@ -185,6 +185,53 @@ naive `eq' implementation would hit across two separate renders."
       (should (string-match-p "resolve" (buffer-string)))
       (should-not (string-match-p "⏳" (buffer-string))))))
 
+;;;; PR description (field name differs per backend) --------------------------
+
+(ert-deftest gp-test-pr-description-reads-bitbucket-description ()
+  "Bitbucket keeps the body in `description'."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (equal (gp-pr-description '((id . 1) (description . "why this PR")))
+                   "why this PR"))
+    ;; blank/absent collapses to nil so callers can skip the section
+    (should-not (gp-pr-description '((id . 1) (description . ""))))
+    (should-not (gp-pr-description '((id . 1) (description . "   \n"))))
+    (should-not (gp-pr-description '((id . 1))))))
+
+(ert-deftest gp-test-pr-description-reads-github-body ()
+  "GitHub keeps the body in `body', and sends :null when empty."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (should (equal (gp-pr-description github-mock--pr-1)
+                     "Adds the toggle.\n\n- [x] tests\n- [ ] docs"))
+      (should-not (gp-pr-description '((id . 42) (body . ""))))
+      ;; a JSON null arrives as a non-string, not as nil
+      (should-not (gp-pr-description '((id . 42) (body . :null))))
+      (should-not (gp-pr-description '((id . 42)))))))
+
+(ert-deftest gp-test-render-detail-shows-description-for-github-pr ()
+  "The detail view renders the description section from GitHub's `body'."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "someone-else")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail github-mock--pr-1 nil))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "Description" text))
+            (should (string-match-p "Adds the toggle" text))))))))
+
+(ert-deftest gp-test-render-detail-omits-empty-description ()
+  "No description means no empty section heading."
+  (let ((pr (append '((description . "")) (car (gp-test--mock-prs)))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr nil))
+        (should-not (string-match-p "^Description"
+                                    (substring-no-properties (buffer-string))))))))
+
 (ert-deftest gp-test-render-detail-shows-comments ()
   (let ((pr (car (gp-test--mock-prs)))
         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))

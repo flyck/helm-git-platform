@@ -260,6 +260,11 @@ Bitbucket's PR object carries this pre-summed as `comment_count'.
 GitHub has no single field for it -- general and inline (review)
 comments are counted separately as `comments'/`review_comments' --
 so this sums both.")
+(gp-defop pr-description (pr)
+  "Return PR's description/body as a Markdown string, or nil when empty.
+Bitbucket calls this `description', GitHub calls it `body'.  Returns
+nil rather than \"\" for an empty description, so callers can simply
+test the value to decide whether to render a section at all.")
 (gp-defop comment-resolved-p (comment)
   "Return non-nil if COMMENT is resolved.")
 (gp-defop comment-resolvable-p (comment)

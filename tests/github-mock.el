@@ -41,6 +41,7 @@ params data) returning one.  Consulted before the built-in routes.")
 (defconst github-mock--pr-1
   '((id . 501) (number . 42) (node_id . "PR_42")
     (title . "Add the widget toggle") (state . "open") (draft . nil)
+    (body . "Adds the toggle.\n\n- [x] tests\n- [ ] docs")
     (user (login . "ada") (avatar_url . "https://example.com/ada.png"))
     (head (ref . "feature/widget") (sha . "abc123") (repo (full_name . "acme/web")))
     (base (ref . "main") (repo (full_name . "acme/web")))
