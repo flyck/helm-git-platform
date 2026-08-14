@@ -118,6 +118,69 @@
           (should (string-match-p "Mark ready \\[D\\]"
                                   (substring-no-properties (buffer-string)))))))))
 
+;;;; In-place action spinner (no layout shift while a mutation is in flight)
+
+(ert-deftest gp-test-detail-run-action-shows-spinner-during-thunk ()
+  "While `gp--detail-run-action's THUNK is running, the buffer already
+shows the spinner in that button's slot (not just after it returns)."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let (seen-during-thunk)
+      (gp--detail-run-action
+       (current-buffer) 'draft
+       (lambda ()
+         (setq seen-during-thunk gp--detail-pending-action)))
+      (should (eq seen-during-thunk 'draft))
+      ;; cleared once the thunk returns
+      (should-not gp--detail-pending-action))))
+
+(ert-deftest gp-test-detail-run-action-clears-pending-on-error ()
+  "The pending flag is cleared even if THUNK signals."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (ignore-errors
+      (gp--detail-run-action (current-buffer) 'draft (lambda () (error "boom"))))
+    (should-not gp--detail-pending-action)))
+
+(ert-deftest gp-test-action-button-spinner-shows-spinner-when-pending ()
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (setq gp--detail-pending-action 'draft)
+      (gp--insert-action-button/spinner 'draft "✅ Mark ready [D]" "help" #'ignore)
+      (should (string-match-p "⏳" (buffer-string)))
+      (should-not (string-match-p "Mark ready" (buffer-string))))))
+
+(ert-deftest gp-test-action-button-spinner-shows-label-when-not-pending ()
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (setq gp--detail-pending-action nil)
+      (gp--insert-action-button/spinner 'draft "✅ Mark ready [D]" "help" #'ignore)
+      (should (string-match-p "Mark ready" (buffer-string)))
+      (should-not (string-match-p "⏳" (buffer-string))))))
+
+(ert-deftest gp-test-action-button-spinner-uses-equal-not-eq ()
+  "Compound tags (per-comment actions) are fresh conses each render, so
+the comparison must be `equal', not `eq' -- this is the exact bug a
+naive `eq' implementation would hit across two separate renders."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (setq gp--detail-pending-action (cons 'resolution 77))
+      (gp--insert-action-button/spinner (cons 'resolution 77) "resolve [x]" "help" #'ignore)
+      (should (string-match-p "⏳" (buffer-string))))))
+
+(ert-deftest gp-test-action-button-spinner-per-comment-tags-are-independent ()
+  "A pending action on comment 77 must not show a spinner on comment 99's button."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (setq gp--detail-pending-action (cons 'resolution 77))
+      (gp--insert-action-button/spinner (cons 'resolution 99) "resolve [x]" "help" #'ignore)
+      (should (string-match-p "resolve" (buffer-string)))
+      (should-not (string-match-p "⏳" (buffer-string))))))
+
 (ert-deftest gp-test-render-detail-shows-comments ()
   (let ((pr (car (gp-test--mock-prs)))
         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))

@@ -122,6 +122,14 @@
   "Poll timer re-fetching pipelines while a current run is unfinished, or nil.")
 (defvar-local gp--detail-comments nil
   "Cached comment list for the detail buffer (so it can redraw without refetch).")
+(defvar-local gp--detail-pending-action nil
+  "Tag of the action button currently in flight, or nil.
+Set by `gp--detail-run-action' just before a blocking mutation (draft
+toggle, approve, resolve, …) and cleared once it returns.  The
+render functions check this so that ONE button swaps to a spinner in
+its own slot on the immediate redraw, instead of the mutation
+blocking Emacs with no feedback until the full post-mutation refresh
+lands (see `gp--insert-action-button/spinner').")
 (defvar-local gp--detail-marked-comment-ids nil
   "Comment ids marked for batch terminal handoff in the detail buffer.")
 (defvar-local gp--detail-refresh-token 0
@@ -335,13 +343,17 @@ reply threads."
              (lambda () (gp-ui-send-comment-to-terminal pr comment)))
             (when (gp-comment-resolvable-p comment)
               (insert " ")
-              (if resolved
-                  (gp--insert-action-button
-                   "reopen [x]" "Reopen this comment on the PR"
-                   (lambda () (gp-ui-set-resolution pr comment nil)))
-                (gp--insert-action-button
-                 "resolve [x]" "Resolve this comment on the PR"
-                 (lambda () (gp-ui-set-resolution pr comment t)))))
+              (let ((tag (cons 'resolution (alist-get 'id comment)))
+                    (buf (current-buffer)))
+                (if resolved
+                    (gp--insert-action-button/spinner
+                     tag "reopen [x]" "Reopen this comment on the PR"
+                     (lambda () (gp--detail-run-action
+                                 buf tag (lambda () (gp-ui-set-resolution pr comment nil)))))
+                  (gp--insert-action-button/spinner
+                   tag "resolve [x]" "Resolve this comment on the PR"
+                   (lambda () (gp--detail-run-action
+                               buf tag (lambda () (gp-ui-set-resolution pr comment t))))))))
             (when (gp-comment-own-p comment (gp-user-uuid))
               (insert " ")
               (gp--insert-action-button
@@ -372,6 +384,38 @@ reply threads."
                  'follow-link t
                  'help-echo help
                  'action (lambda (_b) (funcall fn))))
+
+(defun gp--insert-action-button/spinner (tag label help fn)
+  "Insert a button, or a spinner in its place while TAG is pending.
+Same slot, same width class as a plain `gp--insert-action-button' --
+just enough to avoid the layout shifting when the mutation this
+button fires (via `gp--detail-run-action') is in flight.  TAG
+identifies this button -- a symbol for a PR-level action (`draft',
+`approve', …), or a compound value like (resolution . COMMENT-ID)
+for a per-comment action, since several comments render in the same
+buffer and each needs its own independent pending state.  Compared
+with `equal' against `gp--detail-pending-action', not `eq': a
+compound tag is a fresh cons on every render, so `eq' would never
+match across the render that sets the flag and the one reading it."
+  (if (equal gp--detail-pending-action tag)
+      (insert (propertize "⏳" 'face 'shadow))
+    (gp--insert-action-button label help fn)))
+
+(defun gp--detail-run-action (buf tag thunk)
+  "Run THUNK with BUF's button TAG showing a spinner meanwhile.
+Redraws BUF once immediately so the spinner appears before the
+\(blocking\) THUNK runs, then clears the pending flag once THUNK
+returns \(or signals\) -- the caller is expected to trigger the real
+post-mutation redraw itself right after \(e.g. via `gp-detail-refresh'
+or `gp-invalidate-pr-caches' + a manual rerender\), same as today."
+  (with-current-buffer buf
+    (setq gp--detail-pending-action tag)
+    (gp--detail-rerender buf))
+  (unwind-protect
+      (funcall thunk)
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (setq gp--detail-pending-action nil)))))
 
 (defcustom gp-detail-files-collapsed nil
   "When non-nil, the changed-files section starts collapsed."
@@ -544,40 +588,50 @@ block at once.  The file name remains clickable and opens the checkout."
       (when (and (gp-pr-authored-by-p pr (gp-user-uuid))
                  (gp-pr-open-p pr))
         (insert "   ")
-        (if (gp-pr-draft-p pr)
-            (gp--insert-action-button
-             "✅ Mark ready [D]" "Mark this draft PR as ready for review"
-             (lambda () (gp-ui-set-draft pr nil)))
-          (gp--insert-action-button
-           "📝 Convert to draft [D]" "Convert this PR back to a draft"
-           (lambda () (gp-ui-set-draft pr t)))))
+        (let ((buf (current-buffer)))
+          (if (gp-pr-draft-p pr)
+              (gp--insert-action-button/spinner
+               'draft "✅ Mark ready [D]" "Mark this draft PR as ready for review"
+               (lambda () (gp--detail-run-action
+                           buf 'draft (lambda () (gp-ui-set-draft pr nil)))))
+            (gp--insert-action-button/spinner
+             'draft "📝 Convert to draft [D]" "Convert this PR back to a draft"
+             (lambda () (gp--detail-run-action
+                         buf 'draft (lambda () (gp-ui-set-draft pr t))))))))
       ;; review actions, only on others' open PRs you can review
       (when (and (gp-pr-open-p pr)
                  (not (gp-pr-authored-by-p pr (gp-user-uuid))))
         (let* ((mine (gp-pr-my-review-state pr (gp-user-uuid)))
-               (dismiss (eq (gp-review-retraction-kind) 'dismiss)))
+               (dismiss (eq (gp-review-retraction-kind) 'dismiss))
+               (buf (current-buffer)))
           (insert "\n   ")
           (if (eq mine 'approved)
-              (gp--insert-action-button
+              (gp--insert-action-button/spinner
+               'approve
                (if dismiss "↩ Dismiss approval [a]" "↩ Unapprove [a]")
                (if dismiss
                    "Dismiss your approval (stays visible on the PR timeline with a reason)"
                  "Retract your approval of this PR")
-               (lambda () (gp-ui-set-review pr 'approved t)))
-            (gp--insert-action-button
-             "✅ Approve [a]" "Approve this pull request"
-             (lambda () (gp-ui-set-review pr 'approved nil))))
+               (lambda () (gp--detail-run-action
+                           buf 'approve (lambda () (gp-ui-set-review pr 'approved t)))))
+            (gp--insert-action-button/spinner
+             'approve "✅ Approve [a]" "Approve this pull request"
+             (lambda () (gp--detail-run-action
+                         buf 'approve (lambda () (gp-ui-set-review pr 'approved nil))))))
           (insert "   ")
           (if (eq mine 'changes)
-              (gp--insert-action-button
+              (gp--insert-action-button/spinner
+               'changes
                (if dismiss "↩ Dismiss request [c]" "↩ Clear request [c]")
                (if dismiss
                    "Dismiss your changes-requested review (stays visible on the PR timeline with a reason)"
                  "Retract your request for changes")
-               (lambda () (gp-ui-set-review pr 'changes t)))
-            (gp--insert-action-button
-             "🚫 Request changes [c]" "Request changes on this pull request"
-             (lambda () (gp-ui-set-review pr 'changes nil))))))
+               (lambda () (gp--detail-run-action
+                           buf 'changes (lambda () (gp-ui-set-review pr 'changes t)))))
+            (gp--insert-action-button/spinner
+             'changes "🚫 Request changes [c]" "Request changes on this pull request"
+             (lambda () (gp--detail-run-action
+                         buf 'changes (lambda () (gp-ui-set-review pr 'changes nil))))))))
       (insert "\n\n"))
     (gp--insert-changed-files)
     (gp--insert-pipelines gp--detail-pipelines)
