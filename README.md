@@ -1,5 +1,8 @@
 # helm-git-platform
 
+[![CI](https://github.com/flyck/helm-git-platform/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/flyck/helm-git-platform/actions/workflows/ci.yml)
+[![Emacs](https://img.shields.io/badge/Emacs-28.1%2B-7F5AB6?logo=gnuemacs&logoColor=white)](https://www.gnu.org/software/emacs/)
+
 A magit-flavoured **git-platform client** for Emacs. Browse pull requests across your whole
 workspace, drill into changed files and comments with Helm, jump to the matching local checkout
 and switch branches safely, see inline review comments as overlays on the code, and watch live PR
