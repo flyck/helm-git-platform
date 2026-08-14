@@ -135,6 +135,20 @@ approval\") and prompt for REASON only when this is `dismiss'.")
 These are pre-selected in the create-PR form: the platform itself
 auto-adds them as reviewers on every new PR, so opting out is the
 unusual case.  Contrast `gp-repo-suggested-reviewers'.")
+(gp-defop set-pull-request-reviewers (full-name id reviewer-ids &optional current-ids)
+  "Set PR ID in FULL-NAME to have exactly REVIEWER-IDS as reviewers.
+REVIEWER-IDS is the complete desired list (Bitbucket uuids, GitHub
+logins) -- callers pass the end state, not a delta, and each backend
+reaches it whichever way its API allows: Bitbucket PUTs the whole
+reviewer list, GitHub POSTs the additions and DELETEs the removals
+against `requested_reviewers'.  CURRENT-IDS, when given, is the PR's
+present reviewer list, so the GitHub side can compute that delta
+without re-fetching.
+
+Only reviewers who have not yet submitted a review can be removed:
+GitHub keeps a submitted review on the PR regardless of whether the
+person is still a requested reviewer, so callers must not offer to
+withdraw one (see `gp-ui-edit-reviewers').")
 (gp-defop repo-suggested-reviewers (full-name)
   "Return candidate reviewers for FULL-NAME the platform merely
 suggests rather than auto-selects (list of user alists, same shape
@@ -218,9 +232,34 @@ string across backends.")
 Used for a compact list-view label; contrast `gp-pr-full-name', which
 includes the owner/workspace.")
 (gp-defop pr-review-tally (pr)
-  "Return a plist (:approved :changes :pending) over PR's reviewers.")
+  "Return a plist (:approved :changes :pending) over PR's reviewers.
+Bitbucket answers this from data already embedded in PR (`participants'),
+so it never touches the network.  GitHub has no such embedded data --
+reviews are a separate resource -- so its implementation DOES fetch,
+synchronously; callers rendering many PRs at once (e.g. a list view)
+should use `gp-pr-review-tally-async' instead to avoid blocking on
+one HTTP round-trip per row.")
+(gp-defop pr-review-tally-async (pr callback)
+  "Fetch PR's review tally asynchronously; CALLBACK gets the plist.
+Non-blocking twin of `gp-pr-review-tally', for callers (list views)
+that can't afford a synchronous fetch per PR.  Bitbucket's
+implementation has nothing to fetch, so it calls CALLBACK
+immediately with the same (free) result `gp-pr-review-tally' gives.")
+(gp-defop pr-reviewers-async (pr callback)
+  "Fetch PR's individual reviewers asynchronously.
+CALLBACK gets a list of plists (:name :avatar :state), STATE one of
+`approved'/`changes'/`pending' -- the per-person breakdown behind
+`gp-pr-review-tally'/-async's aggregate counts.  Bitbucket answers
+from `participants' already embedded in PR (no network); GitHub
+fetches the same review data `gp-pr-review-tally-async' does.")
 (gp-defop pr-my-review-state (pr uuid)
   "Return UUID's own review state on PR: `approved', `changes', or nil.")
+(gp-defop pr-comment-count (pr)
+  "Return PR's total comment count (all kinds), or nil if unknown.
+Bitbucket's PR object carries this pre-summed as `comment_count'.
+GitHub has no single field for it -- general and inline (review)
+comments are counted separately as `comments'/`review_comments' --
+so this sums both.")
 (gp-defop comment-resolved-p (comment)
   "Return non-nil if COMMENT is resolved.")
 (gp-defop comment-resolvable-p (comment)
@@ -232,6 +271,42 @@ should hide the resolve/reopen action entirely when this is nil
 rather than let it fail on click.")
 (gp-defop comment-own-p (comment uuid)
   "Return non-nil if COMMENT was written by UUID.")
+
+(gp-defop backend-name ()
+  "Return the symbol naming this backend (`bitbucket', `github', …).
+Lets configuration key off the active platform without comparing
+against the backend *instance*, which callers never construct
+themselves.")
+
+(defcustom gp-comment-delete-others nil
+  "Backends on which you may delete comments written by other users.
+Deleting someone else's comment needs elevated repository
+permissions, which the APIs do not advertise -- so this is a
+declaration, not a discovery: set it only for platforms where you
+actually hold that power.  Where it does not apply, the delete
+action stays hidden on other people's comments (your own are
+always deletable).
+
+Value is nil (never), t (every backend), or a list of backend
+symbols, e.g. `(bitbucket)'."
+  :type '(choice (const :tag "Never -- only my own comments" nil)
+                 (const :tag "All backends" t)
+                 (repeat :tag "Only these backends" symbol))
+  :group 'bitbucket)
+
+(defun gp-comment-delete-others-allowed-p ()
+  "Return non-nil if `gp-comment-delete-others' covers the active backend."
+  (cond ((eq gp-comment-delete-others t) t)
+        ((consp gp-comment-delete-others)
+         (and (memq (gp-backend-name) gp-comment-delete-others) t))
+        (t nil)))
+
+(defun gp-comment-deletable-p (comment uuid)
+  "Return non-nil if COMMENT may be deleted by the user identified by UUID.
+True for your own comments always, and for anyone's when
+`gp-comment-delete-others' enables it for the active backend."
+  (or (gp-comment-own-p comment uuid)
+      (gp-comment-delete-others-allowed-p)))
 
 ;; Pipeline / step shape accessors (kept backend-free for the UI).
 (gp-defop pipeline-state (pipeline)
@@ -271,42 +346,11 @@ is nil rather than let it fail on click.")
 (gp-defop pipelines-match-commit (pipelines commit)
   "Return the PIPELINES whose target commit matches COMMIT.")
 
-;;;; TTL result cache -----------------------------------------------------------
+;;;; Buffer naming --------------------------------------------------------------
 
-;; Provider-agnostic so both backends (and the UI layers that fetch
-;; around the `gp-' protocol) share one cache instead of each provider
-;; needing its own.  Originally lived in bitbucket-api.el as
-;; `bitbucket-cache-*'; moved here when the GitHub backend was added.
-
-(defcustom gp-comment-delete-others nil
-  "Backends on which you may delete comments written by other users.
-Deleting someone else's comment needs elevated repository
-permissions, which the APIs do not advertise -- so this is a
-declaration, not a discovery: set it only for platforms where you
-actually hold that power.  Where it does not apply, the delete
-action stays hidden on other people's comments (your own are
-always deletable).
-
-Value is nil (never), t (every backend), or a list of backend
-symbols, e.g. `(bitbucket)'."
-  :type '(choice (const :tag "Never -- only my own comments" nil)
-                 (const :tag "All backends" t)
-                 (repeat :tag "Only these backends" symbol))
-  :group 'bitbucket)
-
-(defun gp-comment-delete-others-allowed-p ()
-  "Return non-nil if `gp-comment-delete-others' covers the active backend."
-  (cond ((eq gp-comment-delete-others t) t)
-        ((consp gp-comment-delete-others)
-         (and (memq (gp-backend-name) gp-comment-delete-others) t))
-        (t nil)))
-
-(defun gp-comment-deletable-p (comment uuid)
-  "Return non-nil if COMMENT may be deleted by the user identified by UUID.
-True for your own comments always, and for anyone's when
-`gp-comment-delete-others' enables it for the active backend."
-  (or (gp-comment-own-p comment uuid)
-      (gp-comment-delete-others-allowed-p)))
+;; Every buffer this package creates carries one prefix, so they can be
+;; found with a single filter in `switch-to-buffer'/ibuffer and matched by
+;; one `display-buffer-alist' rule instead of a pattern per buffer kind.
 
 (defcustom gp-buffer-name-prefix "gp: "
   "Prefix tagging every buffer this package creates.
@@ -321,6 +365,13 @@ time, so existing buffers keep their old names until recreated."
 E.g. \"PRs\" -> \"*gp: PRs*\"."
   (format "*%s%s*" gp-buffer-name-prefix suffix))
 
+;;;; TTL result cache -----------------------------------------------------------
+
+;; Provider-agnostic so both backends (and the UI layers that fetch
+;; around the `gp-' protocol) share one cache instead of each provider
+;; needing its own.  Originally lived in bitbucket-api.el as
+;; `bitbucket-cache-*'; moved here when the GitHub backend was added.
+
 (defcustom gp-cache-ttl 300
   "Seconds to cache PR-list results (default 5 minutes).
 Set to 0 to disable caching."
@@ -329,6 +380,11 @@ Set to 0 to disable caching."
 
 (defvar gp--result-cache (make-hash-table :test 'equal)
   "KEY -> (EXPIRY . VALUE) cache for PR-list fetches.")
+
+(defun gp-cache-clear ()
+  "Clear cached PR-list results (forces a fresh fetch)."
+  (interactive)
+  (clrhash gp--result-cache))
 
 (defun gp-cache-remove (key)
   "Remove KEY from the result cache, if present."
@@ -370,11 +426,6 @@ here matters more than saving one re-fetch."
         (gp-cache-remove (list 'pr-diff full-name id commit))))
     (gp-cache-remove-matching
      (lambda (k) (memq (car-safe k) '(mine reviewing others))))))
-
-(defun gp-cache-clear ()
-  "Clear cached PR-list results (forces a fresh fetch)."
-  (interactive)
-  (clrhash gp--result-cache))
 
 (defun gp-cache-get (key)
   "Return (FOUND . VALUE) for KEY from the result cache.

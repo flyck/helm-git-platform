@@ -125,6 +125,48 @@
                      '(((uuid . "{u1}") (display_name . "Alice")))))
       (should (= calls 2)))))
 
+;;;; Bitbucket suggested reviewers (workspace members) -------------------------
+
+(ert-deftest gp-create-test-bitbucket-suggested-unwraps-members ()
+  "Workspace members arrive nested under `user'; candidates are flat."
+  (require 'bitbucket-api)
+  (bitbucket-cache-clear)
+  (cl-letf (((symbol-function 'bitbucket-api-paged)
+             (lambda (path &rest _)
+               (should (string-match-p "/workspaces/ws/members" path))
+               '(((user . ((uuid . "{u1}") (display_name . "Alice"))))
+                 ((user . ((uuid . "{u2}") (display_name . "Bob")))))))
+            ((symbol-function 'bitbucket-user-uuid) (lambda () "{me}"))
+            ((symbol-function 'bitbucket-repo-default-reviewers) (lambda (_) nil)))
+    (should (equal (bitbucket-repo-suggested-reviewers "ws/slug")
+                   '(((uuid . "{u1}") (display_name . "Alice"))
+                     ((uuid . "{u2}") (display_name . "Bob")))))))
+
+(ert-deftest gp-create-test-bitbucket-suggested-excludes-self-and-defaults ()
+  "You are never your own reviewer, and defaults are not offered twice."
+  (require 'bitbucket-api)
+  (bitbucket-cache-clear)
+  (cl-letf (((symbol-function 'bitbucket-api-paged)
+             (lambda (&rest _)
+               '(((user . ((uuid . "{me}")  (display_name . "Me"))))
+                 ((user . ((uuid . "{u1}")  (display_name . "Alice"))))
+                 ((user . ((uuid . "{u2}")  (display_name . "Bob")))))))
+            ((symbol-function 'bitbucket-user-uuid) (lambda () "{me}"))
+            ((symbol-function 'bitbucket-repo-default-reviewers)
+             (lambda (_) '(((uuid . "{u1}") (display_name . "Alice"))))))
+    (should (equal (bitbucket-repo-suggested-reviewers "ws/slug")
+                   '(((uuid . "{u2}") (display_name . "Bob")))))))
+
+(ert-deftest gp-create-test-bitbucket-suggested-survives-api-failure ()
+  "A members fetch the token cannot make must not break the create form."
+  (require 'bitbucket-api)
+  (bitbucket-cache-clear)
+  (cl-letf (((symbol-function 'bitbucket-api-paged)
+             (lambda (&rest _) (error "403 Forbidden")))
+            ((symbol-function 'bitbucket-user-uuid) (lambda () "{me}"))
+            ((symbol-function 'bitbucket-repo-default-reviewers) (lambda (_) nil)))
+    (should (null (bitbucket-repo-suggested-reviewers "ws/slug")))))
+
 ;;;; Default vs. suggested reviewer checkboxes ---------------------------------
 
 (ert-deftest gp-create-test-default-reviewers-checked-by-default ()

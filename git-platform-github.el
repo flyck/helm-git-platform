@@ -75,6 +75,11 @@
   (github-repo-default-reviewers full-name))
 (cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-github) full-name)
   (github-repo-suggested-reviewers full-name))
+(cl-defmethod gp--set-pull-request-reviewers ((_ git-platform-github)
+                                              full-name id reviewer-ids
+                                              &optional current-ids)
+  ;; needs the current set to send POST/DELETE deltas
+  (github-set-pull-request-reviewers full-name id reviewer-ids current-ids))
 (cl-defmethod gp--create-pull-request ((_ git-platform-github) full-name source dest title &optional description draft close-source-branch reviewer-uuids)
   (github-create-pull-request full-name source dest title
                               :description description
@@ -151,14 +156,21 @@
           (car (last (split-string .base.repo.full_name "/")))))))
 (cl-defmethod gp--pr-review-tally ((_ git-platform-github) pr)
   (github-pr-review-tally pr))
+(cl-defmethod gp--pr-review-tally-async ((_ git-platform-github) pr callback)
+  (github-pr-review-tally-async pr callback))
+(cl-defmethod gp--pr-reviewers-async ((_ git-platform-github) pr callback)
+  (github-pr-reviewers-async pr callback))
 (cl-defmethod gp--pr-my-review-state ((_ git-platform-github) pr uuid)
   (github-pr-my-review-state pr uuid))
+(cl-defmethod gp--pr-comment-count ((_ git-platform-github) pr)
+  (+ (or (alist-get 'comments pr) 0) (or (alist-get 'review_comments pr) 0)))
 (cl-defmethod gp--comment-resolved-p ((_ git-platform-github) comment)
   (github-comment-resolved-p comment))
 (cl-defmethod gp--comment-resolvable-p ((_ git-platform-github) comment)
   (github-comment-resolvable-p comment))
 (cl-defmethod gp--comment-own-p ((_ git-platform-github) comment uuid)
   (github-comment-own-p comment uuid))
+(cl-defmethod gp--backend-name ((_ git-platform-github)) 'github)
 
 ;; Pipeline / step shape accessors
 (cl-defmethod gp--pipeline-state ((_ git-platform-github) pipeline)

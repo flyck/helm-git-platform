@@ -53,9 +53,13 @@
       (should (= (plist-get tally :pending) 1)))))
 
 (ert-deftest gp-test-helm-review-badge ()
-  (let ((pr '((participants . (((role . "REVIEWER") (state . "approved"))
-                               ((role . "REVIEWER") (state . "changes_requested"))
-                               ((role . "REVIEWER") (state . nil)))))))
+  "Reads the async `gp-helm--review-tally-cache' by PR id -- populating
+it here simulates `gp-helm--scan-review-tallies-async''s fetch having
+already landed (see `gp-test-helm-pipeline-bubble' for the identical
+pattern with pipeline status)."
+  (let ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
+        (pr '((id . 1))))
+    (puthash 1 '(:approved 1 :changes 1 :pending 1) gp-helm--review-tally-cache)
     (let ((gp-helm-review-style 'tally))
       (let ((s (substring-no-properties (gp-helm--review-badge pr))))
         (should (string-match-p "✅1" s))
@@ -69,8 +73,29 @@
       (should (equal (gp-helm--review-badge pr) "")))))
 
 (ert-deftest gp-test-helm-review-badge-empty ()
-  "No reviewers -> empty badge."
-  (should (equal (gp-helm--review-badge '((participants . nil))) "")))
+  "No reviewers (all-zero tally) -> empty badge."
+  (let ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
+        (pr '((id . 1))))
+    (puthash 1 '(:approved 0 :changes 0 :pending 0) gp-helm--review-tally-cache)
+    (should (equal (gp-helm--review-badge pr) ""))))
+
+(ert-deftest gp-test-helm-review-badge-loading ()
+  "Not yet fetched -> empty badge (same \"loading\" convention as the
+pipeline bubble's neutral state, just blank instead of a glyph since
+the badge has no natural neutral symbol)."
+  (let ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
+        (pr '((id . 1))))
+    (should (equal (gp-helm--review-badge pr) ""))))
+
+(ert-deftest gp-test-helm-scan-review-tallies-async-populates-cache ()
+  (let ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
+        (pr '((id . 1))))
+    (cl-letf (((symbol-function 'gp-pr-review-tally-async)
+               (lambda (_pr callback) (funcall callback '(:approved 2 :changes 0 :pending 0))))
+              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+      (gp-helm--scan-review-tallies-async (list pr))
+      (should (equal (gethash 1 gp-helm--review-tally-cache)
+                     '(:approved 2 :changes 0 :pending 0))))))
 
 (ert-deftest gp-test-build-states-summary ()
   (should (null (gp-build-states-summary nil)))
@@ -167,6 +192,14 @@
     (should (assoc "Browse comments (helm)" actions))
     (should (assoc "Checkout branch & open" actions))
     (should (cl-every (lambda (a) (functionp (cdr a))) actions))))
+
+(ert-deftest gp-test-helm-buffer-names-are-tagged ()
+  "Helm session buffers carry the shared prefix like every other buffer.
+`gp-helm-buffer' is also looked up by name in `gp-helm--title-width',
+so it must stay a single source of truth rather than a literal."
+  (should (string-prefix-p "*gp: " gp-helm-buffer))
+  (dolist (suffix '("files" "comments" "open" "repo" "repo-branch"))
+    (should (string-prefix-p "*gp: " (gp-helm--buffer suffix)))))
 
 (provide 'gp-helm-test)
 ;;; gp-helm-test.el ends here

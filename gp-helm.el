@@ -65,6 +65,20 @@ PR you came from.")
 (defface gp-helm-comments-face '((t :inherit warning))
   "Face for the comment-count badge." :group 'bitbucket-faces)
 
+;;;; Helm buffer names --------------------------------------------------------
+
+;; All tagged via `gp--buffer-name' so every buffer this package opens shares
+;; one searchable prefix.  `gp-helm-buffer' is looked up by name in
+;; `gp-helm--title-width', so it lives in a constant rather than being
+;; spelled out at each call site.
+
+(defconst gp-helm-buffer (gp--buffer-name "helm")
+  "Name of the main Helm PR-list buffer.")
+
+(defun gp-helm--buffer (suffix)
+  "Return the tagged Helm buffer name for SUFFIX, e.g. \"files\"."
+  (gp--buffer-name (format "helm %s" suffix)))
+
 ;;;; Pure candidate builders -------------------------------------------------
 
 (defcustom gp-helm-title-width 52
@@ -87,18 +101,6 @@ Covers the reviewer tally, comment count and pipeline bubble,
 whose emoji are double-width and easy to under-count; raise it if
 rows still overflow on the right."
   :type 'integer :group 'bitbucket)
-
-;;;; Helm buffer names --------------------------------------------------------
-;; All tagged via `gp--buffer-name' so every buffer this package opens shares
-;; one searchable prefix.  `gp-helm-buffer' is looked up by name in
-;; `gp-helm--title-width', so it lives in a constant rather than being
-;; spelled out at each call site.
-(defconst gp-helm-buffer (gp--buffer-name "helm")
-  "Buffer name for the main helm session.")
-
-(defun gp-helm--buffer (suffix)
-  "Return the helm buffer name for SUFFIX, e.g. \"files\" -> \"*gp: helm files*\"."
-  (gp--buffer-name (format "helm %s" suffix)))
 
 (defun gp-helm--title-width ()
   "Compute the title column width, growing to fill the window.
@@ -137,8 +139,7 @@ turning this on is cheap."
 (defun gp-helm--avatar (pr)
   "Return a leading avatar image string for PR's author, or \"\" (text only)."
   (let ((img (and gp-helm-show-avatars
-                  (gp-overlay--avatar-image
-                   (let-alist pr .author.links.avatar.href)))))
+                  (gp-overlay--avatar-image (gp-pr-author-avatar pr)))))
     (if img (concat (propertize " " 'display img) " ") "")))
 
 (defvar gp-helm--pipeline-cache (make-hash-table :test 'equal)
@@ -168,13 +169,14 @@ shown on graphical displays."
            (id (gp-helm--pad (format "#%s" .id) 6 'gp-helm-id-face))
            (title (gp-helm--pad .title (gp-helm--title-width)
                                        'gp-helm-title-face))
-           (repo (gp-helm--pad .destination.repository.slug
+           (repo (gp-helm--pad (gp-pr-repo-slug pr)
                                       gp-helm-repo-width
                                       'gp-helm-repo-face))
-           (author (gp-helm--pad .author.display_name 16
+           (author (gp-helm--pad (gp-pr-author-name pr) 16
                                         'gp-helm-author-face))
-           (badge (if (and .comment_count (> .comment_count 0))
-                      (propertize (format " 💬%d" .comment_count)
+           (count (gp-pr-comment-count pr))
+           (badge (if (and count (> count 0))
+                      (propertize (format " 💬%d" count)
                                   'face 'gp-helm-comments-face)
                     ""))
            (reviews (gp-helm--review-badge pr))
@@ -191,12 +193,19 @@ reviewer (✅✅⏳); nil hides it."
                  (const :tag "Hidden" nil))
   :group 'bitbucket)
 
-(defun gp-helm--review-badge (pr)
-  "Return a reviewer approval/changes/pending badge string for PR."
-  (let* ((tally (gp-pr-review-tally pr))
-         (a (plist-get tally :approved))
-         (c (plist-get tally :changes))
-         (p (plist-get tally :pending)))
+(defvar gp-helm--review-tally-cache (make-hash-table :test 'eql)
+  "PR id -> review tally plist (see `gp-pr-review-tally').
+Bitbucket's tally is embedded in the PR object already (free, no
+network); GitHub's needs a fetch per PR (see `gp-pr-review-tally-async'),
+which would block the list one row at a time if called directly from
+`gp-helm--review-badge' -- so it's populated asynchronously here,
+exactly like `gp-helm--pipeline-cache' already does for build status.")
+
+(defun gp-helm--format-review-tally (tally)
+  "Return the reviewer badge string for TALLY, honouring `gp-helm-review-style'."
+  (let ((a (plist-get tally :approved))
+        (c (plist-get tally :changes))
+        (p (plist-get tally :pending)))
     (cond
      ((null gp-helm-review-style) "")
      ((zerop (+ a c p)) "")
@@ -210,6 +219,31 @@ reviewer (✅✅⏳); nil hides it."
               (if (> a 0) (format "✅%d " a) "")
               (if (> c 0) (format "❌%d " c) "")
               (if (> p 0) (format "⏳%d" p) ""))))))
+
+(defun gp-helm--review-badge (pr)
+  "Return a reviewer approval/changes/pending badge string for PR.
+Reads the async `gp-helm--review-tally-cache'; a blank badge shows
+until the status arrives (see `gp-helm--scan-review-tallies-async')."
+  (let* ((id (alist-get 'id pr))
+         (cached (gethash id gp-helm--review-tally-cache)))
+    (if cached
+        (gp-helm--format-review-tally cached)
+      "")))
+
+(defun gp-helm--scan-review-tallies-async (prs)
+  "Fetch each PR's review tally in parallel, caching by id and refreshing live.
+Mirrors `gp-helm--scan-pipelines-async''s pattern.  Bitbucket's
+`gp-pr-review-tally-async' calls back immediately with its already-free
+result, so this costs nothing extra there; GitHub's does a real
+per-PR fetch."
+  (dolist (pr prs)
+    (let ((id (alist-get 'id pr)))
+      (unless (gethash id gp-helm--review-tally-cache)
+        (gp-pr-review-tally-async
+         pr
+         (lambda (tally)
+           (puthash id tally gp-helm--review-tally-cache)
+           (gp-helm--refresh-if-alive)))))))
 
 (defun gp-helm--pr-search-tail (pr)
   "Return an invisible, searchable suffix of PR's full untruncated fields.
@@ -634,15 +668,17 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
           (run-with-idle-timer
            0.1 nil
            (lambda () (gp-helm--scan-reviewing-async uuid states)))))
-      ;; fetch pipeline statuses for the immediately-known PRs in the background
+      ;; fetch pipeline statuses and review tallies for the immediately-known
+      ;; PRs in the background
       (run-with-idle-timer
        0.1 nil
        (lambda ()
-         (gp-helm--scan-pipelines-async
-          (append (plist-get cat :mine) (plist-get cat :drafts)))))
+         (let ((known (append (plist-get cat :mine) (plist-get cat :drafts))))
+           (gp-helm--scan-pipelines-async known)
+           (gp-helm--scan-review-tallies-async known))))
       (helm :sources sources
             :truncate-lines t
-            :buffer "*helm git-platform*"
+            :buffer gp-helm-buffer
             :full-frame gp-helm-full-frame
             :preselect (when gp-helm--last-visited-pr-id
                          (format "#%s " gp-helm--last-visited-pr-id))))))
@@ -682,12 +718,13 @@ Results land in `gp-helm--pipeline-cache' keyed by commit hash."
              (push pr acc))))
        (setq gp-helm--reviewing-cache (reverse acc))
        (gp-helm--refresh-if-alive))
-     ;; on-done: cache the final result for 5 min, fetch pipelines, refresh
+     ;; on-done: cache the final result for 5 min, fetch pipelines/reviews, refresh
      (lambda ()
        (let ((final (reverse acc)))
          (setq gp-helm--reviewing-cache final)
          (gp-cache-put (list 'reviewing uuid states) final)
-         (gp-helm--scan-pipelines-async final))
+         (gp-helm--scan-pipelines-async final)
+         (gp-helm--scan-review-tallies-async final))
        (gp-helm--refresh-if-alive)))))
 
 ;;;; Others' open PRs ---------------------------------------------------------
@@ -734,7 +771,8 @@ for those)."
             (lambda ()
               (let ((final (reverse acc)))
                 (setq gp-helm--others-cache final)
-                (gp-cache-put (list 'others uuid) final))
+                (gp-cache-put (list 'others uuid) final)
+                (gp-helm--scan-review-tallies-async final))
               (gp-helm--refresh-if-alive)))))))
     (helm :sources
           (helm-build-sync-source "Open PRs (others)"
