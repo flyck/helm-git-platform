@@ -88,13 +88,25 @@ whose emoji are double-width and easy to under-count; raise it if
 rows still overflow on the right."
   :type 'integer :group 'bitbucket)
 
+;;;; Helm buffer names --------------------------------------------------------
+;; All tagged via `gp--buffer-name' so every buffer this package opens shares
+;; one searchable prefix.  `gp-helm-buffer' is looked up by name in
+;; `gp-helm--title-width', so it lives in a constant rather than being
+;; spelled out at each call site.
+(defconst gp-helm-buffer (gp--buffer-name "helm")
+  "Buffer name for the main helm session.")
+
+(defun gp-helm--buffer (suffix)
+  "Return the helm buffer name for SUFFIX, e.g. \"files\" -> \"*gp: helm files*\"."
+  (gp--buffer-name (format "helm %s" suffix)))
+
 (defun gp-helm--title-width ()
   "Compute the title column width, growing to fill the window.
 The title takes the window width minus the fixed columns (bubble,
 avatar, id, repo, author, separators) and `gp-helm-title-reserve'
 for the trailing badges, never below `gp-helm-title-min-width'."
-  (let ((win (and (window-live-p (get-buffer-window (get-buffer "*helm git-platform*")))
-                  (window-body-width (get-buffer-window (get-buffer "*helm git-platform*"))))))
+  (let ((win (and (window-live-p (get-buffer-window (get-buffer gp-helm-buffer)))
+                  (window-body-width (get-buffer-window (get-buffer gp-helm-buffer))))))
     (if (not win)
         gp-helm-title-width
       ;; bubble 3 + avatar 3 + id 6 + repo + author 16 + separators 8
@@ -289,7 +301,7 @@ the file, then overlays its inline comments."
                         (lambda (_p) (gp-helm))))
             :keymap (gp-helm--drilldown-keymap
                      (lambda () (gp-helm-files pr))))
-          :buffer "*helm git-platform files*")))
+          :buffer (gp-helm--buffer "files"))))
 
 (defun gp-helm--visit-file (pr path)
   "Open PATH from PR's local checkout (cloning/checkout if needed)."
@@ -323,7 +335,7 @@ overlays); a general comment opens the detail buffer."
                   (cons "← Back to PR list             (C-c C-b)"
                         (lambda (_c) (gp-helm))))
             :keymap (gp-helm--comments-keymap pr))
-          :buffer "*helm git-platform comments*")))
+          :buffer (gp-helm--buffer "comments"))))
 
 (defun gp-helm--comment-url (pr comment)
   "Return the web URL focusing COMMENT on PR, with a fallback anchor."
@@ -739,7 +751,7 @@ for those)."
                         " (…)"))))
           :truncate-lines t
           :full-frame gp-helm-full-frame
-          :buffer "*helm git-platform open*")))
+          :buffer (gp-helm--buffer "open"))))
 
 ;;;###autoload
 (defun gp-helm-repo (full-name)
@@ -763,7 +775,7 @@ rather than full-frame -- handy from the per-repo mode-line count."
             :nomark t
             :keymap (gp-helm--list-keymap nil))
            :truncate-lines t
-           :buffer "*helm git-platform repo*")))
+           :buffer (gp-helm--buffer "repo"))))
 
 ;;;###autoload
 (defun gp-helm-repo-branch (full-name branch)
@@ -788,7 +800,7 @@ Uses the cached per-repo open-PR list and filters it client-side."
             :nomark t
             :keymap (gp-helm--list-keymap nil))
           :truncate-lines t
-          :buffer "*helm git-platform repo-branch*")))
+          :buffer (gp-helm--buffer "repo-branch"))))
 
 (provide 'gp-helm)
 ;;; gp-helm.el ends here

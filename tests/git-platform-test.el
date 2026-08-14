@@ -126,5 +126,12 @@
     (should-not (gp-comment-outdated-p general dbf))
     (should-not (gp-comment-outdated-p stale nil)))) ;; no diff -> not outdated
 
+(ert-deftest gp-test-buffer-name-uses-shared-prefix ()
+  "Buffer names are built from `gp-buffer-name-prefix', so retagging is
+a single setting rather than a sweep over call sites."
+  (should (equal (gp--buffer-name "PRs") "*gp: PRs*"))
+  (let ((gp-buffer-name-prefix "zz: "))
+    (should (equal (gp--buffer-name "PRs") "*zz: PRs*"))))
+
 (provide 'git-platform-test)
 ;;; git-platform-test.el ends here

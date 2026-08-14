@@ -38,8 +38,9 @@
   "Creating pull requests from a branch."
   :group 'bitbucket)
 
-(defcustom gp-create-buffer "*Create Pull Request*"
-  "Name of the PR-creation mask buffer."
+(defcustom gp-create-buffer (gp--buffer-name "create PR")
+  "Name of the PR-creation mask buffer.
+Defaults to the shared `gp-buffer-name-prefix' tag."
   :type 'string :group 'gp-create)
 
 ;;;; Pure title / body derivation --------------------------------------------

@@ -27,8 +27,9 @@
 (declare-function gfm-mode "markdown-mode")
 (declare-function markdown-standalone "markdown-mode")
 
-(defcustom gp-compose-preview-buffer "*PR Comment Preview*"
-  "Name of the buffer used to render a Markdown preview."
+(defcustom gp-compose-preview-buffer (gp--buffer-name "comment preview")
+  "Name of the buffer used to render a Markdown preview.
+Defaults to the shared `gp-buffer-name-prefix' tag."
   :type 'string
   :group 'bitbucket)
 
@@ -255,7 +256,7 @@ Lines that are blank, already end in two spaces, or sit inside a
 TARGET keys: :full-name :id [:inline (PATH . LINE)] [:parent ID]
 [:submit-function FN] [:on-success FN].  See
 `gp-compose--target'."
-  (let ((buf (generate-new-buffer "*PR Comment*"))
+  (let ((buf (generate-new-buffer (gp--buffer-name "comment")))
         (winconf (current-window-configuration)))
     (with-current-buffer buf
       (gp-compose--base-mode)

@@ -1038,7 +1038,7 @@ server's diff regardless of local base staleness."
 
 ;;;; Commands ----------------------------------------------------------------
 
-(defconst gp-list-buffer-name "*PRs*")
+(defconst gp-list-buffer-name (gp--buffer-name "PRs"))
 
 (defcustom gp-detail-buffer-title-width 40
   "Max characters of the PR title shown in the detail buffer name."
@@ -1047,7 +1047,7 @@ server's diff regardless of local base staleness."
 (defun gp--detail-buffer-name (pr)
   "Return the detail buffer name for PR.
 Includes the title and repo so buffers are easy to tell apart, e.g.
-`*PR #239 add widget toggle (web-frontend)*'."
+`*gp: PR #239 add widget toggle (web-frontend)*'."
   (let* ((id (alist-get 'id pr))
          (title (or (alist-get 'title pr) ""))
          (full-name (or (ignore-errors (gp-pr-full-name pr)) ""))
@@ -1057,10 +1057,11 @@ Includes the title and repo so buffers are easy to tell apart, e.g.
          (title (if (> (length title) gp-detail-buffer-title-width)
                     (concat (substring title 0 (1- gp-detail-buffer-title-width)) "…")
                   title)))
-    (format "*PR #%s%s%s*"
-            id
-            (if (string-empty-p title) "" (concat " " title))
-            (if (string-empty-p repo) "" (format " (%s)" repo)))))
+    (gp--buffer-name
+     (format "PR #%s%s%s"
+             id
+             (if (string-empty-p title) "" (concat " " title))
+             (if (string-empty-p repo) "" (format " (%s)" repo))))))
 
 ;;;###autoload
 (defun gp-list ()

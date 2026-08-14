@@ -23,8 +23,11 @@
   "When non-nil, log every API request (method, path, status, timing)."
   :type 'boolean :group 'bitbucket)
 
-(defcustom gp-log-buffer-name "*gp-log*"
-  "Name of the diagnostic log buffer."
+(defcustom gp-log-buffer-name "*gp: log*"
+  "Name of the diagnostic log buffer.
+Carries the same tag as `gp-buffer-name-prefix' produces, but spelled
+literally: this file is a leaf that `git-platform' requires, so it
+cannot call `gp--buffer-name' without a load cycle."
   :type 'string :group 'bitbucket)
 
 (defcustom gp-log-max-lines 2000

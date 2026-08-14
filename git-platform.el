@@ -308,6 +308,19 @@ True for your own comments always, and for anyone's when
   (or (gp-comment-own-p comment uuid)
       (gp-comment-delete-others-allowed-p)))
 
+(defcustom gp-buffer-name-prefix "gp: "
+  "Prefix tagging every buffer this package creates.
+Buffer names are built as \"*PREFIX SUFFIX*\" -- e.g. \"*gp: PRs*\".
+Change this to retag every buffer at once; it is read at buffer-creation
+time, so existing buffers keep their old names until recreated."
+  :type 'string
+  :group 'bitbucket)
+
+(defun gp--buffer-name (suffix)
+  "Return the package buffer name for SUFFIX, tagged with the shared prefix.
+E.g. \"PRs\" -> \"*gp: PRs*\"."
+  (format "*%s%s*" gp-buffer-name-prefix suffix))
+
 (defcustom gp-cache-ttl 300
   "Seconds to cache PR-list results (default 5 minutes).
 Set to 0 to disable caching."
