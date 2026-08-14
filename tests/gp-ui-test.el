@@ -242,7 +242,7 @@
     (should (string-match-p "5 minutes ago" (buffer-string)))))
 
 (ert-deftest gp-test-pipeline-poll-mode ()
-  "Poll while running; watch when a visible buffer has no current run."
+  "Poll/watch only while the buffer is displayed."
   (let ((gp-detail-pipeline-poll-interval 6)
         (gp-detail-pipeline-watch-interval 1)
         (running '(:current ((((state (name . "IN_PROGRESS")))) ) :recent (r)))
@@ -250,7 +250,8 @@
         (waiting '(:current nil :recent (r)))
         (no-history '(:current nil :recent nil)))
     (should (eq (gp--detail-pipeline-poll-mode running t) 'poll))
-    (should (eq (gp--detail-pipeline-poll-mode running nil) 'poll))
+    ;; an unfinished run in an off-screen buffer is not worth an N+1 fetch
+    (should-not (gp--detail-pipeline-poll-mode running nil))
     ;; head commit has runs and they're done: nothing to schedule
     (should-not (gp--detail-pipeline-poll-mode finished t))
     ;; no run for the head commit yet: watch, but only while displayed
@@ -263,6 +264,27 @@
           (gp-detail-pipeline-watch-interval 0))
       (should-not (gp--detail-pipeline-poll-mode running t))
       (should-not (gp--detail-pipeline-poll-mode waiting t)))))
+
+(ert-deftest gp-test-pipeline-load-replaces-pending-timer ()
+  "A second load cancels the first instead of stacking a second fetch."
+  (let* ((pr '((id . 1) (source (branch (name . "b")) (commit (hash . "c")))))
+         (cancelled 0)
+         ;; a real timer object so `timerp' (in the cancel helper) is satisfied
+         (stub (timer-create)))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (cl-letf (((symbol-function 'cancel-timer)
+                 (lambda (_) (setq cancelled (1+ cancelled))))
+                ;; keep the fetch itself out of this test
+                ((symbol-function 'run-at-time)
+                 (lambda (&rest _) stub)))
+        (gp--detail-load-pipelines (current-buffer) pr)
+        (should (eq gp--detail-pipeline-timer stub))
+        (should (= cancelled 0))
+        ;; second entry must cancel the pending one before re-arming
+        (gp--detail-load-pipelines (current-buffer) pr)
+        (should (= cancelled 1))
+        (should (eq gp--detail-pipeline-timer stub))))))
 
 (ert-deftest gp-test-comment-threads-orphan-parent ()
   "A reply whose parent isn't in the set is treated as a root."

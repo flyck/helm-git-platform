@@ -728,7 +728,10 @@ block at once.  The file name remains clickable and opens the checkout."
   ;; long comment bodies stay fully readable without horizontal scroll.
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
-  (add-hook 'kill-buffer-hook #'gp--detail-cancel-pipeline-timer nil t))
+  (add-hook 'kill-buffer-hook #'gp--detail-cancel-pipeline-timer nil t)
+  ;; Polling stops when the buffer leaves the screen, so resume on return.
+  (add-hook 'window-selection-change-functions
+            #'gp--detail-maybe-resume-pipelines nil t))
 
 (defun gp-detail-open-in-ide ()
   "Open the current detail buffer's PR in the IDE."
@@ -1103,11 +1106,14 @@ already have pipeline history are watched.  Set to 0 to disable."
 
 (defun gp--detail-pipeline-poll-mode (data visible)
   "Decide what to schedule after a pipelines load of DATA.
-Return `poll' while a current-commit run is unfinished, `watch' when
-a VISIBLE buffer shows a head commit without any run yet (but the
-branch has pipeline history), else nil."
+Both modes require a VISIBLE buffer: polling an off-screen buffer
+burns an N+1 fetch (and blocks Emacs for it) for output nobody is
+looking at.  Return `poll' while a current-commit run is unfinished,
+`watch' when the head commit has no run yet (but the branch has
+pipeline history), else nil."
   (cond
    ((and (> gp-detail-pipeline-poll-interval 0)
+         visible
          (gp--detail-pipelines-running-p data))
     'poll)
    ((and (> gp-detail-pipeline-watch-interval 0)
@@ -1125,6 +1131,18 @@ branch has pipeline history), else nil."
   (when (timerp gp--detail-pipeline-timer)
     (cancel-timer gp--detail-pipeline-timer)
     (setq gp--detail-pipeline-timer nil)))
+
+(defun gp--detail-maybe-resume-pipelines (&optional _frame-or-window)
+  "Resume pipeline polling when a detail buffer becomes selected again.
+Polling only runs while the buffer is displayed, so re-entering it has
+to pick the tracking back up."
+  (when (and (derived-mode-p 'gp-detail-mode)
+             gp-detail-show-pipelines
+             (not gp--detail-pipeline-timer)
+             gp--pr
+             (eq (current-buffer) (window-buffer (selected-window)))
+             (gp--detail-pipeline-poll-mode gp--detail-pipelines t))
+    (gp--detail-load-pipelines (current-buffer) gp--pr)))
 
 (defun gp--render-detail-into (buf pr comments stats &optional diff pipelines)
   "Render PR/COMMENTS/STATS (and per-file DIFF, PIPELINES) into BUF."
@@ -1340,10 +1358,16 @@ block or delay the comments/diff view.  While any current-commit
 pipeline is still running, schedules a poll so the buffer tracks a
 live deployment without a manual refresh."
   (gp-log 'info "pipelines: load scheduled for %s" (buffer-name buf))
+  ;; Drop any pending load first: entry points other than the reschedule path
+  ;; used to stack, and each pending timer re-arms itself.
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (gp--detail-cancel-pipeline-timer)))
   ;; A wall-clock timer, NOT `run-with-idle-timer': an idle timer scheduled
   ;; from a url sentinel while Emacs is already idle can silently never fire
   ;; (observed live; the sibling stats loader got lucky with ordering).
-  (run-at-time
+  (let ((timer
+         (run-at-time
    0.2 nil
    (lambda ()
      (if (not (buffer-live-p buf))
@@ -1372,8 +1396,9 @@ live deployment without a manual refresh."
                    (when changed (gp--detail-rerender buf)))
                  (gp--detail-cancel-pipeline-timer)
                  ;; keep polling against whatever we're actually showing
+                 ;; (`visible' -> any frame, not just the selected one)
                  (pcase (gp--detail-pipeline-poll-mode
-                         gp--detail-pipelines (get-buffer-window buf))
+                         gp--detail-pipelines (get-buffer-window buf 'visible))
                    ('poll
                     (setq gp--detail-pipeline-timer
                           (run-with-timer
@@ -1386,7 +1411,11 @@ live deployment without a manual refresh."
                            #'gp--detail-pipeline-watch-tick buf)))))))
          (error
            (gp-log-error "pipeline load failed: %s"
-                         (error-message-string e))))))))
+                         (error-message-string e)))))))))
+    ;; Store in BUF's slot, not the caller's current buffer.
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (setq gp--detail-pipeline-timer timer)))))
 
 (defun gp--detail-pipeline-watch-tick (buf)
   "One watch cycle: re-fetch BUF's PR head, then reload its pipelines.
