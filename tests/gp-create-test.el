@@ -10,6 +10,11 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'gp-create)
+;; Not just for the functions: the caching tests `let'-bind
+;; `bitbucket-cache-ttl', and a runtime-only `require' inside a test body
+;; leaves the compiler treating that as an unused lexical variable (and
+;; every bitbucket-* call as an unknown function).
+(require 'bitbucket-api)
 
 ;;;; Common prefix / title derivation -----------------------------------------
 
@@ -215,6 +220,57 @@ and `gp-create--selected-reviewer-uuids' only picks up checked ones."
       (should (null (gp-create--insert-reviewers "acme/web")))
       (should (string-match-p "no default or suggested reviewers"
                               (buffer-string))))))
+
+;;;; Preferred reviewers -------------------------------------------------------
+
+(ert-deftest gp-create-test-preferred-matches-uuid-name-and-nickname ()
+  "A preferred entry matches on uuid, display name or nickname."
+  (let ((r '((uuid . "{abc}") (display_name . "Michael Gertz")
+             (nickname . "mgertz"))))
+    (let ((gp-create-preferred-reviewers '("{abc}")))
+      (should (gp-create--preferred-p r)))
+    (let ((gp-create-preferred-reviewers '("Michael Gertz")))
+      (should (gp-create--preferred-p r)))
+    (let ((gp-create-preferred-reviewers '("mgertz")))
+      (should (gp-create--preferred-p r)))
+    ;; names are matched case-insensitively, uuids exactly
+    (let ((gp-create-preferred-reviewers '("michael gertz")))
+      (should (gp-create--preferred-p r)))
+    (let ((gp-create-preferred-reviewers '("{ABC}")))
+      (should-not (gp-create--preferred-p r)))
+    (let ((gp-create-preferred-reviewers '("Someone Else")))
+      (should-not (gp-create--preferred-p r)))
+    (let ((gp-create-preferred-reviewers nil))
+      (should-not (gp-create--preferred-p r)))))
+
+(ert-deftest gp-create-test-preferred-reviewer-is-pre-checked ()
+  "A preferred reviewer is checked even in the unchecked (suggested) group."
+  (let ((gp-create-preferred-reviewers '("{keep}"))
+        (reviewers '(((uuid . "{keep}") (display_name . "Keep Me"))
+                     ((uuid . "{skip}") (display_name . "Skip Me")))))
+    (with-temp-buffer
+      (let ((widgets (gp-create--insert-reviewer-list reviewers nil)))
+        (should (widget-value (cdr (assoc "{keep}" widgets))))
+        (should-not (widget-value (cdr (assoc "{skip}" widgets))))
+        ;; and the row says why it came ticked
+        (should (string-match-p "Keep Me *★" (buffer-string)))))))
+
+(ert-deftest gp-create-test-preferred-never-invents-a-reviewer ()
+  "An id matching no candidate yields no widget -- and is logged, not silent."
+  (let ((gp-create-preferred-reviewers '("{ghost}"))
+        (logged nil))
+    (cl-letf (((symbol-function 'gp-log)
+               (lambda (_lvl fmt &rest args)
+                 (setq logged (apply #'format fmt args)))))
+      (with-temp-buffer
+        (let ((widgets (gp-create--insert-reviewer-list
+                        '(((uuid . "{real}") (display_name . "Real Person")))
+                        nil)))
+          (should-not (assoc "{ghost}" widgets))
+          (should-not (widget-value (cdr (assoc "{real}" widgets)))))
+        (gp-create--log-unmatched-preferred
+         '(((uuid . "{real}") (display_name . "Real Person")))))
+      (should (string-match-p "{ghost}" (or logged ""))))))
 
 (provide 'gp-create-test)
 ;;; gp-create-test.el ends here

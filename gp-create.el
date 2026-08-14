@@ -96,6 +96,39 @@ shared prefix) if there is a meaningful one, else BRANCH humanised."
   "Default for the \"Delete source branch after merge\" toggle in the mask."
   :type 'boolean :group 'gp-create)
 
+(defcustom gp-create-preferred-reviewers nil
+  "Reviewers to pre-check in the create form, identified by account id.
+
+For repos whose platform cannot answer \"who reviews this by
+default\" -- a Bitbucket repo with no configured default reviewers
+returns an empty list, and GitHub has no queryable equivalent at all
+\(CODEOWNERS is not one) -- so the people you always add ended up
+being ticked by hand every time.
+
+Prefer account ids: a Bitbucket uuid (braces included, e.g.
+\"{4efc3327-362a-4f4f-b573-c4435b0f2232}\") or a GitHub login.  They
+are stable, so a colleague renaming themselves cannot silently stop
+pre-checking them.  A display name or nickname is also accepted,
+matched case-insensitively, for readability at the cost of surviving
+renames.
+
+Entries that match no candidate are logged (see `gp-log-enabled')
+rather than silently ignored, so a stale id surfaces instead of just
+quietly not pre-checking someone.  Matching only ever pre-checks
+people the platform already offers as candidates -- it never invents
+a reviewer, so a stale entry cannot add the wrong person to a PR.
+
+To find the ids, open a create form with `gp-log-enabled' non-nil and
+run \\[gp-create-show-reviewer-ids].
+
+Example:
+
+    (setq gp-create-preferred-reviewers
+          \\='(\"{fbdc7812-c312-45bc-9a3a-64819c0a962a}\"   ; Michael Gertz
+            \"{4efc3327-362a-4f4f-b573-c4435b0f2232}\"   ; Florian Pracht
+            \"{01a8f5d1-a3ed-49ed-b835-443190e33ea6}\")) ; Thomas Zahari"
+  :type '(repeat string) :group 'gp-create)
+
 ;;;; Widget form --------------------------------------------------------------
 
 (require 'wid-edit)
@@ -172,18 +205,82 @@ and buttons those keys stay the global create/cancel actions
 
 ;;;; Form construction --------------------------------------------------------
 
+(defun gp-create--preferred-p (reviewer)
+  "Return non-nil if REVIEWER is named in `gp-create-preferred-reviewers'."
+  (let ((name (alist-get 'display_name reviewer))
+        (nick (alist-get 'nickname reviewer))
+        (uuid (alist-get 'uuid reviewer)))
+    (seq-some (lambda (want)
+                (or (and name (string-equal-ignore-case want name))
+                    (and nick (string-equal-ignore-case want nick))
+                    (equal want uuid)))
+              gp-create-preferred-reviewers)))
+
+(defun gp-create--log-unmatched-preferred (candidates)
+  "Log any `gp-create-preferred-reviewers' entry CANDIDATES cannot satisfy.
+A preferred name that matches nobody is almost always a rename or a
+typo; failing loudly in the log beats quietly not pre-checking them."
+  (dolist (want gp-create-preferred-reviewers)
+    (unless (seq-some (lambda (r)
+                        (let ((name (alist-get 'display_name r))
+                              (nick (alist-get 'nickname r)))
+                          (or (and name (string-equal-ignore-case want name))
+                              (and nick (string-equal-ignore-case want nick))
+                              (equal want (alist-get 'uuid r)))))
+                      candidates)
+      (gp-log 'info "preferred reviewer %S matched no candidate for this repo"
+              want))))
+
 (defun gp-create--insert-reviewer-list (reviewers checked)
   "Insert one CHECKBOX per entry in REVIEWERS, each defaulting to CHECKED.
+A reviewer named in `gp-create-preferred-reviewers' is checked
+regardless of CHECKED -- that is the whole point of listing them --
+and gets a marker so it is clear why it came pre-ticked.
 Returns an alist (UUID . CHECKBOX-WIDGET) in REVIEWERS order."
   (mapcar
    (lambda (r)
      (let* ((uuid (alist-get 'uuid r))
             (name (or (alist-get 'display_name r)
                       (alist-get 'nickname r) uuid))
-            (cb (widget-create 'checkbox checked)))
-       (widget-insert " " (or name "?") "\n")
+            (preferred (gp-create--preferred-p r))
+            (cb (widget-create 'checkbox (or checked preferred))))
+       (widget-insert " " (or name "?"))
+       (when preferred
+         (widget-insert (propertize "  ★" 'face 'shadow)))
+       (widget-insert "\n")
        (cons uuid cb)))
    reviewers))
+
+;;;###autoload
+(defun gp-create-show-reviewer-ids (full-name)
+  "List FULL-NAME's reviewer candidates with their account ids.
+A lookup helper for filling in `gp-create-preferred-reviewers': the
+create form shows names, but the custom wants stable ids.  Reads the
+same candidate pool the form does, so anyone listed here can be
+pre-checked."
+  (interactive
+   (list (or (and (bound-and-true-p gp-create--ctx)
+                  (plist-get gp-create--ctx :full-name))
+             (and default-directory
+                  (ignore-errors (gp-local--dir-remote default-directory)))
+             (read-string "Repository (workspace/slug): "))))
+  (let ((candidates (append (gp-repo-default-reviewers full-name)
+                            (gp-repo-suggested-reviewers full-name))))
+    (if (null candidates)
+        (message "No reviewer candidates for %s" full-name)
+      (with-current-buffer (get-buffer-create (gp--buffer-name "reviewer ids"))
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (format "Reviewer candidates for %s\n\n" full-name))
+          (insert "Copy the ids you want into `gp-create-preferred-reviewers'.\n\n")
+          (dolist (r candidates)
+            (insert (format "%-28s %s\n"
+                            (or (alist-get 'display_name r)
+                                (alist-get 'nickname r) "?")
+                            (or (alist-get 'uuid r) "?"))))
+          (goto-char (point-min)))
+        (special-mode)
+        (display-buffer (current-buffer))))))
 
 (defun gp-create--insert-reviewers (full-name)
   "Insert the reviewers section for FULL-NAME, returning the alist.
@@ -192,11 +289,14 @@ checked by default -- opting out is the unusual case.  Suggested
 reviewers (GitHub's repo collaborators, standing in for a real
 per-PR suggestion the create form can't ask for yet -- see
 `gp-repo-suggested-reviewers') are unchecked -- picking one is an
-explicit opt-in.  Returns the combined alist (UUID . CHECKBOX-WIDGET)
+explicit opt-in, except for anyone in
+`gp-create-preferred-reviewers', who is pre-checked wherever they
+appear.  Returns the combined alist (UUID . CHECKBOX-WIDGET)
 across both groups.  A blank section if neither backend has anything
 to offer for this repo."
   (let ((defaults (gp-repo-default-reviewers full-name))
         (suggested (gp-repo-suggested-reviewers full-name)))
+    (gp-create--log-unmatched-preferred (append defaults suggested))
     (widget-insert (propertize "Reviewers" 'face 'gp-create-section) "\n")
     (if (and (null defaults) (null suggested))
         (progn
