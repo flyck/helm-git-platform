@@ -221,6 +221,49 @@ naive `eq' implementation would hit across two separate renders."
         (gp--render-list prs uuid))
       (should-not (gp--list-find-pr-point -1)))))
 
+(ert-deftest gp-test-detail-delete-button-hidden-on-others-comments-by-default ()
+  "With `gp-comment-delete-others' nil, only your own comments offer delete."
+  (let* ((pr (car (gp-test--mock-prs)))
+         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
+         (gp-comment-delete-others nil))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{nobody}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (should-not (string-match-p "delete \\[K\\]"
+                                    (substring-no-properties (buffer-string))))))))
+
+(ert-deftest gp-test-detail-delete-button-shown-when-backend-allows-others ()
+  "Enabling `gp-comment-delete-others' for the backend exposes delete
+on comments you did not write."
+  (let* ((pr (car (gp-test--mock-prs)))
+         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
+         (gp-comment-delete-others '(bitbucket)))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{nobody}"))
+              ((symbol-function 'gp-backend-name) (lambda () 'bitbucket)))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (should (string-match-p "delete \\[K\\]"
+                                (substring-no-properties (buffer-string))))))))
+
+(ert-deftest gp-test-comment-deletable-p-respects-backend-list ()
+  "`gp-comment-deletable-p' keys off the ACTIVE backend, not just any entry."
+  (let ((comment '((id . 1) (user (uuid . "{someone-else}")))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+              ((symbol-function 'gp-backend-name) (lambda () 'github)))
+      (let ((gp-comment-delete-others '(bitbucket)))
+        (should-not (gp-comment-deletable-p comment "{me}")))
+      (let ((gp-comment-delete-others '(github)))
+        (should (gp-comment-deletable-p comment "{me}")))
+      (let ((gp-comment-delete-others t))
+        (should (gp-comment-deletable-p comment "{me}")))
+      ;; your own is always deletable, whatever the setting
+      (let ((gp-comment-delete-others nil))
+        (should (gp-comment-deletable-p '((id . 1) (user (uuid . "{me}"))) "{me}"))))))
+
 (ert-deftest gp-test-render-detail-shows-reviewers ()
   "The overview section lists reviewers and their approval state."
   (let* ((base (car (gp-test--mock-prs)))

@@ -213,10 +213,17 @@ default to collapsed and the rest to expanded."
           ((eq explicit 'expanded) nil)
           (t (gp-comment-resolved-p comment)))))
 
-(defun gp-overlay--comment-string (comment)
+(defun gp-overlay--comment-string (comment &optional uuid)
   "Render a single COMMENT to a propertized string (with trailing newline).
 Shows a one-line summary when collapsed or resolved, full text
-otherwise, followed by the action buttons."
+otherwise, followed by the action buttons.
+
+UUID is the current user's id, used only to decide whether the delete
+button applies.  Callers rendering several comments should resolve it
+once (`gp-user-uuid' is a network op) and pass it in; when omitted it
+is looked up lazily, and a lookup failure simply hides delete rather
+than aborting the render -- drawing comments must not depend on being
+authenticated."
   (let* ((resolved (gp-comment-resolved-p comment))
          (collapsed (gp-overlay--collapsed-p comment))
          (face (if resolved 'gp-overlay-resolved-face 'gp-overlay-face))
@@ -237,8 +244,12 @@ otherwise, followed by the action buttons."
                 ": "))
          (body (gp-overlay--face-body
                 (gp-linkify-string (if collapsed first-line raw)) face))
-         (buttons (gp-overlay--comment-buttons comment resolved collapsed
-                                               (gp-comment-resolvable-p comment))))
+         (buttons (gp-overlay--comment-buttons
+                   comment resolved collapsed
+                   (gp-comment-resolvable-p comment)
+                   (ignore-errors
+                     (gp-comment-deletable-p
+                      comment (or uuid (gp-user-uuid)))))))
     (concat (gp-overlay--face-body head face) body
             "\n" buttons "\n")))
 
@@ -253,11 +264,13 @@ Keeps embedded link faces visible instead of overriding them."
         (setq i next)))
     s))
 
-(defun gp-overlay--comment-buttons (comment resolved collapsed resolvable)
+(defun gp-overlay--comment-buttons (comment resolved collapsed resolvable
+                                            &optional deletable)
   "Return the action-button line for COMMENT given RESOLVED/COLLAPSED state.
 RESOLVABLE, when nil, hides the resolve/reopen action entirely (the
 backend has no resolve concept for this comment, e.g. a GitHub
-general/issue comment)."
+general/issue comment).  DELETABLE, when nil, hides the delete
+action -- see `gp-comment-delete-others'."
   (string-join
    (delq nil
          (list "      "
@@ -269,14 +282,20 @@ general/issue comment)."
                                                 'gp-overlay-reopen comment)
                    (gp-overlay--button "[resolve]" "Resolve on the PR"
                                               'gp-overlay-resolve comment)))
+               (when deletable
+                 (gp-overlay--button "[delete]" "Delete this comment"
+                                            'gp-overlay-delete comment))
                (gp-overlay--button (if collapsed "[+]" "[−]")
                                           "Minimise / expand this comment"
                                           'gp-overlay-toggle-collapse comment)))
    " "))
 
 (defun gp-overlay--format (comments)
-  "Render COMMENTS as the overlay after-string text."
-  (mapconcat #'gp-overlay--comment-string comments ""))
+  "Render COMMENTS as the overlay after-string text.
+Resolves the current user once for the whole batch rather than per
+comment -- `gp-user-uuid' is a network call."
+  (let ((uuid (ignore-errors (gp-user-uuid))))
+    (mapconcat (lambda (c) (gp-overlay--comment-string c uuid)) comments "")))
 
 ;;;; Drawing -----------------------------------------------------------------
 
@@ -360,7 +379,9 @@ INLINE is a (PATH . LINE) cons; PARENT a comment id."
           :id (alist-get 'id pr)
           :inline inline
           :parent parent
-          :on-success (lambda (_c) (gp-overlay-refresh)))))
+          :on-success (lambda (_c)
+                        (gp-invalidate-pr-caches pr)
+                        (gp-overlay-refresh)))))
 
 (defun gp-overlay-reply (&optional comment)
   "Reply to COMMENT (or the comment at point)."
@@ -419,8 +440,31 @@ INLINE is a (PATH . LINE) cons; PARENT a comment id."
         (when resolve
           (setcdr c (cons (cons 'resolution '((user (display_name . "you"))))
                           (cdr c))))))
+    (gp-invalidate-pr-caches pr)
     (gp-overlay--redraw)
     (message "Comment %s" (if resolve "resolved" "reopened"))))
+
+(defun gp-overlay-delete (&optional comment)
+  "Delete COMMENT (or the one at point) on the PR, then redraw.
+Your own comments always; anyone's when `gp-comment-delete-others'
+grants it for the active backend."
+  (interactive)
+  (let* ((pr gp-overlay--pr)
+         (c (or comment (gp-overlay-comment-at-point)
+                (user-error "No comment here"))))
+    (unless pr (user-error "No PR associated with this buffer"))
+    (unless (gp-comment-deletable-p c (gp-user-uuid))
+      (user-error
+       "You can only delete your own comments (see `gp-comment-delete-others')"))
+    (when (yes-or-no-p
+           (format "Delete %s's comment? "
+                   (let-alist c (or .user.display_name "this"))))
+      (gp-delete-comment (gp-pr-full-name pr) (alist-get 'id pr) (alist-get 'id c))
+      (message "Comment deleted")
+      (gp-invalidate-pr-caches pr)
+      ;; the comment is gone server-side, so a redraw from the stale local
+      ;; list would keep showing it -- refetch instead.
+      (gp-overlay-refresh))))
 
 (defun gp-overlay-toggle-collapse (&optional comment)
   "Toggle the minimised state of COMMENT (or the one at point)."
@@ -477,9 +521,11 @@ With a negative N, move to the previous one."
   (gp-overlay-next-comment (- (or n 1))))
 
 (defvar-keymap gp-overlay-mode-map
-  "C-c B r" #'gp-overlay-reply
-  "C-c B R" #'gp-overlay-resolve
+  ;; Mutating actions take the capital letter, matching `gp-detail-mode-map'.
+  "C-c B R" #'gp-overlay-reply
+  "C-c B X" #'gp-overlay-resolve
   "C-c B k" #'gp-overlay-reopen
+  "C-c B K" #'gp-overlay-delete
   "C-c B n" #'gp-overlay-new-comment
   "C-c B TAB" #'gp-overlay-toggle-collapse
   "C-c B g" #'gp-overlay-refresh

@@ -156,7 +156,7 @@ the indistinguishable running state."
                   (runnable (propertize "  [manual ▸ T]" 'face 'gp-pipeline-running-face))
                   (manual (propertize "  [manual]" 'face 'shadow)))
                 (when rerunnable
-                  (propertize "  [rerun ▸ R]" 'face 'gp-pipeline-running-face))
+                  (propertize "  [rerun ▸ P]" 'face 'gp-pipeline-running-face))
                 (unless (string-empty-p dur)
                   (propertize (format "  %s" dur) 'face 'shadow))
                 (propertize "   l:log" 'face 'shadow))))))

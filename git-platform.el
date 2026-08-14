@@ -278,6 +278,36 @@ is nil rather than let it fail on click.")
 ;; needing its own.  Originally lived in bitbucket-api.el as
 ;; `bitbucket-cache-*'; moved here when the GitHub backend was added.
 
+(defcustom gp-comment-delete-others nil
+  "Backends on which you may delete comments written by other users.
+Deleting someone else's comment needs elevated repository
+permissions, which the APIs do not advertise -- so this is a
+declaration, not a discovery: set it only for platforms where you
+actually hold that power.  Where it does not apply, the delete
+action stays hidden on other people's comments (your own are
+always deletable).
+
+Value is nil (never), t (every backend), or a list of backend
+symbols, e.g. `(bitbucket)'."
+  :type '(choice (const :tag "Never -- only my own comments" nil)
+                 (const :tag "All backends" t)
+                 (repeat :tag "Only these backends" symbol))
+  :group 'bitbucket)
+
+(defun gp-comment-delete-others-allowed-p ()
+  "Return non-nil if `gp-comment-delete-others' covers the active backend."
+  (cond ((eq gp-comment-delete-others t) t)
+        ((consp gp-comment-delete-others)
+         (and (memq (gp-backend-name) gp-comment-delete-others) t))
+        (t nil)))
+
+(defun gp-comment-deletable-p (comment uuid)
+  "Return non-nil if COMMENT may be deleted by the user identified by UUID.
+True for your own comments always, and for anyone's when
+`gp-comment-delete-others' enables it for the active backend."
+  (or (gp-comment-own-p comment uuid)
+      (gp-comment-delete-others-allowed-p)))
+
 (defcustom gp-cache-ttl 300
   "Seconds to cache PR-list results (default 5 minutes).
 Set to 0 to disable caching."
@@ -286,6 +316,47 @@ Set to 0 to disable caching."
 
 (defvar gp--result-cache (make-hash-table :test 'equal)
   "KEY -> (EXPIRY . VALUE) cache for PR-list fetches.")
+
+(defun gp-cache-remove (key)
+  "Remove KEY from the result cache, if present."
+  (remhash key gp--result-cache))
+
+(defun gp-cache-remove-matching (predicate)
+  "Remove every cache entry whose KEY satisfies PREDICATE.
+Cache keys are lists tagged by their first element (e.g. `pull-request',
+`mine', `reviewing'); PREDICATE receives the raw key list.  Used to
+invalidate a family of entries at once, e.g. every list-level cache
+after a PR mutation that could change which list it belongs in."
+  (let (doomed)
+    (maphash (lambda (k _v) (when (funcall predicate k) (push k doomed)))
+              gp--result-cache)
+    (dolist (k doomed) (remhash k gp--result-cache))))
+
+(defun gp-invalidate-pr-caches (pr)
+  "Invalidate every cache entry that could now show stale data for PR.
+Call this after any action that mutates PR's state on the server
+\(set-draft, approve/request-changes, resolve/reopen/edit/delete a
+comment, create a comment, …), alongside refreshing whichever buffer
+showed the action (detail view, inline overlay, …).  Without this, a
+per-buffer refresh fixes only that buffer -- the list view's
+`mine'/`reviewing'/`others' caches (up to `gp-cache-ttl' seconds
+stale) and this PR's own `pull-request'/`pr-stats'/`pr-diff' cache
+entries keep serving pre-mutation data until they expire on their own.
+
+Clears the list-level caches unconditionally rather than trying to
+compute which uuid/state combination a mutated PR now belongs to --
+those are just PR-list snapshots, cheap to recompute, and correctness
+here matters more than saving one re-fetch."
+  (let* ((full-name (ignore-errors (gp-pr-full-name pr)))
+         (id (alist-get 'id pr))
+         (commit (ignore-errors (gp-pr-source-commit pr))))
+    (when (and full-name id)
+      (gp-cache-remove (list 'pull-request full-name id))
+      (when commit
+        (gp-cache-remove (list 'pr-stats full-name id commit))
+        (gp-cache-remove (list 'pr-diff full-name id commit))))
+    (gp-cache-remove-matching
+     (lambda (k) (memq (car-safe k) '(mine reviewing others))))))
 
 (defun gp-cache-clear ()
   "Clear cached PR-list results (forces a fresh fetch)."

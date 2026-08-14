@@ -329,7 +329,7 @@ reply threads."
           (when pr
             (insert ind "  ")
             (gp--insert-action-button
-             "reply [r]" "Reply to this comment"
+             "reply [R]" "Reply to this comment"
              (lambda () (gp-ui-reply-comment pr comment)))
             (insert " ")
             (gp--insert-action-button
@@ -347,22 +347,27 @@ reply threads."
                     (buf (current-buffer)))
                 (if resolved
                     (gp--insert-action-button/spinner
-                     tag "reopen [x]" "Reopen this comment on the PR"
+                     tag "reopen [X]" "Reopen this comment on the PR"
                      (lambda () (gp--detail-run-action
                                  buf tag (lambda () (gp-ui-set-resolution pr comment nil)))))
                   (gp--insert-action-button/spinner
-                   tag "resolve [x]" "Resolve this comment on the PR"
+                   tag "resolve [X]" "Resolve this comment on the PR"
                    (lambda () (gp--detail-run-action
                                buf tag (lambda () (gp-ui-set-resolution pr comment t))))))))
-            (when (gp-comment-own-p comment (gp-user-uuid))
-              (insert " ")
-              (gp--insert-action-button
-               "edit [e]" "Edit this comment"
-               (lambda () (gp-ui-edit-comment pr comment)))
-              (insert " ")
-              (gp--insert-action-button
-               "delete [X]" "Delete this comment"
-               (lambda () (gp-ui-delete-comment pr comment))))
+            ;; editing is always own-only (no API lets you rewrite someone
+            ;; else's words); deleting can be granted more widely -- see
+            ;; `gp-comment-delete-others'.
+            (let ((uuid (gp-user-uuid)))
+              (when (gp-comment-own-p comment uuid)
+                (insert " ")
+                (gp--insert-action-button
+                 "edit [e]" "Edit this comment"
+                 (lambda () (gp-ui-edit-comment pr comment))))
+              (when (gp-comment-deletable-p comment uuid)
+                (insert " ")
+                (gp--insert-action-button
+                 "delete [K]" "Delete this comment"
+                 (lambda () (gp-ui-delete-comment pr comment)))))
             (insert "\n"))
           (insert "\n"))
           (when marked
@@ -664,13 +669,15 @@ block at once.  The file name remains clickable and opens the checkout."
   "b"   #'gp-ui-back-to-list
   "o"   #'gp-detail-open-local
   "O"   #'gp-detail-open-in-ide
-  "r"   #'gp-detail-reply
+  ;; Comment actions that write to the PR are capitalised, so a stray
+  ;; lowercase keypress while reading can't mutate anything.
+  "R"   #'gp-detail-reply
   "t"   #'gp-detail-send-to-terminal
-  "x"   #'gp-detail-resolve
+  "X"   #'gp-detail-resolve
   "e"   #'gp-detail-edit
   "f"   #'gp-detail-goto-comment
   "d"   #'gp-detail-show-diff
-  "X"   #'gp-detail-delete        ;; delete your own comment at point
+  "K"   #'gp-detail-delete        ;; delete a comment (see `gp-comment-delete-others')
   "D"   #'gp-detail-toggle-draft
   "a"   #'gp-detail-approve         ;; approve / unapprove (others' open PRs)
   "c"   #'gp-detail-request-changes ;; request changes / clear (others' open PRs)
@@ -679,7 +686,7 @@ block at once.  The file name remains clickable and opens the checkout."
   ;; pipelines (pipeline-level stop/trigger; per-step log + manual run)
   "s"   #'gp-detail-pipeline-stop
   "T"   #'gp-detail-pipeline-trigger-or-run-manual
-  "R"   #'gp-detail-pipeline-rerun-step
+  "P"   #'gp-detail-pipeline-rerun-step
   "m"   #'gp-detail-toggle-mark
   "l"   #'gp-detail-pipeline-step-log)
 
@@ -689,11 +696,14 @@ block at once.  The file name remains clickable and opens the checkout."
   (gp-ui-show-diff-in-magit gp--pr))
 
 (defun gp-detail-delete ()
-  "Delete the comment at point (your own only)."
+  "Delete the comment at point.
+Your own comments always; anyone's when `gp-comment-delete-others'
+grants it for the active backend."
   (interactive)
   (let ((c (gp-detail--comment-at-point)))
-    (unless (gp-comment-own-p c (gp-user-uuid))
-      (user-error "You can only delete your own comments"))
+    (unless (gp-comment-deletable-p c (gp-user-uuid))
+      (user-error
+       "You can only delete your own comments (see `gp-comment-delete-others')"))
     (gp-ui-delete-comment gp--pr c)))
 
 (defun gp-detail--comment-at-point ()
@@ -873,8 +883,14 @@ block at once.  The file name remains clickable and opens the checkout."
                (with-current-buffer buf (gp-detail-refresh))))))))
 
 (defun gp-ui-delete-comment (pr comment)
-  "Delete COMMENT on PR after confirmation, then refresh."
-  (when (yes-or-no-p "Delete this comment? ")
+  "Delete COMMENT on PR after confirmation, then refresh.
+Someone else's comment names its author in the prompt -- deleting
+those is a privilege, and a misfire is not undoable."
+  (when (yes-or-no-p
+         (if (gp-comment-own-p comment (gp-user-uuid))
+             "Delete this comment? "
+           (format "Delete %s's comment? "
+                   (let-alist comment (or .user.display_name "another user")))))
     (gp-delete-comment (gp-pr-full-name pr)
                               (alist-get 'id pr)
                               (alist-get 'id comment))

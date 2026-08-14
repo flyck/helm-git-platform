@@ -136,6 +136,23 @@ the steps."
         (gp--insert-pipelines pipelines)))
     (substring-no-properties (buffer-string))))
 
+(ert-deftest gp-test-pipeline-step-rerun-hint-names-its-key ()
+  "A rerunnable step advertises the key actually bound to the rerun command.
+Bitbucket steps are never rerunnable, so the mock fixtures cannot
+cover this hint -- which is how it went stale once already."
+  (cl-letf (((symbol-function 'gp-pipeline-step-rerunnable-p) (lambda (_) t))
+            ((symbol-function 'gp-pipeline-step-runnable-manual-p) (lambda (_) nil))
+            ((symbol-function 'gp-pipeline-step-manual-p) (lambda (_) nil)))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (magit-insert-section (gp-root)
+          (gp-pipeline--insert-step '((name . "Deploy")))))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "\\[rerun ▸ P\\]" text))
+        (should (eq (lookup-key gp-detail-mode-map "P")
+                    #'gp-detail-pipeline-rerun-step))))))
+
 (ert-deftest gp-test-pipeline-render-section ()
   (bitbucket-mock-with-service
     (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
