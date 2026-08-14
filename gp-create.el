@@ -243,7 +243,7 @@ to offer for this repo."
     (widget-insert "\n")
 
     ;; Shortcut lives in the button label (like the detail view's
-    ;; "reply [r]" / "resolve [x]" buttons), not in a separate help line.
+    ;; "reply [R]" / "resolve [X]" buttons), not in a separate help line.
     (widget-create 'push-button
                    :notify (lambda (&rest _) (gp-create-submit))
                    "Create PR [C]")

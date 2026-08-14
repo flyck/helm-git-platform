@@ -26,6 +26,7 @@
 (declare-function gp-helm-terminal-send-comment "gp-helm-terminal")
 (declare-function gp-helm-terminal-send-comments "gp-helm-terminal")
 (declare-function gp-compose "gp-compose")
+(declare-function gp-reviewers-edit "gp-reviewers")
 (declare-function gp-overlay-pr "gp-overlay")
 (declare-function gfm-mode "markdown-mode")
 (declare-function magit-section-toggle "magit-section")
@@ -122,6 +123,10 @@
   "Poll timer re-fetching pipelines while a current run is unfinished, or nil.")
 (defvar-local gp--detail-comments nil
   "Cached comment list for the detail buffer (so it can redraw without refetch).")
+(defvar-local gp--detail-reviewers nil
+  "List of plists (:name :avatar :state) for the detail buffer, or nil.
+Fetched asynchronously via `gp-pr-reviewers-async' -- see
+`gp--detail-load-reviewers'.")
 (defvar-local gp--detail-pending-action nil
   "Tag of the action button currently in flight, or nil.
 Set by `gp--detail-run-action' just before a blocking mutation (draft
@@ -139,17 +144,18 @@ lands (see `gp--insert-action-button/spinner').")
 (defun gp--pr-heading (pr)
   "Return a one-line propertized heading string for PR."
   (let-alist pr
-    (concat
-     (propertize (format "#%s" .id) 'face 'gp-pr-id-face)
-     " "
-     (propertize (or .title "(no title)") 'face 'gp-pr-title-face)
-     "  "
-     (propertize (format "[%s]" (or (gp-pr-repo-slug pr) "?"))
-                 'face 'gp-branch-face)
-     " "
-     (propertize (or (gp-pr-author-name pr) "?") 'face 'gp-author-face)
-     (if (and .comment_count (> .comment_count 0))
-         (format "  💬%d" .comment_count) ""))))
+    (let ((count (gp-pr-comment-count pr)))
+      (concat
+       (propertize (format "#%s" .id) 'face 'gp-pr-id-face)
+       " "
+       (propertize (or .title "(no title)") 'face 'gp-pr-title-face)
+       "  "
+       (propertize (format "[%s]" (or (gp-pr-repo-slug pr) "?"))
+                   'face 'gp-branch-face)
+       " "
+       (propertize (or (gp-pr-author-name pr) "?") 'face 'gp-author-face)
+       (if (and count (> count 0))
+           (format "  💬%d" count) "")))))
 
 (defun gp--insert-pr (pr)
   "Insert a collapsible section for PR into the current buffer."
@@ -481,30 +487,37 @@ block at once.  The file name remains clickable and opens the checkout."
       (gp-ui-open-file gp--pr path)
     (user-error "Point is not on a changed file")))
 
-(defun gp--reviewer-state-badge (state approved)
-  "Return a propertized one-glyph badge for a participant's STATE/APPROVED."
-  (cond
-   ((or (equal state "approved") (eq approved t))
-    (propertize "✅" 'face 'success))
-   ((equal state "changes_requested")
-    (propertize "❌" 'face 'error))
-   (t (propertize "⏳" 'face 'shadow))))
+(defun gp--reviewer-state-badge (state)
+  "Return a propertized one-glyph badge for a reviewer plist's STATE.
+STATE is `approved', `changes', or `pending' (see `gp-pr-reviewers-async')."
+  (pcase state
+    ('approved (propertize "✅" 'face 'success))
+    ('changes (propertize "❌" 'face 'error))
+    (_ (propertize "⏳" 'face 'shadow))))
 
-(defun gp--insert-reviewers-line (pr)
-  "Insert a line listing PR's reviewers and their approval state, if any."
-  (let ((reviewers (cl-remove-if-not
-                    (lambda (p) (equal (alist-get 'role p) "REVIEWER"))
-                    (alist-get 'participants pr))))
-    (when reviewers
+(defun gp--insert-reviewers-line (reviewers &optional pr)
+  "Insert a line listing REVIEWERS and their approval state.
+REVIEWERS is the list of plists from `gp-pr-reviewers-async'
+\(cached in `gp--detail-reviewers').  With PR and an open PR, an
+edit button follows -- shown even when REVIEWERS is empty, since
+that is exactly when you need a way to add the first one."
+  (let ((editable (and pr (gp-pr-open-p pr))))
+    (when (or reviewers editable)
       (insert "👥 ")
-      (insert (mapconcat
-               (lambda (p)
-                 (let-alist p
-                   (concat (gp--reviewer-state-badge .state .approved)
-                           " "
-                           (propertize (or .user.display_name "?")
-                                       'face 'gp-author-face))))
-               reviewers "   "))
+      (if reviewers
+          (insert (mapconcat
+                   (lambda (r)
+                     (concat (gp--reviewer-state-badge (plist-get r :state))
+                             " "
+                             (propertize (or (plist-get r :name) "?")
+                                         'face 'gp-author-face)))
+                   reviewers "   "))
+        (insert (propertize "no reviewers" 'face 'shadow)))
+      (when editable
+        (insert "   ")
+        (gp--insert-action-button
+         "✎ edit [V]" "Add or remove reviewers on this PR"
+         (lambda () (gp-ui-edit-reviewers pr))))
       (insert "\n"))))
 
 (defun gp--render-detail (pr comments)
@@ -562,7 +575,7 @@ block at once.  The file name remains clickable and opens the checkout."
                   " "
                   (propertize (format "-%d" (plist-get s :removed)) 'face 'diff-removed)
                   "\n")))
-      (gp--insert-reviewers-line pr)
+      (gp--insert-reviewers-line gp--detail-reviewers pr)
       (insert "\n")
       (gp--insert-action-button
        "← Back [b]" "Return to the pull-request list"
@@ -679,6 +692,7 @@ block at once.  The file name remains clickable and opens the checkout."
   "d"   #'gp-detail-show-diff
   "K"   #'gp-detail-delete        ;; delete a comment (see `gp-comment-delete-others')
   "D"   #'gp-detail-toggle-draft
+  "V"   #'gp-detail-edit-reviewers  ;; add / remove reviewers (open PRs)
   "a"   #'gp-detail-approve         ;; approve / unapprove (others' open PRs)
   "c"   #'gp-detail-request-changes ;; request changes / clear (others' open PRs)
   "RET" #'gp-detail-ret
@@ -689,6 +703,11 @@ block at once.  The file name remains clickable and opens the checkout."
   "P"   #'gp-detail-pipeline-rerun-step
   "m"   #'gp-detail-toggle-mark
   "l"   #'gp-detail-pipeline-step-log)
+
+(defun gp-detail-edit-reviewers ()
+  "Add or remove reviewers on the PR shown in this buffer."
+  (interactive)
+  (gp-ui-edit-reviewers gp--pr))
 
 (defun gp-detail-show-diff ()
   "Show the current PR's branch diff in Magit."
@@ -837,6 +856,7 @@ grants it for the active backend."
            :inline (when .inline.path
                      (cons .inline.path (or .inline.to .inline.from)))
            :on-success (lambda (_c)
+                         (gp-invalidate-pr-caches pr)
                          (when (buffer-live-p (get-buffer (gp--detail-buffer-name pr)))
                            (with-current-buffer (gp--detail-buffer-name pr)
                              (gp-detail-refresh))))))))
@@ -851,6 +871,15 @@ grants it for the active backend."
   (require 'gp-helm-terminal)
   (gp-helm-terminal-send-comments pr comments))
 
+(defun gp-ui-edit-reviewers (pr)
+  "Open the reviewer-editing form for PR.
+Passes the reviewers this buffer already loaded, so the form opens
+without a second fetch."
+  (require 'gp-reviewers)
+  (unless (gp-pr-open-p pr)
+    (user-error "Only open pull requests can have their reviewers changed"))
+  (gp-reviewers-edit pr gp--detail-reviewers))
+
 (defun gp-ui-set-resolution (pr comment resolve)
   "Resolve (RESOLVE non-nil) or reopen COMMENT on PR, then refresh the buffer."
   (unless (gp-comment-resolvable-p comment)
@@ -862,6 +891,7 @@ grants it for the active backend."
         (gp-resolve-comment full-name pid cid)
       (gp-reopen-comment full-name pid cid))
     (message "Comment %s" (if resolve "resolved" "reopened"))
+    (gp-invalidate-pr-caches pr)
     (gp-detail-refresh)))
 
 (defun gp-ui-edit-comment (pr comment)
@@ -895,6 +925,7 @@ those is a privilege, and a misfire is not undoable."
                               (alist-get 'id pr)
                               (alist-get 'id comment))
     (message "Comment deleted")
+    (gp-invalidate-pr-caches pr)
     (gp-detail-refresh)))
 
 (defun gp-ui-goto-comment-file (pr comment)
@@ -929,6 +960,7 @@ those is a privilege, and a misfire is not undoable."
      (gp-pr-full-name pr) .id draft .title))
   (message "PR #%s %s" (alist-get 'id pr)
            (if draft "converted to draft" "marked ready for review"))
+  (gp-invalidate-pr-caches pr)
   (gp-detail-refresh))
 
 (defun gp-ui-set-review (pr kind retract)
@@ -954,6 +986,7 @@ detail buffer afterwards."
                (`(changes nil ,_)  "changes requested")
                (`(changes t t)     "changes-request dismissed")
                (`(changes t ,_)    "changes-request cleared")))
+    (gp-invalidate-pr-caches pr)
     (gp-detail-refresh)))
 
 (defun gp-detail-approve ()
@@ -1369,6 +1402,7 @@ fresh data bind `gp-cache-ttl' to 0 around the call."
                              gp--detail-stats gp--detail-diff gp--detail-pipelines)
                             ;; heavier data, deferred so it never blocks the paint
                             (gp--detail-load-stats-diff buf pr ttl)
+                            (gp--detail-load-reviewers buf pr)
                             (if gp-detail-show-pipelines
                                 (gp--detail-load-pipelines buf pr)
                               (gp-log 'info "pipelines skipped: gp-detail-show-pipelines is nil"))))))))
@@ -1422,6 +1456,27 @@ caller's cache policy (0 forces fresh on `g')."
             (gp-log-error "stats/diff load failed: %s"
                           (error-message-string e)))))))))
 
+(defun gp--detail-load-reviewers (buf pr)
+  "Fetch PR's individual reviewers asynchronously and fold them into BUF.
+Bitbucket answers this for free (embedded in PR already); GitHub
+needs a real fetch (`gp-pr-reviewers-async'), so this stays off the
+visible-render path the same way stats/diff do.  A wall-clock timer,
+NOT `run-with-idle-timer' -- see `gp--detail-load-stats-diff'."
+  (run-at-time
+   0.1 nil
+   (lambda ()
+     (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
+       (condition-case e
+           (gp-pr-reviewers-async
+            pr
+            (lambda (reviewers)
+              (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
+                (with-current-buffer buf
+                  (setq gp--detail-reviewers reviewers)
+                  (gp--detail-rerender buf)))))
+         (error
+          (gp-log-error "reviewers load failed: %s" (error-message-string e))))))))
+
 (defun gp--detail-load-pipelines (buf pr)
   "Fetch PR's pipelines on a separate idle timer and fold them into BUF.
 Kept separate from the main load so the N+1 pipeline calls never
@@ -1439,50 +1494,50 @@ live deployment without a manual refresh."
   ;; (observed live; the sibling stats loader got lucky with ordering).
   (let ((timer
          (run-at-time
-   0.2 nil
-   (lambda ()
-     (if (not (buffer-live-p buf))
-         (gp-log 'info "pipelines: buffer gone before load timer fired")
-       (condition-case e
-           (let ((data (gp-pipeline-fetch-for-pr pr)))
-             (unless (equal data (buffer-local-value 'gp--detail-pipelines buf))
-               (gp-log 'info "pipelines: fetched %d current / %d recent"
-                       (length (plist-get data :current))
-                       (length (plist-get data :recent))))
-             (with-current-buffer buf
-               ;; `gp-pipeline-fetch-for-pr' returns nil on ANY error (it can't
-               ;; tell a transient API hiccup from a genuinely pipeline-less
-               ;; PR).  So an empty result must NOT clobber pipelines we already
-               ;; have -- otherwise a flaky refetch/poll blanks the section
-               ;; until the next successful fetch.  Keep the old data instead;
-               ;; only adopt an empty result on a first-ever load.
-               (let ((keep (and (gp--detail-pipelines-empty-p data)
-                                (not (gp--detail-pipelines-empty-p
-                                      gp--detail-pipelines))))
-                     ;; a 1s watch tick usually returns identical data --
-                     ;; skip the rerender then so point/folding stay put
-                     (changed (not (equal data gp--detail-pipelines))))
-                 (unless keep
-                   (setq gp--detail-pipelines data)
-                   (when changed (gp--detail-rerender buf)))
-                 (gp--detail-cancel-pipeline-timer)
-                 ;; keep polling against whatever we're actually showing
-                 ;; (`visible' -> any frame, not just the selected one)
-                 (pcase (gp--detail-pipeline-poll-mode
-                         gp--detail-pipelines (get-buffer-window buf 'visible))
-                   ('poll
-                    (setq gp--detail-pipeline-timer
-                          (run-with-timer
-                           gp-detail-pipeline-poll-interval nil
-                           #'gp--detail-load-pipelines buf pr)))
-                   ('watch
-                    (setq gp--detail-pipeline-timer
-                          (run-with-timer
-                           gp-detail-pipeline-watch-interval nil
-                           #'gp--detail-pipeline-watch-tick buf)))))))
-         (error
-           (gp-log-error "pipeline load failed: %s"
-                         (error-message-string e)))))))))
+          0.2 nil
+          (lambda ()
+            (if (not (buffer-live-p buf))
+                (gp-log 'info "pipelines: buffer gone before load timer fired")
+              (condition-case e
+                  (let ((data (gp-pipeline-fetch-for-pr pr)))
+                    (unless (equal data (buffer-local-value 'gp--detail-pipelines buf))
+                      (gp-log 'info "pipelines: fetched %d current / %d recent"
+                              (length (plist-get data :current))
+                              (length (plist-get data :recent))))
+                    (with-current-buffer buf
+                      ;; `gp-pipeline-fetch-for-pr' returns nil on ANY error (it can't
+                      ;; tell a transient API hiccup from a genuinely pipeline-less
+                      ;; PR).  So an empty result must NOT clobber pipelines we already
+                      ;; have -- otherwise a flaky refetch/poll blanks the section
+                      ;; until the next successful fetch.  Keep the old data instead;
+                      ;; only adopt an empty result on a first-ever load.
+                      (let ((keep (and (gp--detail-pipelines-empty-p data)
+                                       (not (gp--detail-pipelines-empty-p
+                                             gp--detail-pipelines))))
+                            ;; a 1s watch tick usually returns identical data --
+                            ;; skip the rerender then so point/folding stay put
+                            (changed (not (equal data gp--detail-pipelines))))
+                        (unless keep
+                          (setq gp--detail-pipelines data)
+                          (when changed (gp--detail-rerender buf)))
+                        (gp--detail-cancel-pipeline-timer)
+                        ;; keep polling against whatever we're actually showing
+                        ;; (`visible' -> any frame, not just the selected one)
+                        (pcase (gp--detail-pipeline-poll-mode
+                                gp--detail-pipelines (get-buffer-window buf 'visible))
+                          ('poll
+                           (setq gp--detail-pipeline-timer
+                                 (run-with-timer
+                                  gp-detail-pipeline-poll-interval nil
+                                  #'gp--detail-load-pipelines buf pr)))
+                          ('watch
+                           (setq gp--detail-pipeline-timer
+                                 (run-with-timer
+                                  gp-detail-pipeline-watch-interval nil
+                                  #'gp--detail-pipeline-watch-tick buf)))))))
+                (error
+                 (gp-log-error "pipeline load failed: %s"
+                               (error-message-string e)))))))))
     ;; Store in BUF's slot, not the caller's current buffer.
     (when (buffer-live-p buf)
       (with-current-buffer buf

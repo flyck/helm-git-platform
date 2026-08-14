@@ -10,6 +10,7 @@
 (require 'cl-lib)
 (require 'github-api)
 (require 'github-mock)
+(require 'git-platform-github)
 
 (ert-deftest github-test-comment-resolvable-p-review-comment ()
   "An inline (review) comment, carrying an `inline' key, is resolvable."
@@ -103,6 +104,45 @@ mirror of `markPullRequestReadyForReview'.  Must NOT `user-error'."
     (github-set-pull-request-draft "acme/web" 42 nil)
     (should (cl-some (lambda (c) (string-match-p "markPullRequestReadyForReview" (car c)))
                      github-mock-graphql-calls))))
+
+(defmacro github-test--with-sync-paged-async (&rest body)
+  "Run BODY with `github-api-paged-async' delegating to the sync mock.
+`github-api-paged-async' isn't itself stubbed by `github-mock.el'
+\(only the sync `github-api-request'/`github-api-paged' are) since it
+does real `url-retrieve' I/O even against a mocked host; this makes
+it call back immediately using the already-mocked sync path instead."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'github-api-paged-async)
+              (lambda (path &optional params callback _max-items)
+                (funcall callback t (github-mock-paged path params)))))
+     ,@body))
+
+(ert-deftest github-test-pr-review-tally-async-matches-sync ()
+  (github-mock-with-service
+    (github-test--with-sync-paged-async
+      (let ((pr (github-pull-request "acme/web" 42))
+            async-result)
+        (github-pr-review-tally-async pr (lambda (tally) (setq async-result tally)))
+        (should (equal async-result (github-pr-review-tally pr)))))))
+
+(ert-deftest github-test-pr-reviewers-async-shape ()
+  "Each reviewer plist has :name/:avatar/:state; :state is a symbol
+in `(approved changes pending)', matching `gp-pr-reviewers-async's contract."
+  (github-mock-with-service
+    (github-test--with-sync-paged-async
+      (let ((pr (github-pull-request "acme/web" 42))
+            reviewers)
+        (github-pr-reviewers-async pr (lambda (r) (setq reviewers r)))
+        (should (listp reviewers))
+        (dolist (r reviewers)
+          (should (plist-member r :name))
+          (should (plist-member r :avatar))
+          (should (memq (plist-get r :state) '(approved changes pending))))))))
+
+(ert-deftest github-test-pr-comment-count-sums-issue-and-review-comments ()
+  (should (= (gp--pr-comment-count (git-platform-github)
+                                   '((comments . 3) (review_comments . 2)))
+             5)))
 
 (provide 'github-api-test)
 ;;; github-api-test.el ends here

@@ -122,7 +122,7 @@ Grant the token these scopes:
 
 | Scope | Needed for |
 |---|---|
-| **Account: Read** | resolve your own identity (split mine vs needs-my-review) |
+| **Account: Read** | resolve your own identity (split mine vs needs-my-review); list workspace members as reviewer candidates |
 | **Repositories: Read** | list repos, read diffs and commit messages |
 | **Pull requests: Read** | list PRs and read details/comments |
 | **Pipelines: Read** | show the PR's CI pipelines and step logs |
@@ -163,12 +163,23 @@ The core browsing (`gp-helm`, `gp-list`, checkout) works with none of these on.
 
 In the detail buffer and on overlays, most actions show their key in `[brackets]` and the buttons
 are clickable (reply, resolve, new comment, open, diff). Comments are written in Markdown with
-`C-c C-c` to post.
+`C-c C-c` to post. Actions that write to the PR sit on **capital** letters (`R` reply, `X` resolve,
+`K` delete, `V` edit reviewers), so a stray lowercase keypress while reading can't mutate anything.
+
+**Reviewers** can be picked as checkboxes both when creating a PR and afterwards (`V` on an open
+PR). Candidates come from the workspace members on Bitbucket and the repo collaborators on GitHub;
+anyone who has already submitted a review is shown locked, since dropping them from the list cannot
+withdraw a review that is already on the record.
+
+Every buffer the package opens is tagged `*gp: …*` (`*gp: PRs*`, `*gp: PR #101 …*`,
+`*gp: reviewers #101*`, `*gp: log*`, …) so one filter finds them all; retag with
+`gp-buffer-name-prefix`.
 
 The detail buffer also shows the PR branch's **CI pipelines** (the one with the most steps on top;
 finished pipelines start collapsed, `TAB` expands). On a pipeline or step: `s` stops the running
-pipeline, `T` triggers/re-runs it, `m` runs a waiting *manual* step, and `l` opens a step's log in
-a buffer (tailed live while it runs, historical once finished).
+pipeline, `T` triggers/re-runs it (and starts a waiting *manual* step), `P` re-runs a single
+finished step where the platform supports it, and `l` opens a step's log in a buffer (tailed live
+while it runs, historical once finished).
 
 > The platform allows stop and trigger only at the **whole-pipeline** level —
 > there is no per-step stop/trigger API — and step logs are fetched, not

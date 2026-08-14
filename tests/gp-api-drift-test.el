@@ -38,6 +38,7 @@
   ;; the spec's own parameter names ({workspace}, {repo_slug}, ...).
   '(("get"    . "/user")
     ("get"    . "/workspaces/{workspace}/pullrequests/{selected_user}")
+    ("get"    . "/workspaces/{workspace}/members")
     ("get"    . "/repositories/{workspace}")
     ("get"    . "/repositories/{workspace}/{repo_slug}/default-reviewers")
     ("get"    . "/repositories/{workspace}/{repo_slug}/pullrequests")

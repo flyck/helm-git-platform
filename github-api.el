@@ -46,6 +46,9 @@
 (require 'cl-lib)
 (require 'auth-source)
 (require 'gp-log)
+;; for the provider-agnostic TTL cache (`gp-cache-get'/`gp-cache-put'),
+;; same dependency direction `bitbucket-api.el' already takes
+(require 'git-platform)
 
 (defcustom github-api-host "api.github.com"
   "Host of the GitHub REST API."
@@ -556,26 +559,99 @@ one per reviewer counts toward the current approval state."
       (maphash (lambda (k v) (push (cons k v) acc)) by-user)
       acc)))
 
-(defun github-pr-review-tally (pr)
-  "Return a plist (:approved N :changes N :pending N) over PR's reviews.
-Counts each reviewer's most recent review only, plus any reviewer
-still requested but who has not submitted a review at all (pending)."
-  (let* ((full-name (let-alist pr .base.repo.full_name))
-         (number (alist-get 'number pr))
-         (reviews (and full-name number (github--pr-reviews full-name number)))
-         (latest (github--latest-review-per-user reviews))
-         (requested (mapcar (lambda (u) (alist-get 'login u))
-                            (alist-get 'requested_reviewers pr)))
+(defun github--review-tally-from (reviews requested-logins)
+  "Return a plist (:approved N :changes N :pending N).
+REVIEWS is the raw review list (as from `github--pr-reviews'),
+REQUESTED-LOGINS the PR's `requested_reviewers' logins.  Counts each
+reviewer's most recent review only, plus any reviewer still
+requested but who has not submitted a review at all (pending).
+Shared by `github-pr-review-tally' (sync) and
+`github-pr-review-tally-async' so the two can never drift."
+  (let* ((latest (github--latest-review-per-user reviews))
          (approved 0) (changes 0) (pending 0))
     (dolist (kv latest)
       (pcase (alist-get 'state (cdr kv))
         ("APPROVED" (setq approved (1+ approved)))
         ("CHANGES_REQUESTED" (setq changes (1+ changes)))
         (_ nil)))
-    (dolist (login requested)
+    (dolist (login requested-logins)
       (unless (assoc login latest)
         (setq pending (1+ pending))))
     (list :approved approved :changes changes :pending pending)))
+
+(defun github-pr-review-tally (pr)
+  "Return a plist (:approved N :changes N :pending N) over PR's reviews.
+Fetches synchronously -- see `gp-pr-review-tally-async' for a
+non-blocking twin suited to rendering many PRs at once."
+  (let* ((full-name (let-alist pr .base.repo.full_name))
+         (number (alist-get 'number pr))
+         (reviews (and full-name number (github--pr-reviews full-name number)))
+         (requested (mapcar (lambda (u) (alist-get 'login u))
+                            (alist-get 'requested_reviewers pr))))
+    (github--review-tally-from reviews requested)))
+
+(defun github-pr-review-tally-async (pr callback)
+  "Fetch PR's review tally asynchronously; CALLBACK gets the plist.
+Non-blocking twin of `github-pr-review-tally'."
+  (let* ((full-name (let-alist pr .base.repo.full_name))
+         (number (alist-get 'number pr))
+         (requested (mapcar (lambda (u) (alist-get 'login u))
+                            (alist-get 'requested_reviewers pr))))
+    (if (not (and full-name number))
+        (funcall callback (github--review-tally-from nil requested))
+      (github-api-paged-async
+       (format "/repos/%s/pulls/%s/reviews" full-name number)
+       nil
+       (lambda (ok reviews)
+         (funcall callback (github--review-tally-from (and ok reviews) requested)))))))
+
+(defun github--reviewers-from (reviews requested-reviewers)
+  "Return a list of plists (:id :name :avatar :state) for the detail view.
+REVIEWS is the raw review list; REQUESTED-REVIEWERS is the PR's
+`requested_reviewers' array (used for pending reviewers, who have
+no review to carry their avatar).  Counts only the most recent
+review per person, like `github--review-tally-from'.
+
+:ID is the login -- the identifier
+`github-set-pull-request-reviewers' takes -- so a reviewer shown in
+the UI maps back to an API identity.  It equals :NAME here (GitHub
+has no separate display name on these payloads); the two are kept
+distinct because the Bitbucket side's :ID is an opaque uuid."
+  (let ((latest (github--latest-review-per-user reviews))
+        (reviewed-logins (make-hash-table :test 'equal))
+        out)
+    (dolist (kv latest)
+      (let* ((login (car kv)) (r (cdr kv)))
+        (puthash login t reviewed-logins)
+        (push (list :id login
+                    :name login
+                    :avatar (let-alist r .user.avatar_url)
+                    :state (pcase (alist-get 'state r)
+                             ("APPROVED" 'approved)
+                             ("CHANGES_REQUESTED" 'changes)
+                             (_ 'pending)))
+              out)))
+    (seq-doseq (u requested-reviewers)
+      (let ((login (alist-get 'login u)))
+        (unless (gethash login reviewed-logins)
+          (push (list :id login :name login
+                      :avatar (alist-get 'avatar_url u) :state 'pending)
+                out))))
+    (nreverse out)))
+
+(defun github-pr-reviewers-async (pr callback)
+  "Fetch PR's individual reviewers asynchronously; CALLBACK gets the list.
+See `gp-pr-reviewers-async'."
+  (let* ((full-name (let-alist pr .base.repo.full_name))
+         (number (alist-get 'number pr))
+         (requested (alist-get 'requested_reviewers pr)))
+    (if (not (and full-name number))
+        (funcall callback (github--reviewers-from nil requested))
+      (github-api-paged-async
+       (format "/repos/%s/pulls/%s/reviews" full-name number)
+       nil
+       (lambda (ok reviews)
+         (funcall callback (github--reviewers-from (and ok reviews) requested)))))))
 
 (defun github-pr-my-review-state (pr login)
   "Return LOGIN's own review state on PR: `approved', `changes', or nil."
@@ -645,6 +721,30 @@ parameter name -- the shared protocol names it generically."
       (ignore close-source-branch)
       (github--reshape-pr pr))))
 
+(defun github-set-pull-request-reviewers (full-name id reviewer-logins
+                                                    &optional current-logins)
+  "Make REVIEWER-LOGINS the requested reviewers of PR ID in FULL-NAME.
+GitHub has no whole-list endpoint here: `requested_reviewers' is
+mutated by POSTing additions and DELETEing removals.  So the desired
+end state is diffed against CURRENT-LOGINS (the PR's present
+reviewers) and only the difference is sent -- re-POSTing an existing
+reviewer would needlessly re-notify them.
+
+Removing a login that already submitted a review has no effect: the
+review stays attached to the PR and GitHub does not treat the author
+as a requested reviewer anymore.  Callers must therefore not offer to
+remove reviewed people (`gp-ui-edit-reviewers' locks them).
+
+Requires Pull requests: write.  Returns non-nil on success."
+  (let* ((add (cl-remove-if (lambda (l) (member l current-logins)) reviewer-logins))
+         (del (cl-remove-if (lambda (l) (member l reviewer-logins)) current-logins))
+         (path (format "/repos/%s/pulls/%s/requested_reviewers" full-name id)))
+    (when del
+      (github-api-request "DELETE" path nil `((reviewers . ,(vconcat del)))))
+    (when add
+      (github-api-request "POST" path nil `((reviewers . ,(vconcat add)))))
+    t))
+
 (defun github-repo-default-reviewers (full-name)
   "Return repo FULL-NAME's default reviewers.
 Always nil: GitHub has no repo-level \"default reviewers\" endpoint
@@ -668,16 +768,28 @@ same alist shape as `github-repo-default-reviewers' would use
 \(`uuid' = login, `display_name' = name or login) so callers don't
 need to special-case the source.  Errors are swallowed -- an
 unreadable collaborator list should degrade to \"no suggestions\",
-same as `github-repo-default-reviewers', not break the form."
-  (ignore-errors
-    (let ((me (github-user-login)))
-      (delq nil
-            (mapcar (lambda (c)
-                      (let ((login (alist-get 'login c)))
-                        (unless (equal login me)
-                          `((uuid . ,login)
-                            (display_name . ,(or (alist-get 'name c) login))))))
-                    (github-api-paged (format "/repos/%s/collaborators" full-name)))))))
+same as `github-repo-default-reviewers', not break the form.
+
+A non-empty result is cached (`gp-cache-ttl') so reopening the create
+form doesn't re-page the collaborator list; an empty one is not, so a
+transient failure doesn't stick as \"nobody to suggest\"."
+  (let* ((key (list 'github-collaborators full-name))
+         (hit (gp-cache-get key)))
+    (if (car hit)
+        (cdr hit)
+      (let ((suggestions
+             (ignore-errors
+               (let ((me (github-user-login)))
+                 (delq nil
+                       (mapcar (lambda (c)
+                                 (let ((login (alist-get 'login c)))
+                                   (unless (equal login me)
+                                     `((uuid . ,login)
+                                       (display_name . ,(or (alist-get 'name c) login))))))
+                               (github-api-paged
+                                (format "/repos/%s/collaborators" full-name))))))))
+        (when suggestions (gp-cache-put key suggestions))
+        suggestions))))
 
 (defun github-repo-open-pr-count (full-name)
   "Return the number of OPEN pull requests in repo FULL-NAME."

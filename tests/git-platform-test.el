@@ -38,10 +38,17 @@
       (should (or (null (gp-pr-author-name pr)) (stringp (gp-pr-author-name pr))))
       (should (or (null (gp-pr-author-avatar pr)) (stringp (gp-pr-author-avatar pr))))
       (should (or (null (gp-pr-repo-slug pr)) (stringp (gp-pr-repo-slug pr))))
+      (should (or (null (gp-pr-comment-count pr)) (integerp (gp-pr-comment-count pr))))
       (let ((tally (gp-pr-review-tally pr)))
         (should (integerp (plist-get tally :approved)))
         (should (integerp (plist-get tally :changes)))
         (should (integerp (plist-get tally :pending))))
+      (let (async-tally)
+        (gp-pr-review-tally-async pr (lambda (v) (setq async-tally v)))
+        (should (integerp (plist-get async-tally :approved))))
+      (let (async-reviewers)
+        (gp-pr-reviewers-async pr (lambda (v) (setq async-reviewers v)))
+        (should (listp async-reviewers)))
       ;; categorize/partition produce the documented structure
       (let ((cat (gp-categorize-pull-requests prs uuid)))
         (should (= (length prs)
@@ -70,7 +77,15 @@
   "The GitHub backend satisfies the git-platform protocol."
   (let ((git-platform-current-backend (git-platform-github)))
     (github-mock-with-service
-      (git-platform-test--run))))
+      ;; `github-api-paged-async' isn't itself stubbed by github-mock.el (it
+      ;; does real `url-retrieve' I/O even against a mocked host); delegate
+      ;; it to the already-mocked sync path so gp-pr-review-tally-async /
+      ;; gp-pr-reviewers-async (exercised by `git-platform-test--run') get
+      ;; a real callback instead of hanging.
+      (cl-letf (((symbol-function 'github-api-paged-async)
+                 (lambda (path &optional params callback _max-items)
+                   (funcall callback t (github-mock-paged path params)))))
+        (git-platform-test--run)))))
 
 (ert-deftest git-platform-test-backend-lazy-default ()
   "`git-platform-backend' builds a Bitbucket backend by default."
@@ -84,6 +99,46 @@
     (bitbucket-mock-with-service
       ;; would error if gp-user-uuid still required a backend arg
       (should (stringp (gp-user-uuid))))))
+
+(ert-deftest git-platform-test-cache-remove ()
+  (let ((gp--result-cache (make-hash-table :test 'equal))
+        (gp-cache-ttl 300))
+    (gp-cache-put '(pull-request "acme/web" 1) 'value)
+    (should (car (gp-cache-get '(pull-request "acme/web" 1))))
+    (gp-cache-remove '(pull-request "acme/web" 1))
+    (should-not (car (gp-cache-get '(pull-request "acme/web" 1))))))
+
+(ert-deftest git-platform-test-cache-remove-matching ()
+  (let ((gp--result-cache (make-hash-table :test 'equal))
+        (gp-cache-ttl 300))
+    (gp-cache-put '(mine "u1" nil) 'a)
+    (gp-cache-put '(reviewing "u1" ("OPEN")) 'b)
+    (gp-cache-put '(pull-request "acme/web" 1) 'c)
+    (gp-cache-remove-matching (lambda (k) (memq (car-safe k) '(mine reviewing))))
+    (should-not (car (gp-cache-get '(mine "u1" nil))))
+    (should-not (car (gp-cache-get '(reviewing "u1" ("OPEN")))))
+    ;; unrelated key untouched
+    (should (car (gp-cache-get '(pull-request "acme/web" 1))))))
+
+(ert-deftest git-platform-test-invalidate-pr-caches ()
+  "Clears the PR's own per-PR entries and every list-level cache,
+leaving unrelated keys alone."
+  (let ((gp--result-cache (make-hash-table :test 'equal))
+        (gp-cache-ttl 300)
+        (pr '((id . 1) (destination (repository (full_name . "acme/web")))
+              (source (commit (hash . "abc123"))))))
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (gp-cache-put '(pull-request "acme/web" 1) 'stale-pr)
+      (gp-cache-put '(pr-stats "acme/web" 1 "abc123") 'stale-stats)
+      (gp-cache-put '(pr-diff "acme/web" 1 "abc123") 'stale-diff)
+      (gp-cache-put '(mine "u1" nil) 'stale-list)
+      (gp-cache-put '(other-thing) 'untouched)
+      (gp-invalidate-pr-caches pr)
+      (should-not (car (gp-cache-get '(pull-request "acme/web" 1))))
+      (should-not (car (gp-cache-get '(pr-stats "acme/web" 1 "abc123"))))
+      (should-not (car (gp-cache-get '(pr-diff "acme/web" 1 "abc123"))))
+      (should-not (car (gp-cache-get '(mine "u1" nil))))
+      (should (car (gp-cache-get '(other-thing)))))))
 
 (ert-deftest git-platform-test-diff-chunk-new-lines ()
   "New-side line set counts context and added lines, not deletions."
@@ -126,9 +181,9 @@
     (should-not (gp-comment-outdated-p general dbf))
     (should-not (gp-comment-outdated-p stale nil)))) ;; no diff -> not outdated
 
-(ert-deftest gp-test-buffer-name-uses-shared-prefix ()
-  "Buffer names are built from `gp-buffer-name-prefix', so retagging is
-a single setting rather than a sweep over call sites."
+;;;; Buffer naming ------------------------------------------------------------
+
+(ert-deftest gp-test-buffer-name-carries-the-shared-tag ()
   (should (equal (gp--buffer-name "PRs") "*gp: PRs*"))
   (let ((gp-buffer-name-prefix "zz: "))
     (should (equal (gp--buffer-name "PRs") "*zz: PRs*"))))

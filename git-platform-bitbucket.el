@@ -65,8 +65,13 @@
   (bitbucket-repo-default-branch full-name))
 (cl-defmethod gp--repo-default-reviewers ((_ git-platform-bitbucket) full-name)
   (bitbucket-repo-default-reviewers full-name))
-(cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-bitbucket) _full-name)
-  nil)
+(cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-bitbucket) full-name)
+  (bitbucket-repo-suggested-reviewers full-name))
+(cl-defmethod gp--set-pull-request-reviewers ((_ git-platform-bitbucket)
+                                              full-name id reviewer-ids
+                                              &optional _current-ids)
+  ;; whole-list PUT: the current set is irrelevant, the desired one replaces it
+  (bitbucket-set-pull-request-reviewers full-name id reviewer-ids))
 (cl-defmethod gp--create-pull-request ((_ git-platform-bitbucket) full-name source dest title &optional description draft close-source-branch reviewer-uuids)
   (bitbucket-create-pull-request full-name source dest title
                                  :description description
@@ -137,14 +142,21 @@
   (let-alist pr .destination.repository.slug))
 (cl-defmethod gp--pr-review-tally ((_ git-platform-bitbucket) pr)
   (bitbucket-pr-review-tally pr))
+(cl-defmethod gp--pr-review-tally-async ((_ git-platform-bitbucket) pr callback)
+  (funcall callback (bitbucket-pr-review-tally pr)))
+(cl-defmethod gp--pr-reviewers-async ((_ git-platform-bitbucket) pr callback)
+  (funcall callback (bitbucket-pr-reviewers pr)))
 (cl-defmethod gp--pr-my-review-state ((_ git-platform-bitbucket) pr uuid)
   (bitbucket-pr-my-review-state pr uuid))
+(cl-defmethod gp--pr-comment-count ((_ git-platform-bitbucket) pr)
+  (alist-get 'comment_count pr))
 (cl-defmethod gp--comment-resolved-p ((_ git-platform-bitbucket) comment)
   (bitbucket-comment-resolved-p comment))
 (cl-defmethod gp--comment-resolvable-p ((_ git-platform-bitbucket) _comment)
   t)
 (cl-defmethod gp--comment-own-p ((_ git-platform-bitbucket) comment uuid)
   (bitbucket-comment-own-p comment uuid))
+(cl-defmethod gp--backend-name ((_ git-platform-bitbucket)) 'bitbucket)
 
 ;; Pipeline / step shape accessors
 (cl-defmethod gp--pipeline-state ((_ git-platform-bitbucket) pipeline)

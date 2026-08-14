@@ -313,10 +313,29 @@ CREATE TABLE IF NOT EXISTS participants (
 (cl-defmethod gp--repo-default-branch ((_ git-platform-mock) _full-name)
   "main")
 
-(cl-defmethod gp--repo-default-reviewers ((_ git-platform-mock) _full-name)
+(cl-defmethod gp--backend-name ((_ git-platform-mock))
+  "Report `bitbucket'.
+The mock impersonates Bitbucket's shapes and semantics, so
+backend-keyed configuration (`gp-comment-delete-others') behaves in
+demos exactly as it will against the real thing."
+  'bitbucket)
+
+(defun gp-mock--reviewer-alist (users)
+  "Reshape USERS ((UUID . NAME)…) into reviewer alists."
   (mapcar (pcase-lambda (`(,uuid . ,name))
             `((uuid . ,uuid) (display_name . ,name)))
-          gp-mock--users))
+          users))
+
+(cl-defmethod gp--repo-default-reviewers ((_ git-platform-mock) _full-name)
+  ;; only the first co-worker is a repo default; the rest are merely
+  ;; suggestable, so the create form demonstrates both groups
+  (gp-mock--reviewer-alist (seq-take gp-mock--users 1)))
+
+(cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-mock) _full-name)
+  "The remaining workspace members, standing in for the members endpoint.
+Overrides the Bitbucket implementation this class inherits, which
+would otherwise hit the real network from demo/test runs."
+  (gp-mock--reviewer-alist (seq-drop gp-mock--users 1)))
 
 (cl-defmethod gp--create-pull-request ((_ git-platform-mock)
                                        full-name source dest title
@@ -343,6 +362,33 @@ CREATE TABLE IF NOT EXISTS participants (
                        VALUES (?,?,?,'REVIEWER',NULL)"
                       (list id uuid
                             (or (cdr (assoc uuid gp-mock--users)) uuid))))
+    (gp--pull-request (git-platform-backend) full-name id)))
+
+(cl-defmethod gp--set-pull-request-reviewers ((_ git-platform-mock)
+                                              full-name id reviewer-ids
+                                              &optional _current-ids)
+  "Replace PR ID's REVIEWER participants with REVIEWER-IDS.
+Mirrors Bitbucket's whole-list PUT semantics: reviewers absent from
+REVIEWER-IDS are dropped.  Rows for people who already reviewed keep
+their `state', so re-saving an unchanged list does not silently
+discard an approval."
+  (let ((db (gp-mock--db)))
+    (dolist (uuid reviewer-ids)
+      (sqlite-execute db
+                      "INSERT OR IGNORE INTO participants
+                         (pr_id, user_uuid, user_name, role, state)
+                       VALUES (?,?,?,'REVIEWER',NULL)"
+                      (list id uuid
+                            (or (cdr (assoc uuid gp-mock--users)) uuid))))
+    ;; drop the reviewers no longer wanted (leaving non-REVIEWER roles alone)
+    (let ((keep (if reviewer-ids
+                    (format "AND user_uuid NOT IN (%s)"
+                            (mapconcat (lambda (_) "?") reviewer-ids ","))
+                  "")))
+      (sqlite-execute db
+                      (format "DELETE FROM participants
+                               WHERE pr_id = ? AND role = 'REVIEWER' %s" keep)
+                      (cons id reviewer-ids)))
     (gp--pull-request (git-platform-backend) full-name id)))
 
 ;;;; Protocol: comments ----------------------------------------------------------

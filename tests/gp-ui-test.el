@@ -10,6 +10,10 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'gp-ui)
+(require 'gp-create)
+(require 'gp-compose)
+(require 'gp-reviewers)
+(require 'gp-log)
 (require 'bitbucket-mock)
 (require 'github-mock)
 (require 'git-platform-github)
@@ -168,7 +172,7 @@ naive `eq' implementation would hit across two separate renders."
     (gp-detail-mode)
     (let ((inhibit-read-only t))
       (setq gp--detail-pending-action (cons 'resolution 77))
-      (gp--insert-action-button/spinner (cons 'resolution 77) "resolve [x]" "help" #'ignore)
+      (gp--insert-action-button/spinner (cons 'resolution 77) "resolve [X]" "help" #'ignore)
       (should (string-match-p "⏳" (buffer-string))))))
 
 (ert-deftest gp-test-action-button-spinner-per-comment-tags-are-independent ()
@@ -177,7 +181,7 @@ naive `eq' implementation would hit across two separate renders."
     (gp-detail-mode)
     (let ((inhibit-read-only t))
       (setq gp--detail-pending-action (cons 'resolution 77))
-      (gp--insert-action-button/spinner (cons 'resolution 99) "resolve [x]" "help" #'ignore)
+      (gp--insert-action-button/spinner (cons 'resolution 99) "resolve [X]" "help" #'ignore)
       (should (string-match-p "resolve" (buffer-string)))
       (should-not (string-match-p "⏳" (buffer-string))))))
 
@@ -195,6 +199,67 @@ naive `eq' implementation would hit across two separate renders."
           (should (string-match-p "\\.ts:[0-9]+" text))
           (should (string-match-p "send to terminal \\\[t\\\]" text))
           (should (string-match-p "view in browser \\\[w\\\]" text)))))))
+
+(ert-deftest gp-test-render-detail-hides-delete-on-others-comments-by-default ()
+  "With `gp-comment-delete-others' nil, only your own comments offer delete."
+  (let ((pr (car (gp-test--mock-prs)))
+        (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
+        (gp-comment-delete-others nil))
+    ;; a uuid nobody in the fixture owns, so every comment is "someone else's"
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{nobody}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should-not (string-match-p "delete \\[K\\]" text))
+          (should-not (string-match-p "edit \\[e\\]" text)))))))
+
+(ert-deftest gp-test-render-detail-shows-delete-on-others-when-permitted ()
+  "Enabling `gp-comment-delete-others' for the backend exposes delete
+on other people's comments -- but never the edit action, which no API
+allows on someone else's text."
+  (let ((pr (car (gp-test--mock-prs)))
+        (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
+        (gp-comment-delete-others '(bitbucket)))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{nobody}"))
+              ((symbol-function 'gp-backend-name) (lambda () 'bitbucket)))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "delete \\[K\\]" text))
+          (should-not (string-match-p "edit \\[e\\]" text)))))))
+
+(ert-deftest gp-test-comment-delete-others-scoped-per-backend ()
+  "A backend absent from the list gets no elevated delete power."
+  (let ((comment '((id . 1) (user (uuid . "{them}")))))
+    (cl-letf (((symbol-function 'gp-backend-name) (lambda () 'github)))
+      (let ((gp-comment-delete-others '(bitbucket)))
+        (should-not (gp-comment-deletable-p comment "{me}")))
+      (let ((gp-comment-delete-others '(github)))
+        (should (gp-comment-deletable-p comment "{me}")))
+      (let ((gp-comment-delete-others t))
+        (should (gp-comment-deletable-p comment "{me}")))
+      ;; your own comment stays deletable regardless of the setting
+      (let ((gp-comment-delete-others nil))
+        (should (gp-comment-deletable-p '((id . 1) (user (uuid . "{me}"))) "{me}"))))))
+
+(ert-deftest gp-test-detail-mode-map-mutating-actions-are-capitalised ()
+  "Write actions on comments sit on capitals; the lowercase keys are free."
+  (should (eq (lookup-key gp-detail-mode-map "R") #'gp-detail-reply))
+  (should (eq (lookup-key gp-detail-mode-map "X") #'gp-detail-resolve))
+  (should (eq (lookup-key gp-detail-mode-map "K") #'gp-detail-delete))
+  (should (eq (lookup-key gp-detail-mode-map "P")
+              #'gp-detail-pipeline-rerun-step))
+  ;; unchanged neighbours, so the reshuffle didn't clobber them
+  (should (eq (lookup-key gp-detail-mode-map "D") #'gp-detail-toggle-draft))
+  (should (eq (lookup-key gp-detail-mode-map "T")
+              #'gp-detail-pipeline-trigger-or-run-manual))
+  (dolist (key '("r" "x"))
+    (should-not (eq (lookup-key gp-detail-mode-map key) #'gp-detail-reply))
+    (should-not (eq (lookup-key gp-detail-mode-map key) #'gp-detail-resolve))))
 
 (ert-deftest gp-test-list-find-pr-point-locates-section ()
   "`gp--list-find-pr-point' returns the start of the matching PR section."
@@ -221,83 +286,53 @@ naive `eq' implementation would hit across two separate renders."
         (gp--render-list prs uuid))
       (should-not (gp--list-find-pr-point -1)))))
 
-(ert-deftest gp-test-detail-delete-button-hidden-on-others-comments-by-default ()
-  "With `gp-comment-delete-others' nil, only your own comments offer delete."
-  (let* ((pr (car (gp-test--mock-prs)))
-         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
-         (gp-comment-delete-others nil))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{nobody}")))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (let ((inhibit-read-only t))
-          (gp--render-detail pr comments))
-        (should-not (string-match-p "delete \\[K\\]"
-                                    (substring-no-properties (buffer-string))))))))
-
-(ert-deftest gp-test-detail-delete-button-shown-when-backend-allows-others ()
-  "Enabling `gp-comment-delete-others' for the backend exposes delete
-on comments you did not write."
-  (let* ((pr (car (gp-test--mock-prs)))
-         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
-         (gp-comment-delete-others '(bitbucket)))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{nobody}"))
-              ((symbol-function 'gp-backend-name) (lambda () 'bitbucket)))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (let ((inhibit-read-only t))
-          (gp--render-detail pr comments))
-        (should (string-match-p "delete \\[K\\]"
-                                (substring-no-properties (buffer-string))))))))
-
-(ert-deftest gp-test-comment-deletable-p-respects-backend-list ()
-  "`gp-comment-deletable-p' keys off the ACTIVE backend, not just any entry."
-  (let ((comment '((id . 1) (user (uuid . "{someone-else}")))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
-              ((symbol-function 'gp-backend-name) (lambda () 'github)))
-      (let ((gp-comment-delete-others '(bitbucket)))
-        (should-not (gp-comment-deletable-p comment "{me}")))
-      (let ((gp-comment-delete-others '(github)))
-        (should (gp-comment-deletable-p comment "{me}")))
-      (let ((gp-comment-delete-others t))
-        (should (gp-comment-deletable-p comment "{me}")))
-      ;; your own is always deletable, whatever the setting
-      (let ((gp-comment-delete-others nil))
-        (should (gp-comment-deletable-p '((id . 1) (user (uuid . "{me}"))) "{me}"))))))
-
 (ert-deftest gp-test-render-detail-shows-reviewers ()
-  "The overview section lists reviewers and their approval state."
-  (let* ((base (car (gp-test--mock-prs)))
-         (pr (append
-              `((participants
-                 . (((role . "REVIEWER") (state . "approved") (approved . t)
-                     (user (display_name . "Alice")))
-                    ((role . "REVIEWER") (state . "changes_requested")
-                     (user (display_name . "Bob")))
-                    ((role . "REVIEWER") (state . nil)
-                     (user (display_name . "Carol")))
-                    ((role . "PARTICIPANT") (state . "approved") (approved . t)
-                     (user (display_name . "NotAReviewer"))))))
-              base)))
+  "The overview section lists reviewers and their approval state.
+`gp--detail-reviewers' is populated asynchronously (see
+`gp--detail-load-reviewers') -- setting it directly here simulates
+that fetch having already landed, which is what `gp--render-detail'
+actually reads (not the raw PR's Bitbucket-shaped `participants',
+which GitHub PRs don't carry at all)."
+  (let ((pr (car (gp-test--mock-prs))))
     (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
       (with-temp-buffer
         (gp-detail-mode)
+        (setq gp--detail-reviewers
+              (list (list :name "Alice" :state 'approved)
+                    (list :name "Bob" :state 'changes)
+                    (list :name "Carol" :state 'pending)))
         (let ((inhibit-read-only t))
           (gp--render-detail pr nil))
         (let ((text (substring-no-properties (buffer-string))))
           (should (string-match-p "✅ Alice" text))
           (should (string-match-p "❌ Bob" text))
-          (should (string-match-p "⏳ Carol" text))
-          (should-not (string-match-p "NotAReviewer" text)))))))
+          (should (string-match-p "⏳ Carol" text)))))))
 
-(ert-deftest gp-test-render-detail-no-reviewers-no-line ()
-  "When PR has no participants, no reviewers line is inserted."
+(ert-deftest gp-test-render-detail-no-reviewers-offers-to-add-some ()
+  "An open PR with no reviewers still shows the line, with an edit button.
+That is precisely when you need a way in -- hiding the line would
+leave no entry point for adding the first reviewer."
   (let ((pr (car (gp-test--mock-prs))))
     (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
           (gp--render-detail pr nil))
-        (should-not (string-match-p "👥" (buffer-string)))))))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "👥" text))
+          (should (string-match-p "no reviewers" text))
+          (should (string-match-p "edit \\[V\\]" text)))))))
+
+(ert-deftest gp-test-render-detail-closed-pr-hides-reviewer-editing ()
+  "A merged/closed PR cannot be edited, so no line and no button."
+  (let ((pr (cons '(state . "MERGED")
+                  (assq-delete-all 'state (copy-alist (car (gp-test--mock-prs)))))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr nil))
+        (should-not (string-match-p "edit \\[V\\]" (buffer-string)))))))
 
 (ert-deftest gp-test-comment-location-inline-vs-general ()
   (should (equal (gp--comment-location
@@ -556,6 +591,19 @@ on comments you did not write."
         (should (equal gp--detail-comments comments))
         (should (equal gp--detail-stats '(:commits 1 :files 1 :added 0 :removed 0)))
         (should (equal gp--detail-diff '(("a" . "diff"))))))))
+
+(ert-deftest gp-test-every-buffer-name-is-tagged ()
+  "No buffer this package opens may escape the shared prefix.
+Untagged buffers are the thing `gp-buffer-name-prefix' exists to
+prevent, so each producer is checked rather than trusted."
+  (let ((tag "*gp: "))
+    (dolist (name (list gp-list-buffer-name
+                        gp-create-buffer
+                        gp-compose-preview-buffer
+                        gp-log-buffer-name
+                        (gp--detail-buffer-name '((id . 7) (title . "t")))
+                        (gp-reviewers--buffer-name '((id . 7)))))
+      (should (string-prefix-p tag name)))))
 
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here

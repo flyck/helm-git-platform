@@ -20,6 +20,7 @@ emacs --batch -Q \
   -l gp-checkout.el \
   -l gp-compose.el \
   -l gp-create.el \
+  -l gp-reviewers.el \
   -l gp-helm-terminal.el \
   -l gp-helm-terminal-iterm2.el \
   -l gp-helm-terminal-ghostty.el \
@@ -43,6 +44,7 @@ emacs --batch -Q \
   -l tests/gp-checkout-test.el \
   -l tests/gp-compose-test.el \
   -l tests/gp-create-test.el \
+  -l tests/gp-reviewers-test.el \
   -l tests/gp-helm-terminal-test.el \
   -l tests/gp-helm-terminal-ghostty-test.el \
   -l tests/gp-ui-test.el \

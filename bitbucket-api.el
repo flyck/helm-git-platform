@@ -445,6 +445,27 @@ Only `REVIEWER' participants are counted: approved (state
            (t (setq pending (1+ pending)))))))
     (list :approved approved :changes changes :pending pending)))
 
+(defun bitbucket-pr-reviewers (pr)
+  "Return PR's `REVIEWER' participants as plists (:id :name :avatar :state).
+STATE is `approved', `changes', or `pending', matching
+`bitbucket-pr-review-tally''s classification of the same data.
+:ID is the account uuid -- the same identifier
+`bitbucket-set-pull-request-reviewers' takes, so a reviewer shown in
+the UI can be mapped back to an API identity."
+  (let (out)
+    (dolist (p (alist-get 'participants pr))
+      (when (equal (alist-get 'role p) "REVIEWER")
+        (let-alist p
+          (push (list :id .user.uuid
+                      :name (or .user.display_name "?")
+                      :avatar .user.links.avatar.href
+                      :state (cond
+                              ((or (equal .state "approved") (eq .approved t)) 'approved)
+                              ((equal .state "changes_requested") 'changes)
+                              (t 'pending)))
+                out))))
+    (nreverse out)))
+
 (defun bitbucket-commit-build-states (full-name hash)
   "Return the list of build STATE strings for commit HASH in FULL-NAME.
 Each is one of SUCCESSFUL/FAILED/INPROGRESS/STOPPED.  Empty when
@@ -623,6 +644,27 @@ not given).  Requires Pull-requests:Write.  Returns the updated PR."
      "PUT" (format "/repositories/%s/pullrequests/%s" full-name id)
      nil `((title . ,title) (draft . ,(if draft t :json-false))))))
 
+(defun bitbucket-set-pull-request-reviewers (full-name id reviewer-uuids)
+  "Set PR ID in FULL-NAME's reviewers to exactly REVIEWER-UUIDS.
+The endpoint is a whole-object PUT: the `reviewers' array it receives
+replaces the existing one, so REVIEWER-UUIDS must be the complete
+desired list and not just the additions.  `title' is sent alongside
+for the same reason `bitbucket-set-pull-request-draft' does -- a PUT
+that omits it would blank the title.
+
+Bitbucket only allows mutating OPEN pull requests.  Requires
+Pull-requests:Write.  Returns the updated PR.
+
+The array is built as a vector, not a list: `json-encode' renders the
+empty list as `null', which Bitbucket rejects, whereas the empty
+vector gives the `[]' needed to clear every reviewer."
+  (let ((title (alist-get 'title (bitbucket-pull-request full-name id))))
+    (bitbucket-api-request
+     "PUT" (format "/repositories/%s/pullrequests/%s" full-name id)
+     nil `((title . ,title)
+           (reviewers . ,(vconcat (mapcar (lambda (u) (list (cons 'uuid u)))
+                                          reviewer-uuids)))))))
+
 (defun bitbucket-open-pr-for-branch (full-name branch)
   "Return the open PR in FULL-NAME whose source branch is BRANCH, or nil.
 Uses the repository PR endpoint with a `q' filter on the source
@@ -703,6 +745,39 @@ re-fetches rather than sticking on a stale empty list."
           (when reviewers
             (bitbucket-cache-put key reviewers))
           reviewers)))))
+
+(defun bitbucket-repo-suggested-reviewers (full-name)
+  "Return workspace members of FULL-NAME's workspace as reviewer candidates.
+Bitbucket has no per-PR \"suggested reviewers\" resource, and
+`bitbucket-repo-default-reviewers' only covers reviewers the repo
+admin pre-configured -- so picking any other colleague was
+impossible from the create form.  The workspace member list is the
+closest available candidate pool.
+
+Yourself and anyone already in the default-reviewer list are
+filtered out, so the create form never shows a name twice.  Needs
+Account:Read; failures degrade to an empty list rather than
+breaking the create form.  Cached like the default reviewers, and
+likewise only when non-empty."
+  (let* ((workspace (car (split-string full-name "/")))
+         (key (list 'workspace-members workspace))
+         (hit (bitbucket-cache-get key))
+         (members
+          (if (car hit)
+              (cdr hit)
+            (let ((fetched
+                   (ignore-errors
+                     (bitbucket-api-paged
+                      (format "/workspaces/%s/members" workspace)
+                      '(("fields" . "values.user.uuid,values.user.display_name,values.user.nickname,next"))))))
+              (when fetched (bitbucket-cache-put key fetched))
+              fetched)))
+         ;; the members endpoint nests the account under `user'
+         (users (delq nil (mapcar (lambda (m) (alist-get 'user m)) members)))
+         (exclude (cons (ignore-errors (bitbucket-user-uuid))
+                        (mapcar (lambda (r) (alist-get 'uuid r))
+                                (bitbucket-repo-default-reviewers full-name)))))
+    (cl-remove-if (lambda (u) (member (alist-get 'uuid u) exclude)) users)))
 
 (defun bitbucket-repo-open-pr-count (full-name)
   "Return the number of OPEN pull requests in repo FULL-NAME.

@@ -106,6 +106,29 @@ convenience and is **not** required by the umbrella.
 Each file's header comment states its responsibility, with a matching
 `tests/<name>-test.el`.
 
+## Buffer names
+
+Every buffer the package creates is tagged with one prefix, so a single filter
+in `switch-to-buffer`/ibuffer finds them all and one `display-buffer-alist`
+rule can match them:
+
+```
+*gp: PRs*                        the PR list
+*gp: PR #101 add gift cards (webshop)*   a PR detail buffer
+*gp: create PR*                  the create form
+*gp: reviewers #101*             the reviewer editor
+*gp: comment*  *gp: comment preview*
+*gp: pipeline #42 log: Deploy*
+*gp: helm*  *gp: helm files*  *gp: helm comments*  …
+*gp: log*                        the diagnostic log
+```
+
+Names are built by `gp--buffer-name`, whose prefix is the `gp-buffer-name-prefix`
+defcustom (default `"gp: "`) — set it to retag everything at once. Existing
+buffers keep their old names until recreated. `gp-log.el` spells the tag
+literally instead of calling the helper: it is a leaf that `git-platform`
+requires, so using the helper there would create a load cycle.
+
 ## API spec drift check
 
 `tests/gp-api-drift-test.el` is the one test that needs the network (it
@@ -133,29 +156,109 @@ actions uppercase; buttons are clickable):
 | `d` | Show the branch diff in Magit (no checkout) |
 | `w` | View the PR in the browser |
 | `i` | Overlay this PR's inline comments onto its local files |
-| `r` | Reply to the comment at point |
 | `e` | Edit your own comment at point |
 | `g` | Refresh (non-blocking) |
-| `x` | Resolve / reopen the comment at point |
-| `X` | Delete your own comment at point |
 | `D` | Convert to draft / mark ready (your own PRs) |
 | `s` `T` `m` `l` | Pipeline: stop · trigger/run-manual · toggle mark · step log |
-| `R` | Re-run the finished pipeline step at point (GitHub Actions only) |
+| `P` | Re-run the finished pipeline step at point (GitHub Actions only) |
 
-On an inline comment **overlay** (in a checked-out file), under the `C-c b`
+Comment actions that **write** to the PR sit on capital letters, so a stray
+lowercase keypress while reading can't mutate anything:
+
+| Key | Action |
+|---|---|
+| `R` | Reply to the comment at point |
+| `X` | Resolve / reopen the comment at point |
+| `K` | Delete the comment at point (see below) |
+| `V` | Add / remove reviewers on this PR |
+
+`K` offers itself on your own comments always. Deleting *other* people's
+comments needs elevated repository permissions that the APIs don't advertise,
+so it is opt-in via `gp-comment-delete-others` — nil (default), `t`, or a list
+of backend symbols:
+
+```elisp
+(setq gp-comment-delete-others '(bitbucket))
+```
+
+Where it doesn't apply, the delete action stays hidden rather than failing on
+click. Editing is always own-only regardless: no API lets you rewrite someone
+else's text.
+
+On an inline comment **overlay** (in a checked-out file), under the `C-c B`
 prefix so they don't collide with the file's own bindings:
 
 | Key | Action |
 |---|---|
-| `C-c b r` | Reply to the comment at point |
-| `C-c b R` | Resolve it (round-trips to the PR) |
-| `C-c b k` | Reopen a resolved comment |
-| `C-c b n` | New inline comment on the line at point |
-| `C-c b TAB` | Minimise / expand this comment |
-| `C-c b g` | Refetch and redraw overlays |
+| `C-c B R` | Reply to the comment at point |
+| `C-c B X` | Resolve it (round-trips to the PR) |
+| `C-c B k` | Reopen a resolved comment |
+| `C-c B K` | Delete the comment at point |
+| `C-c B n` | New inline comment on the line at point |
+| `C-c B TAB` | Minimise / expand this comment |
+| `C-c B g` | Refetch and redraw overlays |
+| `C-c B ]` `C-c B [` | Next / previous commented line |
 
 In the Markdown compose buffer: `C-c C-c` post · `C-c C-p` preview ·
 `C-c C-k` cancel.
+
+## Picking reviewers
+
+### On a new PR
+
+The create form (`gp-create-pr`) lists reviewer candidates as checkboxes, in
+two groups — `SPC` toggles one, `C-c C-c` (or `C`) submits:
+
+- **Default reviewers**, pre-checked, because the platform would add them
+  anyway; unchecking is the unusual case. Bitbucket's repo-level
+  default-reviewers list; GitHub has no queryable equivalent, so this group is
+  empty there.
+- **Suggested**, unchecked, an explicit opt-in. Bitbucket lists the
+  **workspace members**; GitHub lists the **repo collaborators**. Yourself and
+  anyone already in the defaults are filtered out, so no name appears twice.
+
+Both backends therefore offer a real candidate pool. The selected ids reach
+`gp-create-pull-request`'s `reviewer-uuids` argument, and each backend sends
+them the way its API wants: Bitbucket inline in the create POST
+(`reviewers: [{uuid}]`), GitHub as a follow-up
+`POST .../requested_reviewers` with plain logins.
+
+Candidate lookups are synchronous at form-build time and cached, so opening the
+form is one extra round-trip per workspace, not per PR.
+
+### On an existing PR
+
+`V` in the detail buffer (or the `✎ edit [V]` button on the 👥 reviewers line)
+opens `gp-reviewers-edit` — the same checkbox idiom, from the same candidate
+pool, in three groups: **Current** (pre-checked), the repo's **Default
+reviewers** not yet on the PR, and **Suggested**. The line and its button show
+even when the PR has no reviewers yet, since that is when you need a way in;
+they are hidden on a closed or merged PR, which no platform lets you mutate.
+
+Anyone who has already **submitted a review** is shown with their badge, ticked
+and *locked*:
+
+```
+Current
+[X] Alice Meyer   ✓ approved  (locked)
+[X] Bob Tanaka   ⏳ pending
+```
+
+A submitted review stays attached to the PR whether or not the person is still
+a requested reviewer, so dropping them from the list cannot withdraw it —
+attempting to untick says so. The lock is enforced in
+`gp-reviewers--selected-ids`, not just in the keymap, because a checkbox can
+also be toggled by mouse, `RET`, or `widget-value-set`.
+
+Saving hands the **complete desired list** to `gp-set-pull-request-reviewers`;
+each backend reaches that end state the way its API allows:
+
+| | How reviewers are set |
+|---|---|
+| Bitbucket | whole-list `PUT` on the PR. Sends `title` too (a `PUT` omitting it blanks the title) and builds the array as a *vector*, since `json-encode` renders the empty list as `null` rather than the `[]` needed to clear everyone. |
+| GitHub | `POST`/`DELETE` deltas on `requested_reviewers`, diffed against the current list so existing reviewers are never re-notified. |
+
+An unchanged selection short-circuits without any API call.
 
 ## Known limitations / TODO
 
