@@ -39,6 +39,11 @@
 
 (defface gp-pipeline-running-face '((t :inherit warning))
   "Face for a running pipeline/step." :group 'bitbucket-faces)
+(defface gp-pipeline-spinner-face '((t :inherit font-lock-keyword-face))
+  "Face for the animated in-progress spinner glyph.
+Inherits a theme-provided face rather than naming a colour, so the
+spinner picks up whatever blue/accent hue the active theme uses."
+  :group 'bitbucket-faces)
 (defface gp-pipeline-success-face '((t :inherit success))
   "Face for a successful pipeline/step." :group 'bitbucket-faces)
 (defface gp-pipeline-failed-face '((t :inherit error))
@@ -66,18 +71,117 @@
 (defclass gp-pipeline-step-section (magit-section) ())
 (defclass gp-pipeline-recent-section (magit-section) ())
 
+;;;; Spinner -------------------------------------------------------------------
+
+;; An in-progress pipeline/step renders as a one-character animated spinner
+;; instead of a static glyph.  The frames sweep a Braille dot pair left to
+;; right across the cell, so the motion reads horizontally -- like progress
+;; along the pipeline -- rather than as a vertical orbit.  All frames are
+;; single-width characters from the same Braille block, so the animation never
+;; reflows the line: the timer only swaps the character in place, it never
+;; inserts or deletes.
+
+(defcustom gp-pipeline-spinner-frames
+  ["▏" "▎" "▍" "▌" "▋" "▊" "▉" "▊" "▋" "▌" "▍" "▎"]
+  "Frames of the in-progress spinner.
+The default is a bar that grows and shrinks horizontally, so the
+motion reads left-to-right rather than as a vertical orbit.
+Every frame must be a single character of the same display width, or
+the animation will shift the rest of the line."
+  :type '(vector string) :group 'bitbucket)
+
+(defcustom gp-pipeline-spinner-interval 0.12
+  "Seconds between in-progress spinner frames."
+  :type 'number :group 'bitbucket)
+
+(defvar gp-pipeline--spinner-index 0
+  "Current frame index into `gp-pipeline-spinner-frames'.")
+
+(defvar gp-pipeline--spinner-timer nil
+  "Repeating timer animating the in-progress spinners, or nil.")
+
+(defun gp-pipeline--spinner-frame ()
+  "Return the spinner's current frame string."
+  (aref gp-pipeline-spinner-frames
+        (mod gp-pipeline--spinner-index (length gp-pipeline-spinner-frames))))
+
+(defun gp-pipeline--spinner-glyph ()
+  "Return a propertized spinner character for an in-progress entry.
+The `gp-pipeline-spinner' text property marks it for repainting by
+`gp-pipeline--spinner-tick'."
+  (propertize (gp-pipeline--spinner-frame)
+              'face 'gp-pipeline-spinner-face
+              'gp-pipeline-spinner t))
+
+(defun gp-pipeline--spinner-repaint-buffer (frame)
+  "Replace every spinner character in the current buffer with FRAME.
+Rewrites the single marked character in place, so no text is inserted
+or removed and point, marks and window scroll all stay put.  Returns
+non-nil when the buffer contained at least one spinner."
+  (let ((inhibit-read-only t)
+        (buffer-undo-list t)
+        (found nil)
+        (pos (point-min)))
+    (save-excursion
+      (while (setq pos (text-property-not-all pos (point-max)
+                                              'gp-pipeline-spinner nil))
+        (let ((end (or (next-single-property-change
+                        pos 'gp-pipeline-spinner nil (point-max))
+                       (point-max))))
+          (setq found t)
+          (unless (string= (buffer-substring-no-properties pos end) frame)
+            (let ((props (text-properties-at pos)))
+              (goto-char pos)
+              (delete-region pos end)
+              (insert (apply #'propertize frame props))))
+          (setq pos (1+ pos)))))
+    (set-buffer-modified-p nil)
+    found))
+
+(defun gp-pipeline--spinner-tick ()
+  "Advance the spinner and repaint it in every buffer showing one.
+Stops the timer once no live buffer contains a spinner."
+  (setq gp-pipeline--spinner-index (1+ gp-pipeline--spinner-index))
+  (let ((frame (gp-pipeline--spinner-frame))
+        (any nil))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (derived-mode-p 'magit-section-mode)
+            (when (gp-pipeline--spinner-repaint-buffer frame)
+              (setq any t))))))
+    (unless any (gp-pipeline--spinner-stop))))
+
+(defun gp-pipeline--spinner-stop ()
+  "Cancel the spinner timer."
+  (when (timerp gp-pipeline--spinner-timer)
+    (cancel-timer gp-pipeline--spinner-timer))
+  (setq gp-pipeline--spinner-timer nil))
+
+(defun gp-pipeline--spinner-ensure ()
+  "Start the spinner timer unless it is already running."
+  (unless (timerp gp-pipeline--spinner-timer)
+    (setq gp-pipeline--spinner-timer
+          (run-with-timer gp-pipeline-spinner-interval
+                          gp-pipeline-spinner-interval
+                          #'gp-pipeline--spinner-tick))))
+
 ;;;; Status formatting (pure) --------------------------------------------------
 
 (defun gp-pipeline--status-glyph (state result &optional step)
   "Return (GLYPH . FACE) for a pipeline/step STATE and RESULT string.
 A pipeline paused at an open manual gate (stage PAUSED) gets its own
-⏸ glyph instead of the running one.  With STEP non-nil an in-progress
-entry renders as ⟳, so a step actually executing is distinguishable
-from its enclosing running pipeline's ▶."
+⏸ glyph instead of the running one.  An in-progress entry gets the
+animated spinner glyph (see `gp-pipeline--spinner-glyph'), which
+already carries its own face -- FACE is `gp-pipeline-spinner-face' in
+that case.  STEP is accepted for backward compatibility and no longer
+changes the glyph."
+  (ignore step)
   (cond
    ((equal result "PAUSED") (cons "⏸" 'gp-pipeline-paused-face))
    ((equal state "IN_PROGRESS")
-    (cons (if step "⟳" "▶") 'gp-pipeline-running-face))
+    (gp-pipeline--spinner-ensure)
+    (cons (gp-pipeline--spinner-glyph) 'gp-pipeline-spinner-face))
    ((member state '("PENDING" "READY" "BUILDING" nil))
     (cons "…" 'gp-pipeline-running-face))
    ((equal result "SUCCESSFUL") (cons "✔" 'gp-pipeline-success-face))
@@ -451,9 +555,10 @@ captured historical log."
          (step-uuid (alist-get 'uuid step))
          (running (gp-pipeline-step-running-p step))
          (buf (get-buffer-create
-               (format "*PR pipeline #%s log: %s*"
-                       (or (gp-pipeline-number pipeline) "?")
-                       (or (alist-get 'name step) "step")))))
+               (gp--buffer-name
+                (format "pipeline #%s log: %s"
+                        (or (gp-pipeline-number pipeline) "?")
+                        (or (alist-get 'name step) "step"))))))
     (with-current-buffer buf
       (gp-pipeline-log-mode)
       (setq gp-pipeline-log--ctx

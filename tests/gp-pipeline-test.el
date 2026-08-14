@@ -16,7 +16,7 @@
 
 (ert-deftest gp-test-pipeline-status-glyph ()
   (should (eq (cdr (gp-pipeline--status-glyph "IN_PROGRESS" nil))
-              'gp-pipeline-running-face))
+              'gp-pipeline-spinner-face))
   (should (eq (cdr (gp-pipeline--status-glyph "COMPLETED" "SUCCESSFUL"))
               'gp-pipeline-success-face))
   (should (eq (cdr (gp-pipeline--status-glyph "COMPLETED" "FAILED"))
@@ -25,15 +25,40 @@
               'gp-pipeline-stopped-face)))
 
 (ert-deftest gp-test-pipeline-status-glyph-paused-and-step ()
-  "Paused-at-manual-gate pipelines and in-progress steps get own glyphs."
+  "Paused-at-manual-gate pipelines and in-progress entries get own glyphs."
   ;; a paused pipeline (state IN_PROGRESS, stage PAUSED) is not \"running\"
   (should (equal (gp-pipeline--status-glyph "IN_PROGRESS" "PAUSED")
                  '("⏸" . gp-pipeline-paused-face)))
-  ;; an executing step renders ⟳, distinct from the pipeline's ▶
-  (should (equal (car (gp-pipeline--status-glyph "IN_PROGRESS" nil)) "▶"))
-  (should (equal (car (gp-pipeline--status-glyph "IN_PROGRESS" nil 'step)) "⟳"))
+  ;; in-progress renders the animated spinner, marked for repainting
+  (dolist (step '(nil step))
+    (let ((glyph (car (gp-pipeline--status-glyph "IN_PROGRESS" nil step))))
+      (should (member (substring-no-properties glyph)
+                      (append gp-pipeline-spinner-frames nil)))
+      (should (get-text-property 0 'gp-pipeline-spinner glyph))))
   ;; finished glyphs are unaffected by the step flag
-  (should (equal (car (gp-pipeline--status-glyph "COMPLETED" "SUCCESSFUL" 'step)) "✔")))
+  (should (equal (car (gp-pipeline--status-glyph "COMPLETED" "SUCCESSFUL" 'step)) "✔"))
+  (gp-pipeline--spinner-stop))
+
+(ert-deftest gp-test-pipeline-spinner-frames-uniform-width ()
+  "Every spinner frame is one character wide, so animating never reflows."
+  (mapc (lambda (f)
+          (should (= (length f) 1))
+          (should (= (string-width f) (string-width (aref gp-pipeline-spinner-frames 0)))))
+        gp-pipeline-spinner-frames))
+
+(ert-deftest gp-test-pipeline-spinner-repaint-in-place ()
+  "Repainting swaps the spinner char only, leaving the rest of the line intact."
+  (with-temp-buffer
+    (insert "  " (gp-pipeline--spinner-glyph) " build  12s\n")
+    (let ((before (buffer-size)))
+      (gp-pipeline--spinner-repaint-buffer "⠿")
+      (should (= (buffer-size) before))
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     "  ⠿ build  12s\n"))
+      ;; still marked, so the next tick finds it again
+      (should (gp-pipeline--spinner-repaint-buffer "⠋"))
+      (should (= (buffer-size) before))))
+  (gp-pipeline--spinner-stop))
 
 (ert-deftest gp-test-pipeline-web-url ()
   "Web URL deep-links to the pipeline run and optionally the step."
@@ -62,13 +87,19 @@ the steps."
                   (gp-pipeline--label p (list done gate)))))
       (should (string-prefix-p "⏸" label))
       (should (string-match-p "manual gate open" label)))
-    ;; a step is actually executing: still the running glyph
+    ;; a step is actually executing: still the running (spinner) glyph
     (should-not (gp-pipeline--manual-gate-open-p p (list running gate)))
-    (should (string-prefix-p "▶" (substring-no-properties
-                                  (gp-pipeline--label p (list running gate)))))
-    ;; no steps at hand: unchanged running label
-    (should (string-prefix-p "▶" (substring-no-properties
-                                  (gp-pipeline--label p))))))
+    (let ((frames (append gp-pipeline-spinner-frames nil)))
+      (should (member (substring (substring-no-properties
+                                  (gp-pipeline--label p (list running gate)))
+                                 0 1)
+                      frames))
+      ;; no steps at hand: unchanged running label
+      (should (member (substring (substring-no-properties
+                                  (gp-pipeline--label p))
+                                 0 1)
+                      frames)))
+    (gp-pipeline--spinner-stop)))
 
 (ert-deftest gp-test-pipeline-format-duration ()
   (should (equal (gp-pipeline--format-duration '((duration_in_seconds . 5))) "5s"))
