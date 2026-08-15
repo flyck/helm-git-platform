@@ -259,12 +259,3 @@ each backend reaches that end state the way its API allows:
 | GitHub | `POST`/`DELETE` deltas on `requested_reviewers`, diffed against the current list so existing reviewers are never re-notified. |
 
 An unchanged selection short-circuits without any API call.
-
-## Known limitations / TODO
-
-- **No side-by-side diff view.** Diffs render unified. Side-by-side would
-  normally come from [`git-delta`](https://github.com/dandavison/delta) via
-  `--side-by-side`, but that mode is incompatible with the `--color-only` mode
-  `magit-delta` relies on to overlay onto Magit's diff (see
-  [magit-delta#9](https://github.com/dandavison/magit-delta/issues/9)). Until
-  resolved upstream, side-by-side isn't offered.

@@ -195,8 +195,12 @@ while it runs, historical once finished).
   (`git-platform`) so another forge (GitLab, …) could be added the same way. GitHub has a handful
   of documented gaps relative to Bitbucket (see [Extensibility](#extensibility) above) stemming
   from real product/API differences, not missing implementation effort.
-- **No side-by-side diff view.** Diffs render unified (both the inline changed-file diffs and
-  Magit's `d`). See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for why.
+
+
+## FAQ
+- How do I open the **side-by-side diff view?** Opening a detail buffer, you can press [d] to show
+  the diff in magit. From there, press [e] to lauch ediff, followed by [|] to toggle into
+  horizontal view
 
 ## Tests
 
