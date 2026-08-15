@@ -150,5 +150,37 @@ advanced by re-triggering its pipeline with the custom selector."
     ;; nil commit -> unchanged
     (should (= 2 (length (bitbucket-pipelines-match-commit pipes nil))))))
 
+;;;; PR commits (normalisation) ------------------------------------------------
+
+(ert-deftest bitbucket-test-commit-entry-normalises-fields ()
+  "A PR commit is flattened to (:hash :summary :author :date)."
+  (let ((entry (bitbucket--commit-entry
+                '((hash . "87c8054110c84d42edc3a4e89184ffd1a15d3a8d")
+                  (date . "2026-07-15T17:28:26+00:00")
+                  (author (raw . "Felix Brilej <f@example.com>")
+                          (user (display_name . "Felix Brilej")))
+                  (message . "fix the thing\n\nlonger body ignored")))))
+    (should (equal (plist-get entry :hash)
+                   "87c8054110c84d42edc3a4e89184ffd1a15d3a8d"))
+    ;; only the first line of the message
+    (should (equal (plist-get entry :summary) "fix the thing"))
+    (should (equal (plist-get entry :author) "Felix Brilej"))
+    (should (equal (plist-get entry :date) "2026-07-15T17:28:26+00:00"))))
+
+(ert-deftest bitbucket-test-commit-entry-falls-back-to-raw-author ()
+  "Commits from non-Bitbucket accounts have no `author.user' to read.
+Without the raw fallback those rows would render with no author."
+  (let ((entry (bitbucket--commit-entry
+                '((hash . "abc123")
+                  (author (raw . "Outside Contributor <o@example.com>"))
+                  (message . "drive-by fix")))))
+    (should (equal (plist-get entry :author) "Outside Contributor"))))
+
+(ert-deftest bitbucket-test-commit-entry-survives-missing-author ()
+  "A commit with no author at all still yields a usable plist."
+  (let ((entry (bitbucket--commit-entry '((hash . "abc123") (message . "x")))))
+    (should (equal (plist-get entry :hash) "abc123"))
+    (should (null (plist-get entry :author)))))
+
 (provide 'bitbucket-pipeline-test)
 ;;; bitbucket-pipeline-test.el ends here

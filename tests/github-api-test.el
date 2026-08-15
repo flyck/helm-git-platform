@@ -144,5 +144,51 @@ in `(approved changes pending)', matching `gp-pr-reviewers-async's contract."
                                    '((comments . 3) (review_comments . 2)))
              5)))
 
+;;;; PR commits ----------------------------------------------------------------
+
+(ert-deftest github-test-commit-entry-normalises-to-bitbucket-shape ()
+  "GitHub's nested commit JSON flattens to the same plist Bitbucket yields."
+  (let ((entry (github--commit-entry
+                '((sha . "1a2b3c4d5e6f")
+                  (author (login . "ada"))
+                  (commit (message . "add the feature\n\ndetails")
+                          (author (name . "Ada Lovelace")
+                                  (date . "2026-07-14T09:00:00Z")))))))
+    (should (equal (plist-get entry :hash) "1a2b3c4d5e6f"))
+    (should (equal (plist-get entry :summary) "add the feature"))
+    ;; the linked account login wins over the raw git name
+    (should (equal (plist-get entry :author) "ada"))
+    (should (equal (plist-get entry :date) "2026-07-14T09:00:00Z"))))
+
+(ert-deftest github-test-commit-entry-falls-back-to-git-author-name ()
+  "A commit whose email matches no GitHub account has no `author.login'."
+  (let ((entry (github--commit-entry
+                '((sha . "deadbeef")
+                  (commit (message . "drive-by")
+                          (author (name . "Outside Contributor")))))))
+    (should (equal (plist-get entry :author) "Outside Contributor"))))
+
+(ert-deftest github-test-pull-request-commits-async-returns-newest-first ()
+  "GitHub lists PR commits oldest-first; we invert to match Bitbucket.
+A cap must then keep the NEWEST commits, not the oldest ones."
+  (let ((oldest-first
+         '(((sha . "c1") (commit (message . "first")  (author (name . "A"))))
+           ((sha . "c2") (commit (message . "second") (author (name . "A"))))
+           ((sha . "c3") (commit (message . "third")  (author (name . "A")))))))
+    (cl-letf (((symbol-function 'github-api-paged-async)
+               (lambda (_path &optional _params callback _max)
+                 (funcall callback t oldest-first))))
+      (let (result)
+        (github-pull-request-commits-async
+         "acme/web" 42 (lambda (cs) (setq result cs)))
+        (should (equal (mapcar (lambda (c) (plist-get c :hash)) result)
+                       '("c3" "c2" "c1"))))
+      ;; capped: the two NEWEST, not the two oldest
+      (let (result)
+        (github-pull-request-commits-async
+         "acme/web" 42 (lambda (cs) (setq result cs)) 2)
+        (should (equal (mapcar (lambda (c) (plist-get c :hash)) result)
+                       '("c3" "c2")))))))
+
 (provide 'github-api-test)
 ;;; github-api-test.el ends here

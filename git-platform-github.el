@@ -92,6 +92,8 @@
   (github-repo-pull-requests full-name state))
 (cl-defmethod gp--commit-build-states ((_ git-platform-github) full-name hash)
   (github-commit-build-states full-name hash))
+(cl-defmethod gp--pull-request-commits-async ((_ git-platform-github) full-name id callback &optional max-items)
+  (github-pull-request-commits-async full-name id callback max-items))
 (cl-defmethod gp--commit-build-states-async ((_ git-platform-github) full-name hash callback)
   ;; github-api.el has no async combined-status fetcher (Bitbucket's
   ;; version exists only because gp-helm.el used to call its async GET

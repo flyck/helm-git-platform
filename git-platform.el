@@ -98,6 +98,17 @@ ARGLIST may contain &optional; &rest is not supported here."
 COMMIT, the source commit hash, lets the backend cache the diff.")
 (gp-defop pull-request-stats (full-name id &optional pr)
   "Return a stats plist for PR FULL-NAME/ID.")
+(gp-defop pull-request-commits-async (full-name id callback &optional max-items)
+  "Fetch the commits on PR FULL-NAME/ID asynchronously.
+CALLBACK gets a list of plists (:hash :summary :author :date), newest
+first, or nil on error.  Normalised here rather than passed through
+raw because the two platforms disagree on nearly every field name
+\(Bitbucket `hash'/`message'/`date' under `author.user'; GitHub
+`sha'/`commit.message'/`commit.author') -- the detail view renders
+one shape and never branches on the backend.  Async only: this is
+deferred detail-view data, and a synchronous twin would just invite
+the blocking-poll bug `gp-pipeline-fetch-for-pr-async' exists to
+avoid.")
 (gp-defop create-comment (full-name id text &optional inline parent-id)
   "Create a comment on PR FULL-NAME/ID.")
 (gp-defop resolve-comment (full-name id comment-id)

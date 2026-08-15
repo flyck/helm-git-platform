@@ -203,5 +203,29 @@
                                      "acme/webshop" "feature/wishlist"))
                      106)))))
 
+(ert-deftest gp-mock-test-pull-request-commits ()
+  "The mock serves a PR's commits, newest first, headed by its real head commit."
+  (gp-mock-test--with
+    (let ((commits nil))
+      (gp-pull-request-commits-async
+       "acme/webshop" 101 (lambda (cs) (setq commits cs)))
+      (should commits)
+      ;; the newest entry is the PR's actual head commit, so the commits and
+      ;; pipelines sections agree on which commit is current
+      (let ((head (gp-pr-source-commit (gp-pull-request "acme/webshop" 101))))
+        (should (equal (plist-get (car commits) :hash) head)))
+      ;; every entry carries the full normalised shape
+      (dolist (c commits)
+        (should (plist-get c :hash))
+        (should (plist-get c :summary))
+        (should (plist-get c :author)))
+      ;; the cap keeps the newest
+      (let ((capped nil))
+        (gp-pull-request-commits-async
+         "acme/webshop" 101 (lambda (cs) (setq capped cs)) 1)
+        (should (= (length capped) 1))
+        (should (equal (plist-get (car capped) :hash)
+                       (plist-get (car commits) :hash)))))))
+
 (provide 'git-platform-mock-test)
 ;;; git-platform-mock-test.el ends here

@@ -35,6 +35,8 @@
 (defvar magit-section-highlight-current)
 (defvar gp-checkout-remote)
 (declare-function magit-diff-range "magit-diff")
+(declare-function magit-show-commit "magit-diff")
+(declare-function magit-rev-verify "magit-git")
 (declare-function magit-status "magit-status")
 (declare-function magit-refresh "magit-mode")
 (declare-function gp-overlay--avatar-image "gp-overlay")
@@ -106,6 +108,7 @@
 (defclass gp-pr-section (magit-section) ())
 (defclass gp-comment-section (magit-section) ())
 (defclass gp-file-section (magit-section) ())
+(defclass gp-commit-section (magit-section) ())
 
 ;;;; Buffer-local state ------------------------------------------------------
 
@@ -121,6 +124,10 @@
   "Pipeline data plist (:current :recent) for the detail buffer, or nil.")
 (defvar-local gp--detail-pipeline-timer nil
   "Poll timer re-fetching pipelines while a current run is unfinished, or nil.")
+(defvar-local gp--detail-commits nil
+  "List of plists (:hash :summary :author :date) for the detail buffer, or nil.
+Newest first.  Fetched asynchronously via `gp-pull-request-commits-async'
+-- see `gp--detail-load-commits'.")
 (defvar-local gp--detail-comments nil
   "Cached comment list for the detail buffer (so it can redraw without refetch).")
 (defvar-local gp--detail-reviewers nil
@@ -493,6 +500,77 @@ block at once.  The file name remains clickable and opens the checkout."
             (insert "\n")))
         (insert "\n")))))
 
+(defcustom gp-detail-commits-collapsed nil
+  "When non-nil, the commits section starts collapsed."
+  :type 'boolean :group 'bitbucket)
+
+(defcustom gp-detail-max-commits 50
+  "Maximum number of PR commits to fetch for the detail view.
+A long-running branch can carry hundreds; the section is a
+navigation aid, not a full history (that is what `l' in the magit
+checkout is for).  Set to nil for no cap."
+  :type '(choice (integer :tag "At most this many")
+                 (const :tag "No limit" nil))
+  :group 'bitbucket)
+
+(defun gp--insert-commits ()
+  "Insert a collapsable commits section for the detail buffer's PR.
+Each commit is one line -- short hash, summary, author, relative date
+-- carrying its plist as the section value so `RET' can open just that
+commit in Magit (see `gp-detail-show-commit')."
+  (let ((commits gp--detail-commits))
+    (when commits
+      (magit-insert-section (gp-commits nil gp-detail-commits-collapsed)
+        (magit-insert-heading (format "Commits (%d)" (length commits)))
+        (dolist (c commits)
+          (magit-insert-section (gp-commit-section c)
+            (let ((hash (plist-get c :hash))
+                  (author (plist-get c :author))
+                  (date (plist-get c :date)))
+              (insert "  ")
+              (insert (propertize (gp--short-hash hash) 'face 'magit-hash))
+              (insert "  ")
+              (insert (or (plist-get c :summary) ""))
+              (when author
+                (insert (propertize (format "  — %s" author) 'face 'gp-author-face)))
+              (when date
+                (insert (propertize (format "  %s" (gp--relative-time date))
+                                    'face 'shadow)))
+              (insert "\n"))))
+        (insert "\n")))))
+
+(defun gp--short-hash (hash)
+  "Return the leading 8 characters of HASH (or all of it when shorter)."
+  (if (and hash (> (length hash) 8)) (substring hash 0 8) (or hash "")))
+
+(defun gp-detail-show-commit ()
+  "Show the commit at point in Magit, in the PR's local checkout.
+Opens a single-commit revision buffer -- the commit's own diff and
+message -- rather than the whole-PR diff `d' gives.  Needs the branch
+checked out locally, and the commit to exist there: a freshly-pushed
+commit that the local clone has not fetched yet is reported rather
+than silently showing nothing."
+  (interactive)
+  (let* ((sec (magit-current-section))
+         (commit (and sec (object-of-class-p sec 'gp-commit-section)
+                      (oref sec value)))
+         (hash (and commit (plist-get commit :hash))))
+    (unless hash (user-error "Point is not on a commit"))
+    (unless (require 'magit nil t) (user-error "Magit is not available"))
+    (let* ((dir (gp-local-ensure-checkout gp--pr))
+           (default-directory (file-name-as-directory dir)))
+      (if (magit-rev-verify hash)
+          (magit-show-commit hash)
+        ;; not fetched yet -- fetch just this branch, then retry once
+        (message "Commit %s not in the local clone; fetching…" (gp--short-hash hash))
+        (if (and (zerop (call-process "git" nil nil nil
+                                      "fetch" gp-checkout-remote
+                                      (gp-pr-source-branch gp--pr)))
+                 (magit-rev-verify hash))
+            (magit-show-commit hash)
+          (user-error "Commit %s is not in the local clone (try `b' to check out the branch)"
+                      (gp--short-hash hash)))))))
+
 (defun gp-ui-open-file (pr path)
   "Open PATH from PR's checked-out branch (cloning/switching if needed)."
   (let ((dir (gp-local-ensure-checkout pr)))
@@ -674,6 +752,7 @@ that is exactly when you need a way to add the first one."
       (insert "\n\n"))
     (gp--insert-description pr)
     (gp--insert-changed-files)
+    (gp--insert-commits)
     (gp--insert-pipelines gp--detail-pipelines)
     (magit-insert-section (gp-comments)
       (magit-insert-heading
@@ -718,6 +797,7 @@ that is exactly when you need a way to add the first one."
   "a"   #'gp-detail-approve         ;; approve / unapprove (others' open PRs)
   "c"   #'gp-detail-request-changes ;; request changes / clear (others' open PRs)
   "RET" #'gp-detail-ret
+  "v"   #'gp-detail-show-commit     ;; read-only, so lowercase (see `R'/`X'/`K')
   "w"   #'gp-detail-browse
   ;; pipelines (pipeline-level stop/trigger; per-step log + manual run)
   "s"   #'gp-detail-pipeline-stop
@@ -808,13 +888,15 @@ grants it for the active backend."
       (gp-browse-pr))))
 
 (defun gp-detail-ret ()
-  "Context action: open a changed file, jump to an inline comment, else fold."
+  "Context action: open a changed file or commit, jump to a comment, else fold."
   (interactive)
   (let ((sec (magit-current-section)))
     (cond
      ((and (button-at (point))
            (button-get (button-at (point)) 'gp-file-path))
       (gp-detail-visit-file))
+     ((and sec (object-of-class-p sec 'gp-commit-section))
+      (gp-detail-show-commit))
      ((and sec (object-of-class-p sec 'gp-comment-section)
            (let-alist (oref sec value) .inline.path))
       (gp-detail-goto-comment))
@@ -1425,6 +1507,7 @@ fresh data bind `gp-cache-ttl' to 0 around the call."
                             ;; heavier data, deferred so it never blocks the paint
                             (gp--detail-load-stats-diff buf pr ttl)
                             (gp--detail-load-reviewers buf pr)
+                            (gp--detail-load-commits buf pr)
                             (if gp-detail-show-pipelines
                                 (gp--detail-load-pipelines buf pr)
                               (gp-log 'info "pipelines skipped: gp-detail-show-pipelines is nil"))))))))
@@ -1477,6 +1560,30 @@ caller's cache policy (0 forces fresh on `g')."
            (error
             (gp-log-error "stats/diff load failed: %s"
                           (error-message-string e)))))))))
+
+(defun gp--detail-load-commits (buf pr)
+  "Fetch PR's commits asynchronously and fold them into BUF.
+Deferred like stats/diff and reviewers so the visible render never
+waits on it.  A wall-clock timer, NOT `run-with-idle-timer' -- see
+`gp--detail-load-stats-diff'."
+  (run-at-time
+   0.1 nil
+   (lambda ()
+     (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
+       (condition-case e
+           (gp-pull-request-commits-async
+            (gp-pr-full-name pr) (alist-get 'id pr)
+            (lambda (commits)
+              (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
+                (with-current-buffer buf
+                  ;; nil means the fetch failed; keep whatever we already show
+                  ;; rather than blanking the section (same rule as pipelines)
+                  (when commits
+                    (setq gp--detail-commits commits)
+                    (gp--detail-rerender buf)))))
+            gp-detail-max-commits)
+         (error
+          (gp-log-error "commits load failed: %s" (error-message-string e))))))))
 
 (defun gp--detail-load-reviewers (buf pr)
   "Fetch PR's individual reviewers asynchronously and fold them into BUF.

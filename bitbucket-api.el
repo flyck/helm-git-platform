@@ -956,6 +956,34 @@ See `bitbucket-pull-request-stats'."
           :commits (length commits)
           :file-list (mapcar #'bitbucket--diffstat-entry stat))))
 
+(defun bitbucket--commit-entry (c)
+  "Normalise a Bitbucket PR commit C to (:hash :summary :author :date).
+The display name lives under `author.user', but that is absent when the
+commit's email matches no Bitbucket account (outside contributors, or a
+mis-set local git config) -- fall back to the raw \"Name <email>\" header
+and keep just the name part, so those commits still show an author."
+  (let* ((author (alist-get 'author c))
+         (name (or (let-alist author .user.display_name)
+                   (let ((raw (alist-get 'raw author)))
+                     (when raw
+                       (string-trim (car (split-string raw "<" t))))))))
+    (list :hash (alist-get 'hash c)
+          :summary (bitbucket-commit-summary (alist-get 'message c))
+          :author name
+          :date (alist-get 'date c))))
+
+(defun bitbucket-pull-request-commits-async (full-name id callback &optional max-items)
+  "Fetch PR FULL-NAME/ID's commits; CALLBACK gets normalised plists (or nil).
+Newest first, as the API returns them.  See `bitbucket--commit-entry'."
+  (if (not (and full-name id))
+      (funcall callback nil)
+    (bitbucket-api-paged-async
+     (format "/repositories/%s/pullrequests/%s/commits" full-name id)
+     '(("fields" . "values.hash,values.message,values.date,values.author,next"))
+     (lambda (ok values)
+       (funcall callback (and ok (mapcar #'bitbucket--commit-entry values))))
+     max-items)))
+
 (defun bitbucket--diffstat-entry (s)
   "Return a plist (:path :status :added :removed) for diffstat entry S.
 Uses the new path, falling back to the old (for deletions)."

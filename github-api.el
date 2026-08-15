@@ -1091,6 +1091,40 @@ in gp-ui.el needs no backend-specific handling."
         :added (or (alist-get 'additions f) 0)
         :removed (or (alist-get 'deletions f) 0)))
 
+(defun github--commit-entry (c)
+  "Normalise a GitHub PR commit C to (:hash :summary :author :date).
+Mirrors `bitbucket--commit-entry''s shape so the detail view needs no
+backend-specific handling.  Prefers the linked GitHub account's login
+and falls back to the raw git author name, which is all there is for
+commits whose email matches no account."
+  (let ((name (or (let-alist c .author.login)
+                  (let-alist c .commit.author.name))))
+    (list :hash (alist-get 'sha c)
+          :summary (github-commit-summary (let-alist c .commit.message))
+          :author name
+          :date (let-alist c .commit.author.date))))
+
+(defun github-pull-request-commits-async (full-name number callback &optional max-items)
+  "Fetch PR FULL-NAME/NUMBER's commits; CALLBACK gets normalised plists.
+Returned newest-first to match the Bitbucket backend -- GitHub's
+endpoint lists commits oldest-first, so the collected page is
+reversed before MAX-ITEMS is applied (taking the newest, not the
+oldest, when the list is capped)."
+  (if (not (and full-name number))
+      (funcall callback nil)
+    (github-api-paged-async
+     (format "/repos/%s/pulls/%s/commits" full-name number)
+     nil
+     (lambda (ok values)
+       (funcall callback
+                (and ok (let ((newest-first (reverse values)))
+                          (mapcar #'github--commit-entry
+                                  (if max-items
+                                      (seq-take newest-first max-items)
+                                    newest-first))))))
+     ;; no max-items here: the cap must apply after reversing
+     nil)))
+
 (defun github-pull-request-stats (full-name number &optional pr)
   "Return a plist (:files :added :removed :commits :file-list) for a PR.
 :file-list is fetched separately via `/pulls/{number}/files' -- the PR

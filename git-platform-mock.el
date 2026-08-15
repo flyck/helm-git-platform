@@ -802,6 +802,35 @@ discard an approval."
 (cl-defmethod gp--commit-message ((_ git-platform-mock) _full-name hash)
   (or (cdr (assoc hash gp-mock--commit-messages)) "Demo commit"))
 
+(cl-defmethod gp--pull-request-commits-async ((_ git-platform-mock) full-name id callback
+                                              &optional max-items)
+  "Synthesize a PR's commit list from the mock db.
+The newest entry is the PR's real head commit (so the detail view's
+commits and pipelines agree on it); older ones are derived filler,
+enough to exercise rendering and the max-items cap."
+  (let* ((row (car (sqlite-select
+                    (gp-mock--db)
+                    "SELECT source_commit, commit_count, updated_on FROM prs
+                     WHERE full_name = ? AND id = ?"
+                    (list full-name id))))
+         (head (nth 0 row))
+         (n (max 1 (or (nth 1 row) 1)))
+         (commits '()))
+    (dotimes (i n)
+      (let ((hash (if (zerop i)
+                      head
+                    ;; stable, obviously-fake hashes for the older entries
+                    (format "%012x" (+ #xc0ffee00 (* 4099 i))))))
+        (push (list :hash hash
+                    :summary (if (zerop i)
+                                 (gp--commit-message (git-platform-backend) full-name hash)
+                               (format "Earlier work on this branch (%d)" i))
+                    :author (if (cl-evenp i) "Ada Lovelace" "Grace Hopper")
+                    :date (nth 2 row))
+              commits)))
+    (setq commits (nreverse commits))
+    (funcall callback (if max-items (seq-take commits max-items) commits))))
+
 (defun gp-mock--commit-statuses (hash)
   "Return the build-status strings for commit HASH across all mock PRs."
   (let (states)

@@ -189,6 +189,12 @@ while it runs, historical once finished).
 > streamed (so "live" means polled). Requires a token with **Pipelines: Read**,
 > plus **Pipelines: Write** for stop/trigger/manual-run.
 
+It also lists the PR's **commits** (newest first, with author and age). `RET` or `v` on one opens
+just that commit in Magit — its own message and diff, rather than the whole-branch diff `d` gives.
+The branch is checked out on demand, and a commit the local clone has not fetched yet triggers a
+fetch before it gives up. Cap the list with `gp-detail-max-commits` (50 by default) or start the
+section folded with `gp-detail-commits-collapsed`.
+
 ## Limitations
 
 - **Bitbucket Cloud and GitHub are supported today**; the code sits behind a backend protocol

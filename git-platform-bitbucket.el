@@ -82,6 +82,8 @@
   (bitbucket-repo-open-pr-count full-name))
 (cl-defmethod gp--repo-pull-requests ((_ git-platform-bitbucket) full-name &optional state)
   (bitbucket-repo-pull-requests full-name state))
+(cl-defmethod gp--pull-request-commits-async ((_ git-platform-bitbucket) full-name id callback &optional max-items)
+  (bitbucket-pull-request-commits-async full-name id callback max-items))
 (cl-defmethod gp--commit-build-states ((_ git-platform-bitbucket) full-name hash)
   (bitbucket-commit-build-states full-name hash))
 (cl-defmethod gp--resolve-mentions ((_ git-platform-bitbucket) text)

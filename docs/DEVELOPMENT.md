@@ -149,11 +149,12 @@ actions uppercase; buttons are clickable):
 
 | Key | Action |
 |---|---|
-| `RET` | Open the changed file / jump to comment line / fold |
+| `RET` | Open the changed file / show the commit / jump to comment line / fold |
 | `TAB` | Fold or unfold the section at point |
 | `b` | Back to the PR list |
 | `o` | Autostash & checkout the PR branch, then open the repo |
 | `d` | Show the branch diff in Magit (no checkout) |
+| `v` | Show just the commit at point in Magit (single-commit revision buffer) |
 | `w` | View the PR in the browser |
 | `i` | Overlay this PR's inline comments onto its local files |
 | `e` | Edit your own comment at point |

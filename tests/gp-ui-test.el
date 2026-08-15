@@ -17,6 +17,7 @@
 (require 'bitbucket-mock)
 (require 'github-mock)
 (require 'git-platform-github)
+(require 'git-platform-bitbucket)   ;; `git-platform-bitbucket' constructor, used below
 
 (defun gp-test--mock-prs ()
   (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json")))
@@ -123,6 +124,85 @@
                                   (substring-no-properties (buffer-string)))))))))
 
 ;;;; In-place action spinner (no layout shift while a mutation is in flight)
+
+;;;; Commits section ----------------------------------------------------------
+
+(defconst gp-test--commits
+  '((:hash "87c8054110c84d42edc3a4e89184ffd1a15d3a8d"
+     :summary "fix indentation of the wscat script"
+     :author "Felix Brilej" :date "2026-07-15T17:28:26+00:00")
+    (:hash "1a2b3c4d5e6f7788990011223344556677889900"
+     :summary "add GraphQL subscription example"
+     :author "Ada Lovelace" :date "2026-07-14T09:00:00+00:00"))
+  "Two normalised commit plists, as the backends produce them.")
+
+(defun gp-test--render-commits (commits)
+  "Render COMMITS into a temp detail buffer; return its text."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (setq gp--detail-commits commits)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (gp--insert-commits)))
+    (substring-no-properties (buffer-string))))
+
+(ert-deftest gp-test-detail-commits-render ()
+  "Each commit renders as short hash + summary + author + relative date."
+  (let ((text (gp-test--render-commits gp-test--commits)))
+    (should (string-match-p "Commits (2)" text))
+    ;; abbreviated, not the full 40-char hash
+    (should (string-match-p "87c80541" text))
+    (should-not (string-match-p "87c8054110c84d42" text))
+    (should (string-match-p "fix indentation of the wscat script" text))
+    (should (string-match-p "Felix Brilej" text))
+    (should (string-match-p "Ada Lovelace" text))))
+
+(ert-deftest gp-test-detail-commits-empty-is-noop ()
+  "No commits -> no section at all (not an empty heading)."
+  (should (equal (gp-test--render-commits nil) "")))
+
+(ert-deftest gp-test-detail-commits-are-sections-carrying-their-plist ()
+  "Each commit line is its own section whose value is the commit plist.
+`gp-detail-show-commit' reads the hash off that value, so losing it
+would break RET on a commit."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (setq gp--detail-commits gp-test--commits)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (gp--insert-commits)))
+    (let ((secs (gp-test--all-sections magit-root-section)))
+      (let ((commit-secs (cl-remove-if-not
+                          (lambda (s) (object-of-class-p s 'gp-commit-section))
+                          secs)))
+        (should (= (length commit-secs) 2))
+        (should (equal (plist-get (oref (car commit-secs) value) :hash)
+                       "87c8054110c84d42edc3a4e89184ffd1a15d3a8d"))))))
+
+(ert-deftest gp-test-detail-ret-on-commit-shows-commit ()
+  "RET on a commit section opens that commit, not the section fold."
+  (let ((called nil))
+    (cl-letf (((symbol-function 'magit-current-section)
+               (lambda () (let ((s (gp-commit-section)))
+                            (oset s value (car gp-test--commits)) s)))
+              ((symbol-function 'gp-detail-show-commit)
+               (lambda () (interactive) (setq called t)))
+              ((symbol-function 'magit-section-toggle)
+               (lambda (&rest _) (interactive) (setq called 'toggled))))
+      (gp-detail-ret)
+      (should (eq called t)))))
+
+(ert-deftest gp-test-detail-show-commit-errors-off-a-commit ()
+  "Away from a commit section it reports rather than acting on nothing."
+  (cl-letf (((symbol-function 'magit-current-section) (lambda () nil)))
+    (should-error (gp-detail-show-commit) :type 'user-error)))
+
+(ert-deftest gp-test-detail-show-commit-is-bound-to-a-lowercase-key ()
+  "Read-only actions stay lowercase; capitals are reserved for writes."
+  (should (eq (lookup-key gp-detail-mode-map "v") #'gp-detail-show-commit))
+  ;; the write keys keep their meaning
+  (should (eq (lookup-key gp-detail-mode-map "R") #'gp-detail-reply))
+  (should (eq (lookup-key gp-detail-mode-map "K") #'gp-detail-delete)))
 
 (ert-deftest gp-test-detail-run-action-shows-spinner-during-thunk ()
   "While `gp--detail-run-action's THUNK is running, the buffer already
