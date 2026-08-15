@@ -151,6 +151,58 @@ the steps."
       ;; the summary is the first line of the mocked commit message
       (should (equal (cdr (car recent)) "Fix the widget toggle")))))
 
+(ert-deftest gp-test-pipeline-fetch-async-matches-sync ()
+  "The async fetch produces exactly the shape the synchronous one does.
+The detail view polls the async twin every few seconds; if the two
+ever diverge, the rendered section silently changes with them."
+  (bitbucket-mock-with-service
+    (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+           (gp-cache-ttl 0)             ;; no warm commit-message cache either way
+           (sync (gp-pipeline-fetch-for-pr pr))
+           (async 'unset))
+      (gp-pipeline-fetch-for-pr-async pr (lambda (d) (setq async d)))
+      (should-not (eq async 'unset))    ;; the callback actually ran
+      (should (equal async sync)))))
+
+(ert-deftest gp-test-pipeline-fetch-async-fans-out-steps-and-summaries ()
+  "Async fetch resolves steps per current run and a summary per recent run."
+  (bitbucket-mock-with-service
+    (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+           (gp-cache-ttl 0)
+           (data nil))
+      (gp-pipeline-fetch-for-pr-async pr (lambda (d) (setq data d)))
+      (let ((current (plist-get data :current))
+            (recent (plist-get data :recent)))
+        (should (= (length current) 2))
+        ;; every current run got its steps fanned out and folded back in
+        (should (cl-every (lambda (pp) (consp pp)) current))
+        (should (= (length (cdr (car current))) 3))
+        ;; the recent run got its commit message resolved to a summary
+        (should (= (length recent) 1))
+        (should (equal (cdr (car recent)) "Fix the widget toggle"))))))
+
+(ert-deftest gp-test-pipeline-fetch-async-reports-nil-on-failed-branch-fetch ()
+  "A failed branch fetch calls back with nil (caller keeps its stale data)."
+  (bitbucket-mock-with-service
+    (let ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+          (called nil)
+          (data 'unset))
+      (cl-letf (((symbol-function 'bitbucket-api-paged-async)
+                 (lambda (_path &optional _params callback _max)
+                   (funcall callback nil nil))))
+        (gp-pipeline-fetch-for-pr-async pr (lambda (d) (setq called t data d))))
+      (should called)
+      (should (null data)))))
+
+(ert-deftest gp-test-pipeline-fetch-async-fires-callback-once ()
+  "The fan-out counter must settle exactly once, not once per sub-fetch."
+  (bitbucket-mock-with-service
+    (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+           (gp-cache-ttl 0)
+           (calls 0))
+      (gp-pipeline-fetch-for-pr-async pr (lambda (_) (setq calls (1+ calls))))
+      (should (= calls 1)))))
+
 (ert-deftest gp-test-commit-summary-first-line ()
   (should (equal (gp-commit-summary "first line\nsecond") "first line"))
   (should (equal (gp-commit-summary "  spaced  \nx") "spaced"))

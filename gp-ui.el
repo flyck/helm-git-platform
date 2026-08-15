@@ -1521,42 +1521,50 @@ live deployment without a manual refresh."
             (if (not (buffer-live-p buf))
                 (gp-log 'info "pipelines: buffer gone before load timer fired")
               (condition-case e
-                  (let ((data (gp-pipeline-fetch-for-pr pr)))
-                    (unless (equal data (buffer-local-value 'gp--detail-pipelines buf))
-                      (gp-log 'info "pipelines: fetched %d current / %d recent"
-                              (length (plist-get data :current))
-                              (length (plist-get data :recent))))
-                    (with-current-buffer buf
-                      ;; `gp-pipeline-fetch-for-pr' returns nil on ANY error (it can't
-                      ;; tell a transient API hiccup from a genuinely pipeline-less
-                      ;; PR).  So an empty result must NOT clobber pipelines we already
-                      ;; have -- otherwise a flaky refetch/poll blanks the section
-                      ;; until the next successful fetch.  Keep the old data instead;
-                      ;; only adopt an empty result on a first-ever load.
-                      (let ((keep (and (gp--detail-pipelines-empty-p data)
-                                       (not (gp--detail-pipelines-empty-p
-                                             gp--detail-pipelines))))
-                            ;; a 1s watch tick usually returns identical data --
-                            ;; skip the rerender then so point/folding stay put
-                            (changed (not (equal data gp--detail-pipelines))))
-                        (unless keep
-                          (setq gp--detail-pipelines data)
-                          (when changed (gp--detail-rerender buf)))
-                        (gp--detail-cancel-pipeline-timer)
-                        ;; keep polling against whatever we're actually showing
-                        ;; (`visible' -> any frame, not just the selected one)
-                        (pcase (gp--detail-pipeline-poll-mode
-                                gp--detail-pipelines (get-buffer-window buf 'visible))
-                          ('poll
-                           (setq gp--detail-pipeline-timer
-                                 (run-with-timer
-                                  gp-detail-pipeline-poll-interval nil
-                                  #'gp--detail-load-pipelines buf pr)))
-                          ('watch
-                           (setq gp--detail-pipeline-timer
-                                 (run-with-timer
-                                  gp-detail-pipeline-watch-interval nil
-                                  #'gp--detail-pipeline-watch-tick buf)))))))
+                  ;; Async: a synchronous fetch here blocks Emacs's main thread
+                  ;; for the branch fetch plus one step fetch per current run --
+                  ;; once every `gp-detail-pipeline-poll-interval' seconds, which
+                  ;; is exactly the periodic freeze this replaced.
+                  (gp-pipeline-fetch-for-pr-async
+                   pr
+                   (lambda (data)
+                     (when (buffer-live-p buf)
+                       (unless (equal data (buffer-local-value 'gp--detail-pipelines buf))
+                         (gp-log 'info "pipelines: fetched %d current / %d recent"
+                                 (length (plist-get data :current))
+                                 (length (plist-get data :recent))))
+                       (with-current-buffer buf
+                         ;; The fetch reports nil on ANY error (it can't tell a
+                         ;; transient API hiccup from a genuinely pipeline-less
+                         ;; PR).  So an empty result must NOT clobber pipelines we
+                         ;; already have -- otherwise a flaky refetch/poll blanks
+                         ;; the section until the next successful fetch.  Keep the
+                         ;; old data instead; only adopt an empty result on a
+                         ;; first-ever load.
+                         (let ((keep (and (gp--detail-pipelines-empty-p data)
+                                          (not (gp--detail-pipelines-empty-p
+                                                gp--detail-pipelines))))
+                               ;; a 1s watch tick usually returns identical data --
+                               ;; skip the rerender then so point/folding stay put
+                               (changed (not (equal data gp--detail-pipelines))))
+                           (unless keep
+                             (setq gp--detail-pipelines data)
+                             (when changed (gp--detail-rerender buf)))
+                           (gp--detail-cancel-pipeline-timer)
+                           ;; keep polling against whatever we're actually showing
+                           ;; (`visible' -> any frame, not just the selected one)
+                           (pcase (gp--detail-pipeline-poll-mode
+                                   gp--detail-pipelines (get-buffer-window buf 'visible))
+                             ('poll
+                              (setq gp--detail-pipeline-timer
+                                    (run-with-timer
+                                     gp-detail-pipeline-poll-interval nil
+                                     #'gp--detail-load-pipelines buf pr)))
+                             ('watch
+                              (setq gp--detail-pipeline-timer
+                                    (run-with-timer
+                                     gp-detail-pipeline-watch-interval nil
+                                     #'gp--detail-pipeline-watch-tick buf)))))))))
                 (error
                  (gp-log-error "pipeline load failed: %s"
                                (error-message-string e)))))))))

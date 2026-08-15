@@ -31,6 +31,10 @@
 
 (declare-function gp-pr-full-name "git-platform")
 (declare-function gp-pr-source-branch "git-platform")
+;; `gp-defop' defines these at load time, so the compiler cannot see them
+(declare-function gp-pipelines-for-branch-async "git-platform")
+(declare-function gp-pipeline-steps-async "git-platform")
+(declare-function gp-commit-message-async "git-platform")
 
 (defvar gp--pr)                         ;; the detail buffer's PR (gp-ui.el)
 (declare-function gp-detail-refresh "gp-ui")
@@ -324,6 +328,39 @@ list of prior-commit pipelines shown as a one-line status summary."
 
 ;;;; Fetching (network, via the protocol) --------------------------------------
 
+(defun gp-pipeline--partition (all commit)
+  "Split ALL pipelines into (CURRENT . RECENT) around head COMMIT.
+Paged fetches can duplicate a run when a new pipeline starts
+mid-pagination (the pages shift) -- dedupe by uuid first."
+  (let* ((all (cl-remove-duplicates all
+                                    :key (lambda (p) (alist-get 'uuid p))
+                                    :test #'equal
+                                    :from-end t))
+         (current (gp-pipelines-match-commit all commit))
+         (current-uuids (mapcar (lambda (p) (alist-get 'uuid p)) current)))
+    (cons current
+          (cl-remove-if (lambda (p) (member (alist-get 'uuid p) current-uuids))
+                        all))))
+
+(defun gp-pipeline--assemble (current steps-of recent summaries)
+  "Build the (:current … :recent …) plist from fetched parts.
+STEPS-OF maps a pipeline uuid to its steps; SUMMARIES maps a commit
+hash to its commit message."
+  (let ((counts (make-hash-table :test 'equal)))
+    (dolist (p current)
+      (puthash (alist-get 'uuid p)
+               (length (gethash (alist-get 'uuid p) steps-of))
+               counts))
+    (list :current
+          (mapcar (lambda (p)
+                    (cons p (gethash (alist-get 'uuid p) steps-of)))
+                  (gp-pipelines-sort current counts))
+          :recent
+          (mapcar (lambda (p)
+                    (cons p (gp-commit-summary
+                             (gethash (gp-pipeline-commit p) summaries))))
+                  recent))))
+
 (defun gp-pipeline-fetch-for-pr (pr)
   "Return pipeline data for PR as a plist (:current ALIST :recent LIST).
 
@@ -339,41 +376,87 @@ any error (the detail view degrades gracefully; the error is logged)."
     (let* ((full-name (gp-pr-full-name pr))
            (branch (gp-pr-source-branch pr))
            (commit (gp-pr-source-commit pr))
-           ;; one branch fetch; partition into current-commit vs the rest.
-           ;; Paged fetches can duplicate a run when a new pipeline starts
-           ;; mid-pagination (the pages shift) -- dedupe by uuid.
-           (all (cl-remove-duplicates
-                 (gp-pipelines-for-branch full-name branch gp-pipeline-max)
-                 :key (lambda (p) (alist-get 'uuid p))
-                 :test #'equal
-                 :from-end t))
-           (current (gp-pipelines-match-commit all commit))
-           (current-uuids (mapcar (lambda (p) (alist-get 'uuid p)) current))
-           (recent (cl-remove-if
-                    (lambda (p) (member (alist-get 'uuid p) current-uuids))
-                    all))
+           ;; one branch fetch; partition into current-commit vs the rest
+           (split (gp-pipeline--partition
+                   (gp-pipelines-for-branch full-name branch gp-pipeline-max)
+                   commit))
+           (current (car split))
+           (recent (seq-take (cdr split) gp-pipeline-recent-max))
            (steps-of (make-hash-table :test 'equal))
-           (counts (make-hash-table :test 'equal)))
+           (summaries (make-hash-table :test 'equal)))
       (dolist (p current)
-        (let* ((uuid (alist-get 'uuid p))
-               (steps (gp-pipeline-steps full-name uuid)))
-          (puthash uuid steps steps-of)
-          (puthash uuid (length steps) counts)))
-      (list :current
-            (mapcar (lambda (p)
-                      (cons p (gethash (alist-get 'uuid p) steps-of)))
-                    (gp-pipelines-sort current counts))
-            :recent
-            ;; attach each run's commit summary (one extra lookup per run,
-            ;; cached) so the renderer needs no network access
-            (mapcar (lambda (p)
-                      (cons p (gp-commit-summary
-                               (gp-commit-message
-                                full-name (gp-pipeline-commit p)))))
-                    (seq-take recent gp-pipeline-recent-max))))
+        (let ((uuid (alist-get 'uuid p)))
+          (puthash uuid (gp-pipeline-steps full-name uuid) steps-of)))
+      ;; attach each run's commit summary (one extra lookup per run,
+      ;; cached) so the renderer needs no network access
+      (dolist (p recent)
+        (let ((hash (gp-pipeline-commit p)))
+          (puthash hash (gp-commit-message full-name hash) summaries)))
+      (gp-pipeline--assemble current steps-of recent summaries))
     (error
      (gp-log-error "pipeline fetch failed: %s" (error-message-string e))
      nil)))
+
+(defun gp-pipeline-fetch-for-pr-async (pr callback)
+  "Fetch PR's pipeline data asynchronously; CALLBACK gets the plist.
+Non-blocking twin of `gp-pipeline-fetch-for-pr', producing the exact
+same (:current … :recent …) shape.  This is what the detail view
+polls: the synchronous version blocks Emacs's main thread for the
+whole branch fetch + one step fetch per current-commit run, which
+froze the UI once per poll interval.
+
+The fan-outs (steps per current run, commit message per recent run)
+run concurrently and a shared counter fires CALLBACK once the last
+one lands.  CALLBACK gets nil if the branch fetch itself failed --
+the caller treats that like the synchronous nil (keeps stale data)."
+  (let ((full-name (gp-pr-full-name pr))
+        (branch (gp-pr-source-branch pr))
+        (commit (gp-pr-source-commit pr)))
+    (gp-pipelines-for-branch-async
+     full-name branch gp-pipeline-max nil
+     (lambda (all)
+       (condition-case e
+           (if (null all)
+               ;; nil means the fetch failed OR the branch genuinely has no
+               ;; runs; both are reported as an empty result, exactly as the
+               ;; synchronous path did.
+               (funcall callback nil)
+             (let* ((split (gp-pipeline--partition all commit))
+                    (current (car split))
+                    (recent (seq-take (cdr split) gp-pipeline-recent-max))
+                    (steps-of (make-hash-table :test 'equal))
+                    (summaries (make-hash-table :test 'equal))
+                    ;; one tick per step fetch and per commit-message lookup
+                    (pending (+ (length current) (length recent)))
+                    (done nil))
+               (cl-flet ((settle ()
+                           (setq pending (1- pending))
+                           (when (and (<= pending 0) (not done))
+                             (setq done t)
+                             (funcall callback
+                                      (gp-pipeline--assemble
+                                       current steps-of recent summaries)))))
+                 (if (zerop pending)
+                     ;; runs exist but none current and none recent
+                     (funcall callback (gp-pipeline--assemble
+                                        current steps-of recent summaries))
+                   (dolist (p current)
+                     (let ((uuid (alist-get 'uuid p)))
+                       (gp-pipeline-steps-async
+                        full-name uuid
+                        (lambda (steps)
+                          (puthash uuid steps steps-of)
+                          (settle)))))
+                   (dolist (p recent)
+                     (let ((hash (gp-pipeline-commit p)))
+                       (gp-commit-message-async
+                        full-name hash
+                        (lambda (msg)
+                          (puthash hash msg summaries)
+                          (settle)))))))))
+         (error
+          (gp-log-error "pipeline fetch failed: %s" (error-message-string e))
+          (funcall callback nil)))))))
 
 (defun gp-pipelines-match-commit (pipelines commit)
   "Return PIPELINES whose target commit matches COMMIT (delegates to backend)."

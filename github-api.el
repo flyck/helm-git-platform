@@ -1137,6 +1137,25 @@ status-posting integration/check enabled."
       (let-alist (github-api-request "GET" (format "/repos/%s/commits/%s" full-name hash))
         .commit.message))))
 
+(defun github-commit-message-async (full-name hash callback)
+  "Fetch the commit message for HASH in FULL-NAME; CALLBACK gets it (or nil).
+Non-blocking twin of `github-commit-message'.  Commit messages are
+immutable, so the result is cached under the same key shape the
+Bitbucket side uses; a warm entry calls CALLBACK synchronously."
+  (if (not (and full-name hash))
+      (funcall callback nil)
+    (let* ((key (list 'commit-msg full-name hash))
+           (hit (gp-cache-get key)))
+      (if (car hit)
+          (funcall callback (cdr hit))
+        (github-api-get-async
+         (format "/repos/%s/commits/%s" full-name hash)
+         nil
+         (lambda (parsed)
+           (let ((msg (and parsed (let-alist parsed .commit.message))))
+             (when msg (gp-cache-put key msg))
+             (funcall callback msg))))))))
+
 (defun github-commit-summary (message)
   "Return the first non-empty line of commit MESSAGE, trimmed, or \"\"."
   (if (not message) "" (string-trim (car (split-string message "\n" t)))))
@@ -1166,12 +1185,37 @@ When COMMIT is non-nil, only runs whose head sha matches it are kept."
       (or max-items 20))
      commit)))
 
+(defun github-pipelines-for-branch-async (full-name branch max-items commit callback)
+  "Fetch workflow runs in FULL-NAME for BRANCH; CALLBACK gets them (or nil).
+Non-blocking twin of `github-pipelines-for-branch'."
+  (if (not (and full-name branch))
+      (funcall callback nil)
+    (github-api-paged-async
+     (format "/repos/%s/actions/runs" full-name)
+     `(("branch" . ,branch))
+     (lambda (ok values)
+       (funcall callback
+                (and ok (github-pipelines-match-commit values commit))))
+     (or max-items 20))))
+
 (defun github-pipeline-steps (full-name run-id)
   "Return the jobs of workflow RUN-ID in FULL-NAME, in order.
 Mapped 1:1 to Bitbucket \"steps\" -- see the Commentary/CI note above."
   (when (and full-name run-id)
     (alist-get 'jobs
                (github-api-request "GET" (format "/repos/%s/actions/runs/%s/jobs" full-name run-id)))))
+
+(defun github-pipeline-steps-async (full-name run-id callback)
+  "Fetch the jobs of workflow RUN-ID in FULL-NAME; CALLBACK gets them (or nil).
+Non-blocking twin of `github-pipeline-steps'.  `github--unwrap-page'
+already unwraps the `jobs' envelope, so the collected values are the
+job list itself."
+  (if (not (and full-name run-id))
+      (funcall callback nil)
+    (github-api-paged-async
+     (format "/repos/%s/actions/runs/%s/jobs" full-name run-id)
+     nil
+     (lambda (ok values) (funcall callback (and ok values))))))
 
 (defun github-pipeline-stop (full-name run-id)
   "Cancel workflow RUN-ID in FULL-NAME."

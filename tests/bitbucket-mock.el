@@ -106,9 +106,29 @@ Dispatches on PATH to a fixture.  Records the call and honours
           "--- a/file.txt\n+++ b/file.txt\n"
           "@@ -1,1 +1,1 @@\n-old\n+new\n"))
 
+(defun bitbucket-mock-get-async (path params callback)
+  "Mock implementation of `bitbucket-api-get-async'.
+Serves the same fixtures as `bitbucket-mock-request' and calls
+CALLBACK immediately -- the tests stay synchronous, so a caller that
+assumed \"async means later\" would fail here, which is deliberate:
+the live code must tolerate an immediate callback (a warm
+commit-message cache does exactly that)."
+  (funcall callback (ignore-errors (bitbucket-mock-request "GET" path params))))
+
+(defun bitbucket-mock-paged-async (path &optional params callback max-items)
+  "Mock implementation of `bitbucket-api-paged-async'.
+Serves one fixture page and reports (OK VALUES), honouring MAX-ITEMS."
+  (let* ((page (ignore-errors (bitbucket-mock-request "GET" path params)))
+         (values (alist-get 'values page)))
+    (when (and max-items values (> (length values) max-items))
+      (setq values (seq-take values max-items)))
+    (funcall callback (and page t) values)))
+
 (defmacro bitbucket-mock-with-service (&rest body)
   "Run BODY with the Bitbucket API replaced by the mock service.
-Seeds credentials and workspace, clears caches and the call log."
+Seeds credentials and workspace, clears caches and the call log.
+Both the synchronous choke-point (`bitbucket-api-request') and the
+async ones are mocked, so async callers hit fixtures too."
   (declare (indent 0) (debug t))
   `(let ((bitbucket-user-email "ada@example.com")
          (bitbucket-api-token "mock-token")
@@ -117,6 +137,8 @@ Seeds credentials and workspace, clears caches and the call log."
          (bitbucket-mock-calls nil))
      (clrhash bitbucket--mention-cache)
      (cl-letf (((symbol-function 'bitbucket-api-request) #'bitbucket-mock-request)
+               ((symbol-function 'bitbucket-api-get-async) #'bitbucket-mock-get-async)
+               ((symbol-function 'bitbucket-api-paged-async) #'bitbucket-mock-paged-async)
                ((symbol-function 'bitbucket-pull-request-diff) #'bitbucket-mock-diff))
        ,@body)))
 

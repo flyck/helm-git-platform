@@ -1075,6 +1075,27 @@ Repositories:Read)."
                      (format "/repositories/%s/commit/%s" full-name hash)
                      '(("fields" . "message")))))))))
 
+(defun bitbucket-commit-message-async (full-name hash callback)
+  "Fetch the commit message for HASH in FULL-NAME; CALLBACK gets it (or nil).
+Shares `bitbucket-commit-message's cache, so a warm entry answers
+without any network round-trip -- CALLBACK is then invoked directly,
+NOT deferred to a timer (callers must tolerate a synchronous call)."
+  (if (not (and full-name hash))
+      (funcall callback nil)
+    (let* ((key (list 'commit-msg full-name hash))
+           (hit (gp-cache-get key)))
+      (if (car hit)
+          (funcall callback (cdr hit))
+        (bitbucket-api-get-async
+         (format "/repositories/%s/commit/%s" full-name hash)
+         '(("fields" . "message"))
+         (lambda (parsed)
+           (let ((msg (and parsed (alist-get 'message parsed))))
+             ;; only cache a real answer: caching nil would pin a transient
+             ;; failure for the whole TTL
+             (when msg (gp-cache-put key msg))
+             (funcall callback msg))))))))
+
 (defun bitbucket-commit-summary (message)
   "Return the first non-empty line of commit MESSAGE, trimmed, or \"\"."
   (if (not message)
@@ -1110,11 +1131,36 @@ current head commit, not every run on the branch.  Caps the
       (or max-items 20))
      commit)))
 
+(defun bitbucket-pipelines-for-branch-async (full-name branch max-items commit callback)
+  "Fetch pipelines in FULL-NAME for BRANCH; CALLBACK gets the list (or nil).
+Non-blocking twin of `bitbucket-pipelines-for-branch', with the same
+COMMIT filter and MAX-ITEMS cap applied to the fetched set."
+  (if (not (and full-name branch))
+      (funcall callback nil)
+    (bitbucket-api-paged-async
+     (format "/repositories/%s/pipelines" full-name)
+     `(("sort" . "-created_on")
+       ("target.ref_name" . ,branch))
+     (lambda (ok values)
+       (funcall callback
+                (and ok (bitbucket-pipelines-match-commit values commit))))
+     (or max-items 20))))
+
 (defun bitbucket-pipeline-steps (full-name pipeline-uuid)
   "Return the steps of PIPELINE-UUID in FULL-NAME, in execution order."
   (when (and full-name pipeline-uuid)
     (bitbucket-api-paged
      (format "/repositories/%s/pipelines/%s/steps" full-name pipeline-uuid))))
+
+(defun bitbucket-pipeline-steps-async (full-name pipeline-uuid callback)
+  "Fetch the steps of PIPELINE-UUID in FULL-NAME; CALLBACK gets them (or nil).
+Non-blocking twin of `bitbucket-pipeline-steps'."
+  (if (not (and full-name pipeline-uuid))
+      (funcall callback nil)
+    (bitbucket-api-paged-async
+     (format "/repositories/%s/pipelines/%s/steps" full-name pipeline-uuid)
+     nil
+     (lambda (ok values) (funcall callback (and ok values))))))
 
 (defun bitbucket-pipeline-stop (full-name pipeline-uuid)
   "Signal a stop of PIPELINE-UUID in FULL-NAME (all incomplete steps).

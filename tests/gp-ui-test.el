@@ -474,6 +474,32 @@ leave no entry point for adding the first reviewer."
         (should (= cancelled 1))
         (should (eq gp--detail-pipeline-timer stub))))))
 
+(ert-deftest gp-test-pipeline-load-never-blocks ()
+  "The poll path must use the async fetch, never the blocking one.
+Regression: `gp--detail-load-pipelines' called `gp-pipeline-fetch-for-pr'
+synchronously, so every `gp-detail-pipeline-poll-interval' seconds it
+froze Emacs for a branch fetch plus one step fetch per current run --
+a visible stall once per interval in any open detail buffer."
+  (let* ((pr '((id . 1) (source (branch (name . "b")) (commit (hash . "c")))))
+         (blocking-calls 0)
+         (async-calls 0)
+         (thunk nil))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (cl-letf (((symbol-function 'gp-pipeline-fetch-for-pr)
+                 (lambda (&rest _) (setq blocking-calls (1+ blocking-calls)) nil))
+                ((symbol-function 'gp-pipeline-fetch-for-pr-async)
+                 (lambda (_pr cb) (setq async-calls (1+ async-calls))
+                   (funcall cb '(:current nil :recent nil))))
+                ;; capture the deferred body instead of waiting on a real timer
+                ((symbol-function 'run-at-time)
+                 (lambda (_secs _rep fn &rest _) (setq thunk fn) (timer-create))))
+        (gp--detail-load-pipelines (current-buffer) pr)
+        (should thunk)
+        (funcall thunk)
+        (should (= async-calls 1))
+        (should (= blocking-calls 0))))))
+
 (ert-deftest gp-test-comment-threads-orphan-parent ()
   "A reply whose parent isn't in the set is treated as a root."
   (let ((threads (gp--comment-threads

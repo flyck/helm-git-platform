@@ -683,6 +683,20 @@ discard an approval."
     (when max-items (setq pipelines (seq-take pipelines max-items)))
     (bitbucket-pipelines-match-commit pipelines commit)))
 
+;; The mock reads a local sqlite db, so there is nothing to defer: the async
+;; twins just answer straight away.  Callers must already tolerate a
+;; synchronous callback (a warm commit-message cache does the same live).
+(cl-defmethod gp--pipelines-for-branch-async ((backend git-platform-mock) full-name branch
+                                              max-items commit callback)
+  (funcall callback
+           (gp--pipelines-for-branch backend full-name branch max-items commit)))
+
+(cl-defmethod gp--pipeline-steps-async ((backend git-platform-mock) full-name pipeline-uuid callback)
+  (funcall callback (gp--pipeline-steps backend full-name pipeline-uuid)))
+
+(cl-defmethod gp--commit-message-async ((backend git-platform-mock) full-name hash callback)
+  (funcall callback (gp--commit-message backend full-name hash)))
+
 (cl-defmethod gp--pipeline-steps ((_ git-platform-mock) _full-name pipeline-uuid)
   (pcase pipeline-uuid
     ("{mock-pipe-101}" (gp-mock--p101-steps))

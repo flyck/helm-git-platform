@@ -178,8 +178,25 @@ implementation is the identity function.")
 ;;;; CI pipelines --------------------------------------------------------------
 (gp-defop pipelines-for-branch (full-name branch &optional max-items commit)
   "Return CI pipelines in FULL-NAME for BRANCH (filtered to COMMIT if given).")
+(gp-defop pipelines-for-branch-async (full-name branch max-items commit callback)
+  "Fetch CI pipelines in FULL-NAME for BRANCH asynchronously.
+CALLBACK gets the list of pipelines (filtered to COMMIT if given),
+or nil on error.  Non-blocking twin of `gp-pipelines-for-branch':
+the detail view polls this every few seconds, and a synchronous
+fetch there freezes Emacs for the whole round-trip.")
 (gp-defop pipeline-steps (full-name pipeline-uuid)
   "Return the steps of PIPELINE-UUID in FULL-NAME, in order.")
+(gp-defop pipeline-steps-async (full-name pipeline-uuid callback)
+  "Fetch the steps of PIPELINE-UUID in FULL-NAME asynchronously.
+CALLBACK gets the list of steps, or nil on error.  Non-blocking twin
+of `gp-pipeline-steps'; the polling detail view fans one of these out
+per current-commit pipeline, so they must not block.")
+(gp-defop commit-message-async (full-name hash callback)
+  "Fetch the commit message for HASH in FULL-NAME asynchronously.
+CALLBACK gets the message string, or nil.  Non-blocking twin of
+`gp-commit-message'.  Results are cached (commit messages are
+immutable), so a warm cache answers without touching the network --
+but the first poll must not block on it either.")
 (gp-defop pipeline-stop (full-name pipeline-uuid)
   "Stop running PIPELINE-UUID in FULL-NAME (pipeline-level).")
 (gp-defop pipeline-trigger (full-name branch &optional selector variables)
