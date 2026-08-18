@@ -280,6 +280,33 @@ original (chronological) order."
         (walk root 0)))
     (nreverse result)))
 
+(defun gp--comment-thread-resolved-p (comment by-id)
+  "Return non-nil if COMMENT or any ancestor of it is resolved.
+BY-ID maps comment id -> comment, for walking `parent.id' links.
+
+A reply's own `resolution' is usually unset even when its thread has
+been resolved: Bitbucket only sets it on the comment the resolve
+action targeted, normally the thread root.  Testing a reply on its own
+therefore leaves it expanded under a collapsed root, which is exactly
+the noise collapsing resolved threads is meant to remove.  Mirrors
+`gp-overlay--comment-thread-resolved-p', which solves the same problem
+for the overlay layer.  The `seen' guard keeps a cyclic parent chain
+from looping forever."
+  (let ((c comment) (seen (make-hash-table :test 'eql)))
+    (catch 'done
+      (while c
+        (when (gp-comment-resolved-p c) (throw 'done t))
+        (let ((id (alist-get 'id c)))
+          (when (gethash id seen) (throw 'done nil))
+          (puthash id t seen))
+        (setq c (let-alist c (and .parent.id (gethash .parent.id by-id)))))
+      nil)))
+
+(defun gp--comments-by-id (comments)
+  "Return a hash table of comment id -> comment for COMMENTS."
+  (let ((h (make-hash-table :test 'eql)))
+    (dolist (c comments h) (puthash (alist-get 'id c) c h))))
+
 (defun gp--detail-comment-marked-p (comment)
   "Return non-nil when COMMENT is marked for batch terminal handoff."
   (memq (alist-get 'id comment) gp--detail-marked-comment-ids))
@@ -290,20 +317,31 @@ original (chronological) order."
     (cl-remove-if-not (lambda (comment) (memq (alist-get 'id comment) ids))
                       gp--detail-comments)))
 
-(defun gp--insert-comment (comment &optional pr depth)
+(defun gp--insert-comment (comment &optional pr depth by-id)
   "Insert a COMMENT section, with markdown body and action buttons.
 PR is the enclosing pull request, needed for the reply/resolve
 actions.  DEPTH (default 0) indents the whole comment to visualise
-reply threads."
+reply threads.  BY-ID, when given, maps comment id -> comment so a
+reply can be collapsed along with the thread it belongs to (see
+`gp--comment-thread-resolved-p').
+
+Resolved-ness and collapsing are deliberately separate: only the
+comment the resolve action targeted is actually resolved -- Bitbucket
+cannot resolve or unresolve a reply -- so a reply keeps its own
+\(unresolved) status and glyph while still folding away with its
+thread."
   (let* ((depth (or depth 0))
          (ind (make-string (* depth 4) ?\s))
          (resolved (gp-comment-resolved-p comment))
+         (collapse (if by-id
+                       (gp--comment-thread-resolved-p comment by-id)
+                     resolved))
          (outdated (gp-comment-outdated-p comment gp--detail-diff))
          (marked (and pr (gp--detail-comment-marked-p comment)))
          ;; prefix every line of STR with the thread indent
          (pad (lambda (str) (replace-regexp-in-string "^" ind str))))
-    ;; resolved comments start collapsed (HIDE arg); TAB expands them
-    (magit-insert-section (gp-comment-section comment resolved)
+    ;; resolved threads start collapsed (HIDE arg); TAB expands them
+    (magit-insert-section (gp-comment-section comment collapse)
       (let ((start (point)))
         (let-alist comment
           (progn
@@ -758,8 +796,9 @@ that is exactly when you need a way to add the first one."
       (magit-insert-heading
         (format "Comments (%d)" (length comments)))
       (if comments
-          (pcase-dolist (`(,c . ,depth) (gp--comment-threads comments))
-            (gp--insert-comment c pr depth))
+          (let ((by-id (gp--comments-by-id comments)))
+            (pcase-dolist (`(,c . ,depth) (gp--comment-threads comments))
+              (gp--insert-comment c pr depth by-id)))
         (insert "  (no comments)\n")))))
 
 ;;;; Modes -------------------------------------------------------------------
@@ -1381,19 +1420,30 @@ Used to fold in pipeline data that arrives after the first render."
                                 gp--detail-pipelines)))))
 
 (defun gp--collapse-resolved-sections ()
-  "Hide every resolved-comment section in the current detail buffer."
+  "Hide every comment in a resolved thread, in the current detail buffer.
+Replies fold away with their thread even though they are not
+themselves resolved: Bitbucket sets `resolution' only on the comment
+the resolve action targeted and cannot resolve a reply at all, so a
+reply tested on its own would stay expanded under a collapsed root."
   (when (slot-boundp magit-root-section 'children)
-    (dolist (sec (oref magit-root-section children))
-      (gp--collapse-resolved-walk sec))))
+    (let ((by-id (gp--comments-by-id gp--detail-comments)))
+      (dolist (sec (oref magit-root-section children))
+        (gp--collapse-resolved-walk sec by-id)))))
 
-(defun gp--collapse-resolved-walk (section)
-  "Collapse SECTION if it is a resolved comment; recurse into children."
+(defun gp--collapse-resolved-walk (section &optional by-id)
+  "Collapse SECTION if its comment THREAD is resolved; recurse into children.
+Collapsing only -- the comment's own resolved status is untouched.
+BY-ID maps comment id -> comment for the thread walk; without it the
+comment is tested on its own."
   (when (and (object-of-class-p section 'gp-comment-section)
-             (gp-comment-resolved-p (oref section value)))
+             (let ((c (oref section value)))
+               (if by-id
+                   (gp--comment-thread-resolved-p c by-id)
+                 (gp-comment-resolved-p c))))
     (magit-section-hide section))
   (when (slot-boundp section 'children)
     (dolist (child (oref section children))
-      (gp--collapse-resolved-walk child))))
+      (gp--collapse-resolved-walk child by-id))))
 
 (defvar-local gp--detail-loading nil
   "Overlay showing a loading spinner near the title, or nil.")

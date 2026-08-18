@@ -758,5 +758,41 @@ prevent, so each producer is checked rather than trusted."
                         (gp-reviewers--buffer-name '((id . 7)))))
       (should (string-prefix-p tag name)))))
 
+
+;;;; Resolved-thread collapsing -------------------------------------------------
+
+(ert-deftest gp-test-thread-resolved-follows-parent ()
+  "A reply counts as belonging to a resolved thread via its parent.
+Bitbucket sets `resolution' only on the comment the resolve action
+targeted, so the reply's own resolution is nil."
+  (let* ((root '((id . 1) (resolution . ((type . "resolved")))))
+         (reply '((id . 2) (parent . ((id . 1)))))
+         (by-id (gp--comments-by-id (list root reply))))
+    (should (gp--comment-thread-resolved-p root by-id))
+    (should (gp--comment-thread-resolved-p reply by-id))
+    ;; the reply itself is NOT resolved -- only its thread is
+    (should-not (gp-comment-resolved-p reply))))
+
+(ert-deftest gp-test-thread-resolved-unresolved-thread ()
+  "Replies in an unresolved thread stay expanded."
+  (let* ((root '((id . 1)))
+         (reply '((id . 2) (parent . ((id . 1)))))
+         (by-id (gp--comments-by-id (list root reply))))
+    (should-not (gp--comment-thread-resolved-p root by-id))
+    (should-not (gp--comment-thread-resolved-p reply by-id))))
+
+(ert-deftest gp-test-thread-resolved-survives-cycle ()
+  "A cyclic parent chain terminates instead of looping forever."
+  (let* ((a '((id . 1) (parent . ((id . 2)))))
+         (b '((id . 2) (parent . ((id . 1)))))
+         (by-id (gp--comments-by-id (list a b))))
+    (should-not (gp--comment-thread-resolved-p a by-id))))
+
+(ert-deftest gp-test-thread-resolved-orphan-reply ()
+  "A reply whose parent is absent falls back to its own status."
+  (let* ((reply '((id . 2) (parent . ((id . 99)))))
+         (by-id (gp--comments-by-id (list reply))))
+    (should-not (gp--comment-thread-resolved-p reply by-id))))
+
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here
