@@ -1152,17 +1152,57 @@ SUCCESSFUL/FAILED/INPROGRESS/STOPPED."
     ("pending" "INPROGRESS")
     (_ "STOPPED")))
 
+(defun github--check-conclusion->bitbucket (status conclusion)
+  "Translate one check run's STATUS/CONCLUSION to Bitbucket vocabulary.
+A run that has not completed is INPROGRESS whatever CONCLUSION says.
+`neutral' and `skipped' deliberately map to nil: they mean \"this
+check declined to judge\", so they must not drag a green bubble to
+grey -- a matrix leg skipped by a path filter is normal."
+  (if (not (equal status "completed"))
+      "INPROGRESS"
+    (pcase conclusion
+      ("success" "SUCCESSFUL")
+      ((or "failure" "timed_out" "action_required" "startup_failure") "FAILED")
+      ("cancelled" "STOPPED")
+      (_ nil))))
+
+(defun github-commit-check-states (full-name hash)
+  "Return build state strings from the check runs for HASH in FULL-NAME.
+The checks API is where GitHub Actions actually reports; a repo whose
+CI posts no legacy commit statuses has results only here."
+  (when hash
+    (let ((res (ignore-errors
+                 (github-api-request
+                  "GET" (format "/repos/%s/commits/%s/check-runs" full-name hash)
+                  '(("per_page" . "100"))))))
+      (delq nil
+            (mapcar (lambda (run)
+                      (let-alist run
+                        (github--check-conclusion->bitbucket .status .conclusion)))
+                    (alist-get 'check_runs res))))))
+
 (defun github-commit-build-states (full-name hash)
   "Return the build state strings for commit HASH in FULL-NAME.
-Reads the combined status (statuses API); GitHub Actions results
-also appear here as ordinary commit statuses when the repo has any
-status-posting integration/check enabled."
+
+Merges GitHub's two independent CI report channels: legacy commit
+statuses (posted by external integrations) and check runs (where
+GitHub Actions reports).  A repo may use either or both, so both are
+consulted and the states concatenated; `gp-build-states-summary'
+then reduces them, failure dominating.
+
+The combined-status endpoint answers \"pending\" with a zero
+`total_count' when a repo posts no statuses at all.  That is absence
+of data, not a build in flight, so it is dropped rather than reported
+as INPROGRESS -- which would strand the helm bubble on blue forever."
   (when hash
-    (let ((combined (ignore-errors
-                      (github-api-request
-                       "GET" (format "/repos/%s/commits/%s/status" full-name hash)))))
-      (when combined
-        (list (github--status-state->bitbucket (alist-get 'state combined)))))))
+    (let* ((combined (ignore-errors
+                       (github-api-request
+                        "GET" (format "/repos/%s/commits/%s/status" full-name hash))))
+           (n (or (alist-get 'total_count combined) 0))
+           (status-states (when (> n 0)
+                            (list (github--status-state->bitbucket
+                                   (alist-get 'state combined))))))
+      (append status-states (github-commit-check-states full-name hash)))))
 
 (defun github-commit-message (full-name hash)
   "Return the commit message for HASH in FULL-NAME, or nil."
