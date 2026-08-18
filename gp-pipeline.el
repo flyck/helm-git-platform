@@ -494,6 +494,171 @@ the caller treats that like the synchronous nil (keeps stale data)."
   "Return PIPELINES whose target commit matches COMMIT (delegates to backend)."
   (gp--pipelines-match-commit (git-platform-backend) pipelines commit))
 
+;;;; Manual-step trigger hook (external script) --------------------------------
+
+;; Bitbucket Cloud has no public REST endpoint that advances an individual
+;; halted manual step (BCLOUD-20050, open since 2020); only the web UI can.
+;; `gp-pipeline-run-manual-step' therefore re-triggers the whole pipeline,
+;; which re-runs everything up to the gate.  Users who have a working
+;; out-of-band way to click that gate -- typically a browser-automation
+;; script driving a logged-in session -- can plug it in here instead.
+;;
+;; The hook is deliberately backend-agnostic and lives outside the protocol
+;; layer: it is a user-supplied escape hatch, not a backend capability, so a
+;; backend gaining a real API later does not have to model it.
+
+(defcustom gp-pipeline-deploy-script nil
+  "External command run to trigger a manual deploy step, or nil.
+
+When set, `gp-detail-pipeline-run-manual' runs this command instead
+of prompting: it is the only route that advances THIS build's gate,
+where the browser and new-run choices either need a human click or
+re-execute everything before the gate.  Clear it to get that prompt
+back.  Intended for backends whose API cannot advance a gated step in
+place \(Bitbucket Cloud), where the only working route is out-of-band.
+
+The value is a list of strings: the program followed by its fixed
+arguments, e.g. `(\"~/bin/bb-deploy\")'.  No shell is involved, so
+arguments are passed verbatim -- no quoting or word-splitting.  The
+program is looked up on `exec-path'; a leading \"~\" is expanded.
+
+Context is passed in the ENVIRONMENT, not as arguments, so one script
+serves every repo and step without the caller knowing its flags:
+
+  GP_WORKSPACE      workspace / owner (\"acme\" of \"acme/web\")
+  GP_REPO           repository slug (\"web\" of \"acme/web\")
+  GP_FULL_NAME      \"acme/web\"
+  GP_BRANCH         the PR's source branch
+  GP_PIPELINE_ID    pipeline build number (\"1234\")
+  GP_PIPELINE_UUID  pipeline uuid, braces included
+  GP_STEP_NAME      step name, e.g. \"Deploy to DEV\"
+  GP_STEP_UUID      step uuid, braces included
+  GP_STEP_STATE     step state, e.g. \"HALTED\"
+  GP_PR_ID          pull request id
+  GP_WEB_URL        web-UI URL, deep-linked to the step
+
+Step uuids change when a step is re-run, so a script should prefer
+resolving by GP_STEP_NAME against the live build.
+
+The command runs asynchronously with output streamed to
+`gp-pipeline-deploy-buffer'; Emacs is never blocked and the buffer is
+not popped up -- the result arrives as an OS notification (see
+`gp-notify') and an echo-area message."
+  :type '(choice (const :tag "No script (re-trigger the pipeline)" nil)
+                 (repeat :tag "Program and arguments" string))
+  :group 'bitbucket)
+
+(defcustom gp-pipeline-deploy-buffer "*gp-deploy*"
+  "Buffer name for `gp-pipeline-deploy-script' output."
+  :type 'string :group 'bitbucket)
+
+(defcustom gp-pipeline-deploy-notify t
+  "Whether a finished deploy script raises an OS notification.
+A browser-driven deploy runs long enough that the user has usually
+switched away from Emacs, so the echo-area message alone is missed.
+
+Narrows the package-wide `gp-notify': the notification is sent only
+when both are non-nil.  Set this to nil to keep just deploy results
+in the echo area and `gp-pipeline-deploy-buffer'."
+  :type 'boolean :group 'bitbucket)
+
+(defun gp-pipeline--deploy-env (full-name branch pipeline step pr)
+  "Return an `process-environment' with GP_* context for the deploy script.
+FULL-NAME is \"workspace/slug\"; PIPELINE and STEP are the objects at
+point; PR supplies the pull request id.  Values that cannot be
+resolved are omitted rather than exported empty, so a script can tell
+\"absent\" from \"empty\" with a plain -z test."
+  (let* ((parts (split-string (or full-name "") "/"))
+         (workspace (car parts))
+         (slug (cadr parts))
+         (pairs
+          (list (cons "GP_WORKSPACE" workspace)
+                (cons "GP_REPO" slug)
+                (cons "GP_FULL_NAME" full-name)
+                (cons "GP_BRANCH" branch)
+                (cons "GP_PIPELINE_ID"
+                      (let ((n (gp-pipeline-number pipeline)))
+                        (and n (format "%s" n))))
+                (cons "GP_PIPELINE_UUID" (alist-get 'uuid pipeline))
+                (cons "GP_STEP_NAME" (alist-get 'name step))
+                (cons "GP_STEP_UUID" (alist-get 'uuid step))
+                (cons "GP_STEP_STATE" (gp-pipeline-step-state step))
+                (cons "GP_PR_ID"
+                      (let ((id (alist-get 'id pr)))
+                        (and id (format "%s" id))))
+                (cons "GP_WEB_URL"
+                      (ignore-errors
+                        (gp-pipeline-web-url full-name pipeline step)))))
+         (env process-environment))
+    (dolist (p pairs env)
+      (when (and (cdr p) (not (equal (cdr p) "")))
+        (push (format "%s=%s" (car p) (cdr p)) env)))))
+
+(defun gp-pipeline--deploy-run (full-name branch pipeline step pr)
+  "Run `gp-pipeline-deploy-script' for STEP, streaming output to a buffer.
+Asynchronous: browser automation takes tens of seconds, and blocking
+Emacs on it is exactly what the async work in this package removed.
+Refreshes the detail view when the script exits successfully."
+  (unless gp-pipeline-deploy-script
+    (user-error "No `gp-pipeline-deploy-script' configured"))
+  (let* ((cmd (copy-sequence gp-pipeline-deploy-script))
+         (program (expand-file-name (car cmd)))
+         (name (or (alist-get 'name step) "?"))
+         (buf (get-buffer-create gp-pipeline-deploy-buffer))
+         ;; Captured HERE, not read in the sentinel: a process sentinel runs
+         ;; in whatever buffer is current when the process exits -- usually
+         ;; the process buffer -- where `gp--pr' is nil and
+         ;; `gp-detail-refresh' would refresh nothing.
+         (detail-buf (current-buffer))
+         (process-environment
+          (gp-pipeline--deploy-env full-name branch pipeline step pr)))
+    (unless (or (file-executable-p program) (executable-find (car cmd)))
+      (user-error "Deploy script not found or not executable: %s" (car cmd)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert (format "\n=== %s | %s | build %s ===\n"
+                        full-name name
+                        (or (gp-pipeline-number pipeline) "?")))))
+    ;; Deliberately NOT `display-buffer': the run is long and unattended,
+    ;; and stealing a window mid-review is worse than the notification and
+    ;; echo-area message that already report the result.  The buffer is
+    ;; there when wanted.
+    (message "Deploy script started for %S; output in %s"
+             name gp-pipeline-deploy-buffer)
+    (gp-log 'info "deploy script: %S for %s/%s" cmd full-name name)
+    (make-process
+     :name "gp-deploy"
+     :buffer buf
+     :command (cons (if (file-executable-p program) program (car cmd))
+                    (cdr cmd))
+     :noquery t
+     :sentinel
+     (lambda (_proc event)
+       (let ((ok (string-prefix-p "finished" event)))
+         (with-current-buffer buf
+           (let ((inhibit-read-only t))
+             (goto-char (point-max))
+             (insert (format "=== %s ===\n" (string-trim event)))))
+         (when gp-pipeline-deploy-notify
+           (gp-notify (if ok "Deploy succeeded" "Deploy failed")
+                      (format "%s — %s" name full-name)
+                      (not ok)))
+         (if ok
+             (progn
+               (message "Deploy script finished for %S" name)
+               ;; Refresh the detail buffer the run was started from, so the
+               ;; step's new state shows up without a manual `g'.  Guarded on
+               ;; it still being a live detail buffer: the user may have
+               ;; killed or navigated it during the (long) run.
+               (when (and (buffer-live-p detail-buf)
+                          (fboundp 'gp-detail-refresh))
+                 (with-current-buffer detail-buf
+                   (when (bound-and-true-p gp--pr)
+                     (gp-detail-refresh)))))
+           (message "Deploy script failed for %S (%s); see %s"
+                    name (string-trim event) gp-pipeline-deploy-buffer)))))))
+
 ;;;; Actions -------------------------------------------------------------------
 
 (defun gp-pipeline--at-point ()
@@ -557,11 +722,15 @@ point is not within a pipeline."
 (defun gp-detail-pipeline-run-manual ()
   "Run the waiting manual step at point.
 Bitbucket's public API cannot resume a step in place (BCLOUD-20050,
-open since 2020) -- only the web UI can.  So the default action opens
-the step's pipeline page in the browser, where one click runs it
-in place.  Spawning a NEW pipeline run (which re-executes everything
-up to the gate) stays available as an explicit choice.  Only offered
-on a manual step that is still waiting."
+open since 2020) -- only the web UI can.
+
+With `gp-pipeline-deploy-script' set, that script runs directly: it
+is the only route that advances THIS build's gate.  Without one, the
+choice is between opening the step's pipeline page in the browser
+(one click runs it in place) and spawning a NEW pipeline run, which
+re-executes everything up to the gate.
+
+Only offered on a manual step that is still waiting."
   (interactive)
   (let* ((step (gp-pipeline--step-at-point))
          (pp (gp-pipeline--at-point))
@@ -574,14 +743,21 @@ on a manual step that is still waiting."
     (unless (gp-pipeline-step-runnable-manual-p step)
       (user-error "Manual step %S is not waiting (state: %s)"
                   name (or (gp-pipeline-step-state step) "?")))
-    (pcase (car (read-multiple-choice
-                 (format "Run manual step %S (API can't resume it in place):"
-                         name)
-                 '((?b "browser"
-                       "open the pipeline in the web UI and run the step there, in place")
-                   (?n "new run"
-                       "trigger a NEW pipeline run of this definition (re-runs earlier steps)")
-                   (?q "quit" "do nothing"))))
+    (pcase (if gp-pipeline-deploy-script
+               ;; A configured script is the only route that advances THIS
+               ;; build's gate rather than starting the pipeline over, so it
+               ;; is simply the answer -- no point asking.  Clear it to get
+               ;; the browser / new-run choice back.
+               ?s
+             (car (read-multiple-choice
+                   (format "Run manual step %S (API can't resume it in place):"
+                           name)
+                   '((?b "browser"
+                         "open the pipeline in the web UI and run the step there, in place")
+                     (?n "new run"
+                         "trigger a NEW pipeline run of this definition (re-runs earlier steps)")
+                     (?q "quit" "do nothing")))))
+      (?s (gp-pipeline--deploy-run full-name branch pipeline step gp--pr))
       (?b (browse-url (gp-pipeline-web-url full-name pipeline step)))
       (?n (condition-case e
               (progn

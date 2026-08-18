@@ -353,5 +353,116 @@ cover this hint -- which is how it went stale once already."
                    (and (slot-boundp section 'children)
                         (oref section children)))))
 
+
+;;;; Manual-step deploy hook ----------------------------------------------------
+
+(defconst gp-test--deploy-pipeline
+  '((uuid . "{pipe-uuid}") (build_number . 4242)))
+
+(defconst gp-test--deploy-step
+  '((uuid . "{step-uuid}") (name . "Deploy to DEV") (state (name . "HALTED"))))
+
+(ert-deftest gp-test-deploy-env-exports-context ()
+  "The script gets repo/pipeline/step context through GP_* variables."
+  (let* ((env (gp-pipeline--deploy-env
+               "acme/web" "feature/x"
+               gp-test--deploy-pipeline gp-test--deploy-step
+               '((id . 77))))
+         (get (lambda (k)
+                (let ((hit (seq-find (lambda (e) (string-prefix-p (concat k "=") e))
+                                     env)))
+                  (and hit (substring hit (1+ (length k))))))))
+    (should (equal (funcall get "GP_WORKSPACE") "acme"))
+    (should (equal (funcall get "GP_REPO") "web"))
+    (should (equal (funcall get "GP_FULL_NAME") "acme/web"))
+    (should (equal (funcall get "GP_BRANCH") "feature/x"))
+    (should (equal (funcall get "GP_STEP_NAME") "Deploy to DEV"))
+    (should (equal (funcall get "GP_STEP_UUID") "{step-uuid}"))
+    (should (equal (funcall get "GP_PIPELINE_UUID") "{pipe-uuid}"))
+    (should (equal (funcall get "GP_PR_ID") "77"))))
+
+(ert-deftest gp-test-deploy-env-omits-missing-values ()
+  "A value that cannot be resolved is left unset, not exported empty.
+Lets a script distinguish absent from empty with a plain -z test."
+  (let ((env (gp-pipeline--deploy-env
+              "acme/web" nil
+              '((uuid . "{p}")) '((uuid . "{s}"))
+              nil)))
+    (should-not (seq-find (lambda (e) (string-prefix-p "GP_BRANCH=" e)) env))
+    (should-not (seq-find (lambda (e) (string-prefix-p "GP_PR_ID=" e)) env))
+    (should-not (seq-find (lambda (e) (string-prefix-p "GP_STEP_NAME=" e)) env))
+    ;; what IS resolvable still comes through
+    (should (seq-find (lambda (e) (string-prefix-p "GP_FULL_NAME=" e)) env))))
+
+(ert-deftest gp-test-deploy-run-requires-configuration ()
+  "Running with no script configured is a clear user error, not a crash."
+  (let ((gp-pipeline-deploy-script nil))
+    (should-error (gp-pipeline--deploy-run
+                   "acme/web" "b" gp-test--deploy-pipeline
+                   gp-test--deploy-step nil)
+                  :type 'user-error)))
+
+(ert-deftest gp-test-deploy-run-rejects-missing-program ()
+  "A configured but nonexistent program fails before spawning anything."
+  (let ((gp-pipeline-deploy-script (list "/nonexistent/gp-deploy-xyz")))
+    (should-error (gp-pipeline--deploy-run
+                   "acme/web" "b" gp-test--deploy-pipeline
+                   gp-test--deploy-step nil)
+                  :type 'user-error)))
+
+(ert-deftest gp-test-notify-is-non-fatal ()
+  "A failing notifier must not break the operation that called it."
+  (let ((gp-notify t)
+        (gp-notify-function (lambda (&rest _) (error "notifier is broken"))))
+    (should-not (gp-notify "t" "b" t))))
+
+(ert-deftest gp-test-notify-master-switch-silences ()
+  "`gp-notify' nil suppresses everything, without calling the notifier."
+  (let* ((called nil)
+         (gp-notify nil)
+         (gp-notify-function (lambda (&rest _) (setq called t))))
+    (should-not (gp-notify "t" "b"))
+    (should-not called)))
+
+(ert-deftest gp-test-notify-uses-custom-function ()
+  "`gp-notify-function' takes precedence over the built-in backends."
+  (let* ((got nil)
+         (gp-notify t)
+         (gp-notify-function
+          (lambda (title body urgent) (setq got (list title body urgent)))))
+    (should (gp-notify "T" "B" t))
+    (should (equal got '("T" "B" t)))))
+
+
+(ert-deftest gp-test-deploy-refresh-targets-originating-buffer ()
+  "The sentinel refreshes the detail buffer the deploy was started from.
+Regression: `gp-detail-refresh' was called bare from the sentinel, which
+runs in the process buffer -- where `gp--pr' is nil, so nothing was
+refreshed and the finished deploy sat stale until a manual `g'."
+  (let* ((refreshed nil)
+         (detail (generate-new-buffer " *gp-detail-fake*"))
+         (script (make-temp-file "gp-deploy-test" nil ".sh")))
+    (unwind-protect
+        (progn
+          (with-temp-file script (insert "#!/bin/sh\nexit 0\n"))
+          (set-file-modes script #o755)
+          (with-current-buffer detail
+            (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
+          (cl-letf (((symbol-function 'gp-detail-refresh)
+                     (lambda () (setq refreshed (current-buffer)))))
+            (let ((gp-pipeline-deploy-script (list script))
+                  (gp-pipeline-deploy-notify nil))
+              (with-current-buffer detail
+                (gp-pipeline--deploy-run
+                 "acme/web" "b" gp-test--deploy-pipeline
+                 gp-test--deploy-step '((id . 1))))
+              ;; let the process run to completion
+              (let ((deadline (+ (float-time) 5)))
+                (while (and (not refreshed) (< (float-time) deadline))
+                  (accept-process-output nil 0.05)))))
+          (should (eq refreshed detail)))
+      (kill-buffer detail)
+      (delete-file script))))
+
 (provide 'gp-pipeline-test)
 ;;; gp-pipeline-test.el ends here

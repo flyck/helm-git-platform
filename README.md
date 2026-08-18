@@ -150,6 +150,8 @@ setup (the write actions simply 403).
 | **Auto-overlay + mode-line counts** — per-repo PR count and comments while you visit files | `(gp-watch-mode 1)` | omit it, or `(gp-watch-mode -1)` |
 | **Comments in magit diffs** | `(gp-magit-mode 1)` (also needs `gp-watch-mode`) | omit it |
 | **CI pipelines in the detail view** — the PR branch's pipelines, tabbable, with stop / trigger / manual-run / logs | on by default | `(setq gp-detail-show-pipelines nil)` |
+| **External deploy hook** — run your own script to advance a gated manual step | `(setq gp-pipeline-deploy-script '("~/bin/gp-deploy"))` | omit it (default) |
+| **OS notifications** — desktop alert when long-running work finishes | on by default | `(setq gp-notify nil)` |
 | **Shell-rc env import** (macOS convenience) | `(require 'bitbucket-env)` + `(bitbucket-env-load)` | omit it (default) |
 | **Send a PR comment to an AI terminal session** (iTerm2 or Ghostty) | `(setq gp-helm-terminal-backend 'iterm2)` or `'ghostty` | omit it (default) |
 
@@ -179,6 +181,37 @@ buffer:
 Both keys are no-ops outside a PR-branch diff, so ordinary magit use (status, log, rebase) is
 untouched. Comments are cached for `gp-magit-comments-cache-ttl` seconds (60) so redraws on every
 magit refresh stay off the network; `C-c B g` always refetches.
+
+### Running a gated deploy step
+
+Bitbucket Cloud has no REST endpoint that advances an individual halted manual step
+([BCLOUD-20050](https://jira.atlassian.com/browse/BCLOUD-20050)), so `T` on a waiting gate can only
+open the web UI or start a **new** pipeline run that re-executes everything before the gate.
+
+If you have another way to click that gate — typically a browser-automation script driving a
+logged-in session — point `gp-pipeline-deploy-script` at it. `T` then runs it directly, with no
+prompt: it is the only route that advances the current build in place. Clear the setting to get the
+browser / new-run choice back.
+
+```elisp
+(setq gp-pipeline-deploy-script '("~/bin/gp-deploy"))
+```
+
+The script receives its context in the environment, so one script serves every repo and step:
+`GP_WORKSPACE`, `GP_REPO`, `GP_FULL_NAME`, `GP_BRANCH`, `GP_PIPELINE_ID`, `GP_PIPELINE_UUID`,
+`GP_STEP_NAME`, `GP_STEP_UUID`, `GP_STEP_STATE`, `GP_PR_ID`, `GP_WEB_URL`. Values that cannot be
+resolved are left unset rather than exported empty, so `-z` tests work. Prefer `GP_STEP_NAME` over
+`GP_STEP_UUID`: step uuids change every time a step is re-run.
+
+It runs asynchronously with output streamed to `*gp-deploy*`. The buffer is not popped up — the
+result arrives as an OS notification and an echo-area message, since a browser-driven deploy
+usually outlasts your attention. See
+[`docs/deploy-hook-example.sh`](docs/deploy-hook-example.sh) for a working wrapper.
+
+Notifications are controlled by `gp-notify` (the package-wide master switch — set it to nil to
+silence everything) and narrowed per feature by `gp-pipeline-deploy-notify`. Set `gp-notify-function`
+to route them through `alert` or anything else; the default uses D-Bus on Linux, `osascript` on
+macOS, and the echo area elsewhere.
 
 In the detail buffer and on overlays, most actions show their key in `[brackets]` and the buttons
 are clickable (reply, resolve, new comment, open, diff). Comments are written in Markdown with
