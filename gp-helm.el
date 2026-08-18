@@ -793,9 +793,15 @@ are served by `gp-helm--voted-candidates'."
 DRAFT styles the rows as drafts.  Shows a ⏳ row while the fetch is
 still in flight, so helm opens instantly instead of waiting on it."
   (if (eq gp-helm--mine-cache 'loading)
-      (when (eq key :mine)
-        (list (cons (propertize "  ⏳ fetching your pull requests\u2026" 'face 'shadow)
-                    nil)))
+      ;; Every loading section carries its OWN row.  Showing it in `:mine'
+      ;; only left the drafts section as a bare "(…)" header with no
+      ;; candidates, which helm then dropped once the data arrived -- the
+      ;; section appeared to blink out of existence mid-load.
+      (list (cons (propertize (if draft
+                                  "  ⏳ fetching your drafts…"
+                                "  ⏳ fetching your pull requests…")
+                              'face 'shadow)
+                  nil))
     (gp-helm--pr-candidates (plist-get (gp-helm--mine-categorized) key) draft)))
 
 (defun gp-helm--covered-candidates ()
