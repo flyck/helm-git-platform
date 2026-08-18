@@ -174,5 +174,26 @@ fail against it."
     (insert "no shortcode here")
     (should (null (gp-compose-emoji-capf)))))
 
+
+(ert-deftest gp-test-compose-soft-wraps-not-auto-fill ()
+  "The compose buffer must not hard-wrap what the user types.
+`gfm-mode' derives from `text-mode', so a `text-mode-hook' running
+`turn-on-auto-fill' would insert real newlines mid-paragraph -- which
+`gp-compose-hard-line-breaks' then posts as Markdown hard breaks,
+freezing the editor's wrap points into the published comment."
+  (let ((text-mode-hook '(turn-on-auto-fill)))
+    (with-temp-buffer
+      (gp-compose--base-mode)
+      (should-not auto-fill-function)
+      (should (bound-and-true-p visual-line-mode))
+      ;; typing past `fill-column' must not introduce a newline
+      (setq-local fill-column 20)
+      (let ((line "aaa bbb ccc ddd eee fff ggg hhh"))
+        (dolist (ch (append line nil))
+          (let ((last-command-event ch))
+            (self-insert-command 1)))
+        (should (equal (buffer-string) line))
+        (should-not (string-match-p "\n" (buffer-string)))))))
+
 (provide 'gp-compose-test)
 ;;; gp-compose-test.el ends here

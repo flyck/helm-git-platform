@@ -45,9 +45,20 @@ SUBMIT-FUNCTION defaults to `gp-create-comment' on the active backend.")
 ;;;; Markdown editing mode ---------------------------------------------------
 
 (defun gp-compose--base-mode ()
-  "Enter the best available Markdown editing mode for the compose buffer."
+  "Enter the best available Markdown editing mode for the compose buffer.
+
+Wraps visually rather than by inserting newlines.  `gfm-mode' derives
+from `text-mode', so a `text-mode-hook' that calls `turn-on-auto-fill'
+\(a common default) hard-wraps the comment as it is typed -- and with
+`gp-compose-hard-line-breaks' on, those accidental newlines are posted
+as Markdown hard breaks, freezing the editor's wrap points into the
+published comment.  Soft wrap keeps a paragraph one logical line, so
+only breaks the user actually typed survive."
   (cond ((require 'markdown-mode nil t) (gfm-mode))
-        (t (text-mode))))
+        (t (text-mode)))
+  (auto-fill-mode -1)
+  (setq-local truncate-lines nil)
+  (visual-line-mode 1))
 
 ;;;; Emoji shortcode completion ----------------------------------------------
 
