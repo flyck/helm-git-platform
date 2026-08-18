@@ -95,6 +95,16 @@ Normally the title column auto-grows to fill the available width
   "Column width for the repository slug in the Helm list."
   :type 'integer :group 'bitbucket)
 
+(defcustom gp-helm-labels-width 18
+  "Column width for PR labels in the Helm list.
+Labels are variable-length while this list is column-aligned, so they
+get a fixed column truncated with an ellipsis like the title and repo
+ones; the full names stay matchable through the invisible search tail
+\(see `gp-helm--pr-search-tail').  The column is omitted entirely --
+costing no width at all -- on a platform without labels, so Bitbucket
+rows are exactly as wide as before.  Set to 0 to hide it on GitHub too."
+  :type 'integer :group 'bitbucket)
+
 (defcustom gp-helm-title-reserve 28
   "Extra columns held back from the title for the trailing badges.
 Covers the reviewer tally, comment count and pipeline bubble,
@@ -111,10 +121,39 @@ for the trailing badges, never below `gp-helm-title-min-width'."
                   (window-body-width (get-buffer-window (get-buffer gp-helm-buffer))))))
     (if (not win)
         gp-helm-title-width
-      ;; bubble 3 + avatar 3 + id 6 + repo + author 16 + separators 8
+      ;; bubble 3 + avatar 3 + id 6 + labels + repo + author 16 + separators 8
       (max gp-helm-title-min-width
-           (- win 3 3 6 gp-helm-repo-width 16 8
+           (- win 3 3 6 (gp-helm--labels-column-width) gp-helm-repo-width 16 8
               gp-helm-title-reserve)))))
+
+(defun gp-helm--labels-column-width ()
+  "Return the columns the label column occupies, 0 when it is not shown.
+Nil on a backend without labels, so `gp-helm--title-width' hands the
+space back to the title rather than reserving a column that stays blank."
+  (if (and (> gp-helm-labels-width 0) (gp-labels-supported-p))
+      gp-helm-labels-width
+    0))
+
+(defun gp-helm--labels-cell (pr)
+  "Return PR's labels as one fixed-width, colour-faced cell.
+Empty string when the column is not shown at all.  Each label keeps its
+platform colour (`gp--label-face'), and the cell is padded to
+`gp-helm-labels-width' so every following column still lines up --
+`gp-helm--pad' cannot do that here because it would apply one face to
+the whole cell."
+  (let ((width (gp-helm--labels-column-width)))
+    (if (zerop width)
+        ""
+      (let* ((labels (gp-pr-labels pr))
+             (cell (if labels
+                       (gp--format-labels labels)
+                     ;; a visible placeholder, so an unlabelled row reads as
+                     ;; "none" rather than as a rendering gap
+                     (propertize "···" 'face 'shadow)))
+             ;; truncate on display width, keeping each label's own face
+             (cell (truncate-string-to-width cell width nil nil "…")))
+        (concat cell
+                (make-string (max 0 (- width (string-width cell))) ?\s))))))
 
 (defun gp-helm--pad (s width &optional face)
   "Return S padded/truncated to WIDTH columns, propertized with FACE."
@@ -180,8 +219,13 @@ shown on graphical displays."
                                   'face 'gp-helm-comments-face)
                     ""))
            (reviews (gp-helm--review-badge pr))
-           (line (format "%s %s%s  %s  %s  %s%s%s"
-                         bubble avatar id title repo author reviews badge)))
+           ;; already padded to its column width, and "" when unsupported --
+           ;; so it carries its own trailing separator and the row collapses
+           ;; back to the original layout on a platform without labels
+           (labels (let ((cell (gp-helm--labels-cell pr)))
+                     (if (string-empty-p cell) "" (concat cell "  "))))
+           (line (format "%s %s%s  %s  %s%s  %s%s%s"
+                         bubble avatar id title labels repo author reviews badge)))
       (if draft (propertize line 'face 'gp-helm-draft-face) line))))
 
 (defcustom gp-helm-review-style 'tally
@@ -278,10 +322,15 @@ matchable regardless of truncation."
   (let-alist pr
     (propertize
      (concat " " (mapconcat #'identity
-                            (delq nil (list (format "#%s" .id)
-                                            .destination.repository.slug
-                                            .title
-                                            .author.display_name))
+                            (delq nil (append
+                                       (list (format "#%s" .id)
+                                             .destination.repository.slug
+                                             .title
+                                             .author.display_name)
+                                       ;; label names too, so typing one filters
+                                       ;; even when the column truncated it
+                                       (mapcar (lambda (l) (plist-get l :name))
+                                               (gp-pr-labels pr))))
                             " "))
      'invisible t)))
 

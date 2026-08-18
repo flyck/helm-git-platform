@@ -11,6 +11,9 @@
 (require 'cl-lib)
 (require 'gp-helm)
 (require 'bitbucket-mock)
+(require 'github-mock)              ;; label-column tests drive the GitHub side
+(require 'git-platform-github)
+(require 'git-platform-bitbucket)
 
 (ert-deftest gp-test-helm-pr-candidates ()
   (let* ((prs (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json")))
@@ -319,6 +322,103 @@ the pending list and then reappear once the data lands."
           (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 0 res)) '(1)))
           (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 1 res)) '(3)))
           (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 2 res)) '(2))))))))
+
+;;;; Label column -------------------------------------------------------------
+
+(ert-deftest gp-test-helm-labels-column-hidden-on-bitbucket ()
+  "Bitbucket has no labels, so the column costs nothing and no cell is drawn.
+The width must fall to 0 as well, or the title column would be shortened
+to reserve space that is never used."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (= (gp-helm--labels-column-width) 0))
+    (should (equal (gp-helm--labels-cell '((id . 42))) ""))))
+
+(ert-deftest gp-test-helm-labels-column-renders-fixed-width ()
+  "On GitHub the cell is padded to exactly `gp-helm-labels-width'
+so every column after it still lines up."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (gp-helm-labels-width 18))
+      (let ((cell (gp-helm--labels-cell github-mock--pr-1)))
+        (should (= (string-width cell) 18))
+        (should (string-match-p "bug" (substring-no-properties cell)))))))
+
+(ert-deftest gp-test-helm-labels-column-placeholder-when-none ()
+  "An unlabelled PR still fills the column, so rows stay aligned."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (gp-helm-labels-width 18))
+      (let ((cell (gp-helm--labels-cell github-mock--pr-2)))
+        (should (= (string-width cell) 18))
+        (should (string-match-p "···" (substring-no-properties cell)))))))
+
+(ert-deftest gp-test-helm-labels-width-zero-hides-the-column ()
+  "`gp-helm-labels-width' 0 opts out even on a platform with labels."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (gp-helm-labels-width 0))
+      (should (= (gp-helm--labels-column-width) 0))
+      (should (equal (gp-helm--labels-cell github-mock--pr-1) "")))))
+
+(ert-deftest gp-test-helm-display-keeps-all-columns-with-labels ()
+  "Adding the label column must not drop any existing field.
+A `format' arg/directive mismatch silently truncates the tail of the
+row, which is how the comment badge went missing once."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (gp-helm-labels-width 18))
+      (let ((plain (substring-no-properties
+                    (gp-helm--pr-display
+                     ;; reshaped, as callers hold it: `id' is the PR number.
+                     ;; GitHub counts general and review comments separately
+                     ;; (`gp-pr-comment-count' sums them), so the badge needs
+                     ;; those fields -- not Bitbucket's `comment_count'.
+                     (append '((comments . 2) (review_comments . 1))
+                             (github-pull-request "acme/web" 42))))))
+        (should (string-match-p "#42" plain))
+        (should (string-match-p "Add the widget toggle" plain))
+        (should (string-match-p "bug" plain))
+        (should (string-match-p "web" plain))
+        (should (string-match-p "ada" plain))
+        (should (string-match-p "💬3" plain))
+        ;; labels sit between the title and the repo slug
+        (should (< (string-match "Add the widget toggle" plain)
+                   (string-match "bug" plain)))
+        (should (< (string-match "bug" plain) (string-match "web" plain)))))))
+
+(ert-deftest gp-test-helm-label-names-are-searchable ()
+  "Label names join the invisible search tail, so typing one filters even
+when the column truncated it away."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (let ((tail (substring-no-properties
+                   (gp-helm--pr-search-tail github-mock--pr-1))))
+        (should (string-match-p "bug" tail))
+        (should (string-match-p "ui" tail))))))
+
+(ert-deftest gp-test-helm-title-width-reserves-the-label-column ()
+  "The auto-growing title column shrinks by the label column's width,
+and gets that space back where labels are unsupported."
+  (let ((gp-helm-labels-width 18))
+    ;; drive the real window path: a live window over the helm buffer, so the
+    ;; auto-grow branch runs rather than the fixed fallback
+    (let ((buf (get-buffer-create gp-helm-buffer)))
+      (unwind-protect
+          (save-window-excursion
+            (set-window-buffer (selected-window) buf)
+            (let* ((win (window-body-width (selected-window)))
+                   (with-labels
+                    (let ((git-platform-current-backend (git-platform-github)))
+                      (gp-helm--title-width)))
+                   (without
+                    (let ((git-platform-current-backend (git-platform-bitbucket)))
+                      (gp-helm--title-width))))
+              (ignore win)
+              ;; both may bottom out at the minimum on a narrow batch frame;
+              ;; only compare when there is room to see the difference
+              (when (> without gp-helm-title-min-width)
+                (should (= (- without with-labels) 18)))))
+        (kill-buffer buf)))))
 
 (provide 'gp-helm-test)
 ;;; gp-helm-test.el ends here

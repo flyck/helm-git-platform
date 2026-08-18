@@ -225,8 +225,9 @@ PR). Candidates come from the workspace members on Bitbucket and the repo collab
 anyone who has already submitted a review is shown locked, since dropping them from the list cannot
 withdraw a review that is already on the record.
 
-**Labels** show up in the PR list (after the title) and in the detail view's header, each in the
-colour the platform gives it — `gp-label-colors` to nil renders them all in one `gp-label-face`
+**Labels** show up in the helm picker as their own fixed-width column between the title and the repo
+(`gp-helm-labels-width`, 0 to hide it; `···` marks a PR with none), in the `gp-list-mode` list after
+the title, and in the detail view's header — each in the colour the platform gives it — `gp-label-colors` to nil renders them all in one `gp-label-face`
 instead, and a display with fewer than 256 colours falls back to that automatically. `L` on an open
 PR edits the set: completion offers the repo's whole label pool with the current ones pre-filled, so
 deleting a name removes that label and typing one adds it. Only names already defined on the repo
@@ -237,6 +238,8 @@ reports rather than acting — no empty column, no placeholder that could never 
 
 A PR's labels ride along on the PR payload itself, so a refresh (`g`) always shows the current set;
 only the repo's label pool (names and colours, needed for completion) is cached, for `gp-cache-ttl`.
+The helm column truncates long label sets with an ellipsis, but the full names join that row's
+invisible search tail, so typing a label name still filters even when the column cut it off.
 
 Every buffer the package opens is tagged `*gp: …*` (`*gp: PRs*`, `*gp: PR #101 …*`,
 `*gp: reviewers #101*`, `*gp: log*`, …) so one filter finds them all; retag with
