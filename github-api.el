@@ -802,6 +802,65 @@ transient failure doesn't stick as \"nobody to suggest\"."
            (format "/repos/%s/pulls" full-name)
            `(("state" . ,(downcase (or state "open"))) ("sort" . "updated") ("direction" . "desc")))))
 
+;;;; Labels ------------------------------------------------------------------
+
+;; A PR's own labels need no endpoint and are never cached: GitHub embeds them
+;; in the PR payload, so `github-pr-labels' reads what `github-pull-request'
+;; already fetched and a plain refresh picks up changes for free.  Only the
+;; repo-wide *pool* -- the candidate list offered when editing -- costs a
+;; request, and that goes through the shared `gp-cache-*' TTL cache.
+
+(defun github--label (label)
+  "Return LABEL (a GitHub label alist) as a (:name :color) plist.
+GitHub writes the colour as bare hex with no leading \"#\"; it is kept in
+that form so the value round-trips unchanged to any consumer.  Returns
+nil for anything without a name, so a malformed entry drops out rather
+than rendering as an empty tag."
+  (let ((name (alist-get 'name label))
+        (color (alist-get 'color label)))
+    (when (and (stringp name) (not (string-empty-p name)))
+      (list :name name
+            :color (and (stringp color) (not (string-empty-p color)) color)))))
+
+(defun github--label-list (labels)
+  "Return LABELS (a GitHub `labels' value) as a list of `github--label' plists.
+LABELS arrives as a vector, and as `:null' rather than nil when the
+field is present but empty -- so it is normalised here instead of at
+each call site."
+  (when (or (listp labels) (vectorp labels))
+    (delq nil (mapcar #'github--label (append labels nil)))))
+
+(defun github-pr-labels (pr)
+  "Return PR's labels as (:name :color) plists.
+Read straight off the PR payload -- GitHub embeds `labels' in the PR
+object, so this touches no network and cannot go stale relative to the
+PR it came from."
+  (github--label-list (alist-get 'labels pr)))
+
+(defun github-repo-labels (full-name)
+  "Return every label defined in repo FULL-NAME, as (:name :color) plists.
+A repo's label set changes rarely while the completion pool is wanted on
+every label edit, so a non-empty result is cached (`gp-cache-ttl').  An
+empty one is not, so a transient failure cannot stick as \"no labels\"
+\(the same reasoning as `github-repo-suggested-reviewers')."
+  (let* ((key (list 'github-repo-labels full-name))
+         (hit (gp-cache-get key)))
+    (if (car hit)
+        (cdr hit)
+      (let ((labels (github--label-list
+                     (github-api-paged (format "/repos/%s/labels" full-name)))))
+        (when labels (gp-cache-put key labels))
+        labels))))
+
+(defun github-set-pull-request-labels (full-name number labels)
+  "Set PR NUMBER in FULL-NAME to carry exactly LABELS (a list of names).
+Labels live on the issue side of a pull request, so the complete set is
+PUT to the issues endpoint -- one request, and any name left out comes
+off.  Requires Issues: write.  Returns non-nil on success."
+  (github-api-request "PUT" (format "/repos/%s/issues/%s/labels" full-name number)
+                      nil `((labels . ,(vconcat labels))))
+  t)
+
 ;;;; Comments -----------------------------------------------------------------
 
 (defun github--issue-comments (full-name number)

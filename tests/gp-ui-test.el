@@ -794,5 +794,178 @@ targeted, so the reply's own resolution is nil."
          (by-id (gp--comments-by-id (list reply))))
     (should-not (gp--comment-thread-resolved-p reply by-id))))
 
+;;;; PR labels ---------------------------------------------------------------
+
+(ert-deftest gp-test-labels-render-in-the-list-heading ()
+  "A GitHub PR's labels appear in the overview heading, after the title."
+  (github-mock-with-service
+    (let* ((git-platform-current-backend (git-platform-github))
+           (h (substring-no-properties (gp--pr-heading github-mock--pr-1))))
+      (should (string-match-p "bug" h))
+      (should (string-match-p "ui" h))
+      ;; after the title, before the repo slug
+      (should (< (string-match "Add the widget toggle" h) (string-match "bug" h)))
+      (should (< (string-match "bug" h) (string-match (regexp-quote "[web]") h))))))
+
+(ert-deftest gp-test-labels-absent-from-heading-leave-no-gap ()
+  "A PR with no labels renders the heading exactly as before.
+The separator lives with the labels, so an unlabelled PR must not carry
+a stray double space where they would have gone."
+  (github-mock-with-service
+    (let* ((git-platform-current-backend (git-platform-github))
+           (h (substring-no-properties (gp--pr-heading github-mock--pr-2))))
+      (should (string-match-p (regexp-quote "Fix the flaky test  [web]") h)))))
+
+(ert-deftest gp-test-labels-hidden-entirely-on-bitbucket ()
+  "Bitbucket has no labels, so nothing label-shaped is rendered at all --
+not the list segment, and not a \"no labels\" placeholder in the detail
+view.  A slot that can never fill is worse than no slot."
+  (let* ((git-platform-current-backend (git-platform-bitbucket))
+         (pr (car (gp-test--mock-prs))))
+    (should-not (gp-labels-supported-p))
+    (should-not (gp-pr-labels pr))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--insert-labels-line pr))
+      (should (equal (buffer-string) "")))))
+
+(ert-deftest gp-test-labels-line-in-detail-top-section ()
+  "The detail view shows labels in its top section, with an edit button."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail github-mock--pr-1 nil))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "🏷" text))
+            (should (string-match-p "bug" text))
+            (should (string-match-p "edit \\[L\\]" text))))))))
+
+(ert-deftest gp-test-labels-line-offers-edit-with-none-yet ()
+  "With no labels on an open PR the line still appears, so the first one
+can be added -- same reasoning as the reviewers line."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--insert-labels-line github-mock--pr-2))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "no labels" text))
+          (should (string-match-p "edit \\[L\\]" text)))))))
+
+(ert-deftest gp-test-labels-line-has-no-edit-button-on-closed-pr ()
+  "A merged/closed PR shows its labels read-only."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (pr (append '((state . "closed")) github-mock--pr-1)))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--insert-labels-line pr))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "bug" text))
+          (should-not (string-match-p "edit" text)))))))
+
+(ert-deftest gp-test-label-face-uses-the-platform-color ()
+  "Each distinct colour gets its own face, interned once and reused.
+Text colour flips with background luminance so a dark label stays
+readable."
+  (cl-letf (((symbol-function 'display-color-cells) (lambda (&rest _) 16777216)))
+    (let ((gp--label-face-cache (make-hash-table :test 'equal))
+          (gp-label-colors t))
+      (let ((dark (gp--label-face "d73a4a"))
+            (light (gp--label-face "a2eeef")))
+        (should-not (eq dark light))
+        (should (equal (face-attribute dark :background) "#d73a4a"))
+        (should (equal (face-attribute dark :foreground) "white"))
+        (should (equal (face-attribute light :foreground) "black"))
+        ;; same hex -> same face object, not a second one
+        (should (eq dark (gp--label-face "d73a4a")))))))
+
+(ert-deftest gp-test-label-face-falls-back-without-color-or-on-tty ()
+  "No colour, a malformed one, `gp-label-colors' nil, or a low-colour
+display all fall back to the single themable face."
+  (cl-letf (((symbol-function 'display-color-cells) (lambda (&rest _) 16777216)))
+    (let ((gp--label-face-cache (make-hash-table :test 'equal))
+          (gp-label-colors t))
+      (should (eq (gp--label-face nil) 'gp-label-face))
+      (should (eq (gp--label-face "nothex") 'gp-label-face))
+      (should (eq (gp--label-face "abc") 'gp-label-face))
+      (let ((gp-label-colors nil))
+        (should (eq (gp--label-face "d73a4a") 'gp-label-face)))))
+  ;; a 16-colour terminal cannot place arbitrary backgrounds
+  (cl-letf (((symbol-function 'display-color-cells) (lambda (&rest _) 16)))
+    (let ((gp--label-face-cache (make-hash-table :test 'equal))
+          (gp-label-colors t))
+      (should (eq (gp--label-face "d73a4a") 'gp-label-face)))))
+
+(ert-deftest gp-test-edit-labels-sends-the-chosen-set ()
+  "Editing labels PUTs the complete chosen set and refreshes the buffer."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          sent refreshed)
+      (cl-letf (((symbol-function 'completing-read-multiple)
+                 (lambda (&rest _) '("bug" "chore")))
+                ((symbol-function 'gp-set-pull-request-labels)
+                 (lambda (fn id labels) (setq sent (list fn id labels)) t))
+                ((symbol-function 'gp-invalidate-pr-caches) (lambda (&rest _) nil))
+                ((symbol-function 'gp-detail-refresh)
+                 (lambda (&rest _) (setq refreshed t))))
+        ;; a PR as callers actually hold it: `github--reshape-pr' has already
+        ;; put the PR *number* in `id', which is what the endpoints take
+        (gp-ui-edit-labels (github-pull-request "acme/web" 42))
+        (should (equal sent '("acme/web" 42 ("bug" "chore"))))
+        (should refreshed)))))
+
+(ert-deftest gp-test-edit-labels-no-change-skips-the-write ()
+  "Leaving the pre-filled set untouched must not PUT or refresh --
+a no-op edit should not churn the PR or invalidate caches."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (wrote nil) (refreshed nil))
+      (cl-letf (((symbol-function 'completing-read-multiple)
+                 ;; same set the PR already has, in the other order
+                 (lambda (&rest _) '("ui" "bug")))
+                ((symbol-function 'gp-set-pull-request-labels)
+                 (lambda (&rest _) (setq wrote t)))
+                ((symbol-function 'gp-detail-refresh)
+                 (lambda (&rest _) (setq refreshed t))))
+        (gp-ui-edit-labels github-mock--pr-1)
+        (should-not wrote)
+        (should-not refreshed)))))
+
+(ert-deftest gp-test-edit-labels-rejects-a-name-outside-the-pool ()
+  "An unknown name is refused rather than silently creating a new label
+on the repo, which is what GitHub's endpoint would otherwise do."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (wrote nil))
+      (cl-letf (((symbol-function 'completing-read-multiple)
+                 (lambda (&rest _) '("typoo")))
+                ((symbol-function 'gp-set-pull-request-labels)
+                 (lambda (&rest _) (setq wrote t))))
+        (should-error (gp-ui-edit-labels github-mock--pr-1) :type 'user-error)
+        (should-not wrote)))))
+
+(ert-deftest gp-test-edit-labels-refuses-on-bitbucket-and-closed-prs ()
+  "The command reports rather than acting where labels cannot apply."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should-error (gp-ui-edit-labels (car (gp-test--mock-prs))) :type 'user-error))
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (should-error (gp-ui-edit-labels (append '((state . "closed"))
+                                               github-mock--pr-1))
+                    :type 'user-error))))
+
+(ert-deftest gp-test-edit-labels-is-bound-to-a-capital-key ()
+  "Label editing mutates the PR, so it takes a capital key (see `R'/`V')."
+  (should (eq (lookup-key gp-detail-mode-map "L") #'gp-detail-edit-labels))
+  ;; lowercase `l' keeps its read-only pipeline-log meaning
+  (should (eq (lookup-key gp-detail-mode-map "l") #'gp-detail-pipeline-step-log)))
+
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here

@@ -37,7 +37,7 @@ repos (GitHub's unauthenticated rate limit applies); write operations require on
 |---|---|---|
 | Contents | Read and write | Reading files/diffs; pushing branches when creating a PR |
 | Pull requests | Read and write | List/view/create PRs, reviews, approve/request-changes, draft toggle |
-| Issues | Read and write | General (non-inline) PR comments go through the Issues API |
+| Issues | Read and write | General (non-inline) PR comments and PR labels go through the Issues API |
 | Actions | Read and write | Workflow runs/jobs/logs, re-running a job, dispatching a workflow |
 | Commit statuses | Read | Combined commit status for build-state badges |
 | Metadata | Read | Mandatory default, always required |
@@ -217,12 +217,26 @@ macOS, and the echo area elsewhere.
 In the detail buffer and on overlays, most actions show their key in `[brackets]` and the buttons
 are clickable (reply, resolve, new comment, open, diff). Comments are written in Markdown with
 `C-c C-c` to post. Actions that write to the PR sit on **capital** letters (`R` reply, `X` resolve,
-`K` delete, `V` edit reviewers), so a stray lowercase keypress while reading can't mutate anything.
+`K` delete, `V` edit reviewers, `L` edit labels), so a stray lowercase keypress while reading can't
+mutate anything.
 
 **Reviewers** can be picked as checkboxes both when creating a PR and afterwards (`V` on an open
 PR). Candidates come from the workspace members on Bitbucket and the repo collaborators on GitHub;
 anyone who has already submitted a review is shown locked, since dropping them from the list cannot
 withdraw a review that is already on the record.
+
+**Labels** show up in the PR list (after the title) and in the detail view's header, each in the
+colour the platform gives it — `gp-label-colors` to nil renders them all in one `gp-label-face`
+instead, and a display with fewer than 256 colours falls back to that automatically. `L` on an open
+PR edits the set: completion offers the repo's whole label pool with the current ones pre-filled, so
+deleting a name removes that label and typing one adds it. Only names already defined on the repo
+are accepted, since GitHub's endpoint would otherwise *create* a label from a typo.
+
+Bitbucket Cloud has no PR labels at all, so on that backend nothing label-shaped is rendered and `L`
+reports rather than acting — no empty column, no placeholder that could never fill.
+
+A PR's labels ride along on the PR payload itself, so a refresh (`g`) always shows the current set;
+only the repo's label pool (names and colours, needed for completion) is cached, for `gp-cache-ttl`.
 
 Every buffer the package opens is tagged `*gp: …*` (`*gp: PRs*`, `*gp: PR #101 …*`,
 `*gp: reviewers #101*`, `*gp: log*`, …) so one filter finds them all; retag with

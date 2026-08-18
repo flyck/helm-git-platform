@@ -288,6 +288,16 @@ Bitbucket's PR object carries this pre-summed as `comment_count'.
 GitHub has no single field for it -- general and inline (review)
 comments are counted separately as `comments'/`review_comments' --
 so this sums both.")
+(gp-defop pr-labels (pr)
+  "Return PR's labels as a list of plists (:name :color), or nil.
+COLOR is a 6-digit hex string without the leading \"#\" (GitHub's own
+encoding), or nil when the platform gives no colour.  GitHub embeds
+labels in the PR payload itself, so this costs no request and a
+plain PR re-fetch already refreshes them.  Bitbucket Cloud has no
+label concept for pull requests at all -- its implementation returns
+nil, which is why callers must treat \"no labels\" and \"unsupported\"
+as different questions (see `gp-labels-supported-p').")
+
 (gp-defop pr-description (pr)
   "Return PR's description/body as a Markdown string, or nil when empty.
 Bitbucket calls this `description', GitHub calls it `body'.  Returns
@@ -304,6 +314,26 @@ should hide the resolve/reopen action entirely when this is nil
 rather than let it fail on click.")
 (gp-defop comment-own-p (comment uuid)
   "Return non-nil if COMMENT was written by UUID.")
+
+(gp-defop labels-supported-p ()
+  "Return non-nil if this platform has PR labels at all.
+Distinct from a PR merely having none: the UI hides every label
+affordance (list column, detail line, the edit key) when the
+platform itself has no such concept, rather than showing an empty
+slot that can never fill.  True for GitHub, nil for Bitbucket
+Cloud, whose PRs carry no labels.")
+
+(gp-defop repo-labels (full-name)
+  "Return the labels defined in repo FULL-NAME, as `gp-pr-labels' plists.
+The pool offered when editing a PR's labels -- the repo's whole
+label set, not just the ones already applied.  Backends without
+labels return nil.")
+
+(gp-defop set-pull-request-labels (full-name id labels)
+  "Set PR ID in FULL-NAME to carry exactly LABELS (a list of name strings).
+Callers pass the complete desired set, not a delta, matching
+`gp-set-pull-request-reviewers'.  Backends without labels signal a
+`user-error' rather than silently doing nothing.")
 
 (gp-defop backend-name ()
   "Return the symbol naming this backend (`bitbucket', `github', …).

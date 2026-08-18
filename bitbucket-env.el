@@ -2,14 +2,14 @@
 
 ;;; Commentary:
 
-;; GUI Emacs on macOS does not source ~/.zshrc, so `export BITBUCKET_*'
-;; lines there never reach `getenv'.  Rather than pull in
-;; exec-path-from-shell just for three variables, this reads the rc file
-;; directly and copies any matching `export NAME=VALUE' lines into the
+;; GUI Emacs on macOS does not source ~/.zshrc, so `export BITBUCKET_*' /
+;; `export GITHUB_TOKEN' lines there never reach `getenv'.  Rather than pull
+;; in exec-path-from-shell just for a handful of variables, this reads the rc
+;; file directly and copies any matching `export NAME=VALUE' lines into the
 ;; Emacs environment.
 ;;
 ;; It is intentionally narrow: by default it only imports variables whose
-;; names start with "BITBUCKET", and it parses the `export' lines itself
+;; names start with "BITBUCKET" or "GITHUB", and it parses the `export' lines
 ;; (it does NOT run the shell), so a slow or interactive ~/.zshrc cannot
 ;; hang Emacs and arbitrary rc code is never executed.
 ;;
@@ -33,10 +33,23 @@
   :type 'file
   :group 'bitbucket-env)
 
-(defcustom bitbucket-env-prefix "BITBUCKET"
-  "Only environment variables whose names start with this are imported."
-  :type 'string
+(defcustom bitbucket-env-prefix '("BITBUCKET" "GITHUB")
+  "Prefixes of the environment variables to import.
+Either one prefix string or a list of them.  Both platforms' variables
+are imported by default: which backend is active is a separate setting
+\(`git-platform-default-backend'), and importing the other one's token
+costs nothing, so switching backends needs no change here.
+
+Kept deliberately narrow -- an rc file holds far more than credentials,
+and only names matching a prefix are ever copied into Emacs."
+  :type '(choice (string :tag "One prefix")
+                 (repeat :tag "Several prefixes" string))
   :group 'bitbucket-env)
+
+(defun bitbucket-env--prefixes ()
+  "Return `bitbucket-env-prefix' as a list of strings."
+  (if (listp bitbucket-env-prefix) bitbucket-env-prefix
+    (list bitbucket-env-prefix)))
 
 (defcustom bitbucket-env-overwrite nil
   "When non-nil, imported values overwrite variables already set.
@@ -55,14 +68,14 @@ is left untouched, so a real exported value wins over the rc file."
 
 (defun bitbucket-env--parse (text)
   "Parse TEXT, returning an alist of (NAME . VALUE) from its export lines.
-Only names beginning with `bitbucket-env-prefix' are returned.
+Only names beginning with one of `bitbucket-env-prefix' are returned.
 Lines like `export NAME=VALUE' and bare `NAME=VALUE' are matched;
 inline `# comments' after an unquoted value are dropped."
-  (let ((case-fold-search nil)
-        (re (concat "^[ \t]*\\(?:export[ \t]+\\)?\\("
-                    (regexp-quote bitbucket-env-prefix)
-                    "[A-Za-z0-9_]*\\)=\\(.*\\)$"))
-        (acc '()))
+  (let* ((case-fold-search nil)
+         (re (concat "^[ \t]*\\(?:export[ \t]+\\)?\\("
+                     (regexp-opt (bitbucket-env--prefixes))
+                     "[A-Za-z0-9_]*\\)=\\(.*\\)$"))
+         (acc '()))
     (dolist (line (split-string text "\n"))
       (when (string-match re line)
         (let* ((name (match-string 1 line))
@@ -77,7 +90,8 @@ inline `# comments' after an unquoted value are dropped."
 
 ;;;###autoload
 (defun bitbucket-env-load (&optional rc-file)
-  "Import BITBUCKET_* variables from RC-FILE (default `bitbucket-env-rc-file').
+  "Import `bitbucket-env-prefix'-matching vars from RC-FILE.
+RC-FILE defaults to `bitbucket-env-rc-file'.
 Returns the list of variable names that were set.  Existing
 values are kept unless `bitbucket-env-overwrite' is non-nil.
 Missing rc file is a no-op (returns nil)."
