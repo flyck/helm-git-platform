@@ -162,6 +162,28 @@ is checked first, then any sibling whose remote matches."
 ;; PR field accessors are the protocol functions `gp-pr-full-name',
 ;; `gp-pr-source-branch', `gp-pr-destination-branch' (see git-platform.el).
 
+(defun gp-local-anchor-to-checkout (pr)
+  "Point the current buffer's `default-directory' at PR's local checkout.
+
+PR-scoped buffers (detail, reviewers, pipeline logs) are created with
+`get-buffer-create', so they inherit `default-directory' from whatever
+buffer happened to be current -- usually unrelated.  Anchoring them to
+the checkout is what makes `find-file', `project-find-file', `compile'
+and shell commands default to the repository the buffer is about;
+`default-directory' is the native mechanism every one of those consults.
+
+Local resolution only: uses `gp-local-find-checkout' (a cached scan of
+`gp-local-git-root') rather than `gp-local-ensure-checkout', so merely
+painting a buffer never clones or switches branches over the network.
+When no clone exists the existing value is left untouched -- an
+inherited directory beats a wrong one.  Returns the directory, or nil.
+
+Because the value is resolved once at buffer creation, a clone that
+appears later is picked up on the next refresh, not retroactively."
+  (when-let* ((full-name (ignore-errors (gp-pr-full-name pr)))
+              (dir (ignore-errors (gp-local-find-checkout full-name))))
+    (setq default-directory (file-name-as-directory dir))))
+
 ;;;; Actions -----------------------------------------------------------------
 
 (defun gp-local-open (pr)

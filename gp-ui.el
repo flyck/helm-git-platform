@@ -931,6 +931,10 @@ grants it for the active backend."
   (unless (require 'magit nil t)
     (user-error "Magit is not available"))
   (let* ((full-name (gp-pr-full-name gp--pr))
+         ;; `default-directory' is already anchored to the checkout by
+         ;; `gp-show-pr', but re-resolve: it falls back to an inherited
+         ;; directory when no clone existed at paint time, and one may
+         ;; have appeared since.
          (dir (gp-local-find-checkout full-name)))
     (unless dir
       (user-error "No local checkout of %s under %s"
@@ -1449,6 +1453,12 @@ spinner near the title marks the in-flight load."
       (unless (derived-mode-p 'gp-detail-mode)
         (gp-detail-mode))
       (setq gp--pr pr)
+      ;; Anchor the buffer to the PR's repo so `find-file' and friends
+      ;; default there.  After the mode call: `define-derived-mode' runs
+      ;; `kill-all-local-variables', and while `default-directory' survives
+      ;; that as a permanent-local, setting it afterwards keeps the
+      ;; ordering obvious rather than relying on the exemption.
+      (gp-local-anchor-to-checkout pr)
       ;; Paint a skeleton from the overview PR right away, then hang the
       ;; spinner on it.  This is the instant first paint -- no network yet.
       ;; Reuse any cached comments so a revisit shows them without a flash.

@@ -29,6 +29,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'git-platform)
+(require 'gp-local)
 (require 'wid-edit)
 
 (declare-function widget-create "wid-edit")
@@ -282,6 +283,7 @@ configuration to restore on close."
       (setq gp-reviewers--pr pr
             gp-reviewers--return-window winconf
             gp-reviewers--origin-buffer origin)
+      (gp-local-anchor-to-checkout pr)
       (gp-reviewers--build-form pr groups)
       (goto-char (point-min)))
     (pop-to-buffer buf)

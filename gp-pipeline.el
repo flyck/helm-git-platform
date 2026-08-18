@@ -27,6 +27,7 @@
 (require 'subr-x)
 (require 'magit-section)
 (require 'git-platform)
+(require 'gp-local)
 (require 'gp-log)
 
 (declare-function gp-pr-full-name "git-platform")
@@ -633,7 +634,10 @@ captured historical log."
   (let* ((step (gp-pipeline--step-at-point))
          (pp (gp-pipeline--at-point))
          (pipeline (car pp))
-         (full-name (gp-pr-full-name gp--pr))
+         ;; captured before `with-current-buffer' -- `gp--pr' is
+         ;; buffer-local to the detail buffer we are leaving
+         (pr gp--pr)
+         (full-name (gp-pr-full-name pr))
          (pipeline-uuid (alist-get 'uuid pipeline))
          (step-uuid (alist-get 'uuid step))
          (running (gp-pipeline-step-running-p step))
@@ -647,6 +651,7 @@ captured historical log."
       (setq gp-pipeline-log--ctx
             (list :full-name full-name :pipeline-uuid pipeline-uuid
                   :step-uuid step-uuid :step step))
+      (gp-local-anchor-to-checkout pr)
       (gp-pipeline-log--cancel-timer)
       (let ((text (ignore-errors
                     (gp-pipeline-step-log full-name pipeline-uuid step-uuid))))

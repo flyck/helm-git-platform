@@ -175,6 +175,45 @@ We never touch the filesystem -- git reports it is a work tree."
       '(("unrelated" . "git@bitbucket.org:acme/something-else.git"))
     (should (null (gp-local-find-checkout "acme/not-here")))))
 
+(ert-deftest gp-test-anchor-to-checkout-sets-default-directory ()
+  "Anchoring points `default-directory' at the PR's local checkout."
+  (bitbucket-mock-with-service
+    (let ((pr (car (alist-get 'values
+                             (bitbucket-mock--fixture "workspace-prs.json")))))
+      (gp-test-with-fake-tree
+          '(("web-frontend" . "git@bitbucket.org:acme/web-frontend.git"))
+        (with-temp-buffer
+          (setq default-directory "/")
+          (gp-local-anchor-to-checkout pr)
+          (should (string-suffix-p "web-frontend/" default-directory)))))))
+
+(ert-deftest gp-test-anchor-to-checkout-keeps-dir-when-no-clone ()
+  "With no local clone the inherited `default-directory' is left alone.
+An inherited directory beats a wrong one."
+  (bitbucket-mock-with-service
+    (let ((pr (car (alist-get 'values
+                             (bitbucket-mock--fixture "workspace-prs.json")))))
+      (gp-test-with-fake-tree
+          '(("unrelated" . "git@bitbucket.org:acme/something-else.git"))
+        (with-temp-buffer
+          (setq default-directory "/somewhere/else/")
+          (should (null (gp-local-anchor-to-checkout pr)))
+          (should (equal default-directory "/somewhere/else/")))))))
+
+(ert-deftest gp-test-anchor-to-checkout-never-clones ()
+  "Anchoring resolves locally only -- painting a buffer must not hit the network."
+  (bitbucket-mock-with-service
+    (let ((pr (car (alist-get 'values
+                             (bitbucket-mock--fixture "workspace-prs.json")))))
+      (cl-letf (((symbol-function 'gp-local-find-checkout)
+                 (lambda (_fn) nil))
+                ((symbol-function 'gp-local-ensure-checkout)
+                 (lambda (&rest _) (error "must not clone or switch branches")))
+                ((symbol-function 'gp-checkout-ensure-clone)
+                 (lambda (&rest _) (error "must not clone"))))
+        (with-temp-buffer
+          (should (null (gp-local-anchor-to-checkout pr))))))))
+
 (ert-deftest gp-test-checkout-branch-delegates-to-service ()
   "checkout-branch resolves the dir and runs the checkout service there."
   (require 'gp-checkout)
