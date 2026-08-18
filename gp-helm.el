@@ -568,6 +568,15 @@ stop you from typing it."
 
 ;;;; Entry point -------------------------------------------------------------
 
+(defvar gp-helm--mine-cache nil
+  "Async-filled list of the user's own PRs for the current `gp-helm' run.
+Symbol `loading' while the background fetch runs.  Kept in the same
+shape as `gp-helm--reviewing-cache' so both sections can render a
+⏳ row instead of blocking helm from opening at all.")
+
+(defvar gp-helm--mine-uuid nil
+  "The uuid the current \"mine\" fetch belongs to.")
+
 (defun gp-helm--source (label prs actions &optional draft keymap)
   "Build a Helm source named LABEL over PRS using ACTIONS.
 The header shows the live count; DRAFT styles the rows as drafts;
@@ -625,6 +634,100 @@ out rather than guessed at."
           ((= h 1) "Merged in the last hour")
           (t (format "Merged in the last %d hours" h)))))
 
+(defvar gp-helm--merged-recent-cache nil
+  "Async-filled list of recently-merged PRs for the current `gp-helm' run.
+Symbol `loading' while the background fetch runs; nil once loaded means
+\"none in the window\", not \"not fetched\" -- callers only ever see
+`loading' before the fetch lands, same as `gp-helm--mine-cache'.")
+
+(defun gp-helm--merged-recent-candidates ()
+  "Helm `:candidates' for the recently-merged section.
+Shows a ⏳ row while the fetch is still in flight, mirroring
+`gp-helm--mine-candidates'."
+  (cond
+   ((eq gp-helm--merged-recent-cache 'loading)
+    (list (cons (propertize "  ⏳ fetching recently merged…" 'face 'shadow) nil)))
+   ((listp gp-helm--merged-recent-cache)
+    (gp-helm--pr-candidates gp-helm--merged-recent-cache t))))
+
+(defun gp-helm--merged-recent-source (actions keymap)
+  "Build the Helm source for recently-merged PRs.
+Always created (never nil-ed out for an empty list), same reasoning as
+`gp-helm--mine-source': the section has to exist up front to carry the
+⏳ row while the fetch is still in flight."
+  (helm-build-sync-source (gp-helm--merged-section-label)
+    :candidates #'gp-helm--merged-recent-candidates
+    :volatile t
+    :action actions
+    :nomark t
+    :keymap (or keymap (gp-helm--list-keymap nil))
+    :header-name
+    (lambda (name)
+      (if (listp gp-helm--merged-recent-cache)
+          (gp-helm--header name gp-helm--merged-recent-cache)
+        (concat name " (…)")))))
+
+(defun gp-helm--fetch-merged-recent-async (uuid)
+  "Fetch UUID's recently-merged PRs asynchronously into `gp-helm' live.
+Capped at 20 (only the newest few can be in the window; this must not
+turn the list into a full history fetch) and cached separately from
+the open-PR \"mine\" list, since it needs merged PRs even when the rest
+of the list is open-only."
+  (gp-workspace-pull-requests-async
+   (lambda (ok prs)
+     (setq gp-helm--merged-recent-cache
+           (if ok (gp-helm--merged-recently prs) nil))
+     (when ok (gp-cache-put (list 'merged-recent uuid) prs))
+     (gp-helm--refresh-if-alive))
+   uuid "MERGED" 20))
+
+(defun gp-helm--mine-source (label key draft actions keymap)
+  "Build the Helm source named LABEL over the user's own PRs under KEY.
+KEY is `:mine' or `:drafts'; DRAFT styles the rows as drafts.  Unlike
+`gp-helm--source' this is always created, never nil-ed out for an
+empty list: the section has to exist up front to carry the ⏳ row
+while the fetch is still in flight.  Once loaded, an empty section
+renders no candidates and helm hides it by itself."
+  (helm-build-sync-source label
+    :candidates (lambda () (gp-helm--mine-candidates key draft))
+    :volatile t
+    :action actions
+    :nomark t
+    :keymap (or keymap (gp-helm--list-keymap nil))
+    :header-name
+    (lambda (name)
+      (concat (if (listp gp-helm--mine-cache)
+                  (gp-helm--header name (plist-get (gp-helm--mine-categorized) key))
+                (concat name " (…)"))
+              "   (C-c g reload · C-c G refresh · C-c m merged)"))))
+
+(defun gp-helm--scan-mine-badges (prs)
+  "Fetch pipeline states and review tallies for PRS in the background."
+  (gp-helm--scan-pipelines-async prs)
+  (gp-helm--scan-review-tallies-async prs))
+
+(defun gp-helm--fetch-mine-async (uuid include-merged)
+  "Fetch UUID's own PRs asynchronously, filling the live helm session.
+INCLUDE-MERGED widens the state filter.  Results are cached under the
+same key the synchronous path used, so a reopen is instant."
+  (gp-workspace-pull-requests-async
+   (lambda (ok prs)
+     (if (not ok)
+         (progn
+           (gp-log-error "gp-helm: fetching your pull requests failed")
+           ;; a list (empty) rather than `loading', so the ⏳ row is replaced
+           ;; by an empty section instead of spinning forever
+           (setq gp-helm--mine-cache nil)
+           (gp-helm--refresh-if-alive))
+       (gp-cache-put (list 'mine uuid include-merged) prs)
+       (setq gp-helm--mine-cache prs)
+       (gp-helm--refresh-if-alive)
+       (let ((cat (gp-categorize-pull-requests prs uuid)))
+         (gp-helm--scan-mine-badges
+          (append (plist-get cat :mine) (plist-get cat :drafts))))))
+   uuid
+   (if include-merged nil "OPEN")))
+
 (defun gp-helm--prs-for-branch (prs branch)
   "Return the PRs from PRS whose source branch is BRANCH."
   (cl-remove-if-not (lambda (pr)
@@ -655,6 +758,7 @@ INCLUDE-MERGED)."
                    (lambda () (gp-helm--list (not include-merged))))))
     map))
 
+
 (defvar gp-helm--reviewing-cache nil
   "Async-filled list of reviewer PRs for the current `gp-helm' run.
 Symbol `loading' while the background scan runs.")
@@ -678,6 +782,21 @@ are served by `gp-helm--voted-candidates'."
      (car (gp-helm--partition-reviewing gp-helm--reviewing-cache
                                         gp-helm--reviewing-uuid))))
    (t nil)))
+
+(defun gp-helm--mine-categorized ()
+  "Return the categorisation plist of the user's own PRs, or nil while loading."
+  (when (listp gp-helm--mine-cache)
+    (gp-categorize-pull-requests gp-helm--mine-cache gp-helm--mine-uuid)))
+
+(defun gp-helm--mine-candidates (key draft)
+  "Helm `:candidates' for KEY (`:mine' or `:drafts') of the user's own PRs.
+DRAFT styles the rows as drafts.  Shows a ⏳ row while the fetch is
+still in flight, so helm opens instantly instead of waiting on it."
+  (if (eq gp-helm--mine-cache 'loading)
+      (when (eq key :mine)
+        (list (cons (propertize "  ⏳ fetching your pull requests\u2026" 'face 'shadow)
+                    nil)))
+    (gp-helm--pr-candidates (plist-get (gp-helm--mine-categorized) key) draft)))
 
 (defun gp-helm--covered-candidates ()
   "Helm `:candidates' for PRs other reviewers have already settled."
@@ -816,30 +935,43 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
   "Show the Helm workspace PR list.  See `gp-helm' for INCLUDE-MERGED."
   (let* ((uuid (gp-user-uuid))
          (states (if include-merged '("OPEN" "MERGED" "DECLINED") '("OPEN")))
-         (mine-prs (gp-cache-with-cache
-                    (list 'mine uuid include-merged)
-                    (lambda ()
-                      (gp-workspace-pull-requests
-                       uuid (if include-merged nil "OPEN")))))
-         (cat (gp-categorize-pull-requests mine-prs uuid))
-         ;; The recently-merged section is always shown, so it needs merged
-         ;; PRs even when the rest of the list is open-only.  Cached
-         ;; separately and capped: only the newest few can be in the window,
-         ;; and this must not turn the list into a full history fetch.
-         (merged-recent
-          (when gp-helm-show-merged-recent
-            (gp-helm--merged-recently
-             (if include-merged
-                 mine-prs
-               (gp-cache-with-cache
-                (list 'merged-recent uuid)
-                (lambda ()
-                  (ignore-errors
-                    (gp-workspace-pull-requests uuid "MERGED" 20))))))))
+         (mine-hit (gp-cache-get (list 'mine uuid include-merged)))
+         ;; The recently-merged section only earns its keep on the open-only
+         ;; list: with include-merged on, every merged PR of the user's own
+         ;; is already shown in "My pull requests" itself (states above
+         ;; includes MERGED), so a second section repeating the same rows
+         ;; would add nothing worth a fetch.  Cached and fetched separately
+         ;; from "mine" -- capped at 20, so it never turns into a full
+         ;; history fetch.
+         (merged-hit (unless include-merged (gp-cache-get (list 'merged-recent uuid))))
          (actions (gp-helm--pr-actions))
          (km (gp-helm--list-keymap include-merged)))
+    ;; "Mine" used to be fetched synchronously right here, which froze Emacs
+    ;; for the whole round trip BEFORE helm existed -- so there was no window
+    ;; to show a spinner in.  Serve it from cache when we can, otherwise open
+    ;; helm immediately with a loading row and fill it in asynchronously, the
+    ;; same way the reviewing section below already works.
+    (setq gp-helm--mine-uuid uuid
+          gp-helm--mine-cache (if (car mine-hit) (cdr mine-hit) 'loading))
     (setq gp-helm--reviewing-cache 'loading
           gp-helm--reviewing-uuid uuid)
+    (if (car mine-hit)
+        ;; cached: still need the badges the async path would have fetched
+        (let ((cached (cdr mine-hit)))
+          (run-with-idle-timer
+           0.1 nil
+           (lambda ()
+             (let ((cat (gp-categorize-pull-requests cached uuid)))
+               (gp-helm--scan-mine-badges
+                (append (plist-get cat :mine) (plist-get cat :drafts)))))))
+      (gp-helm--fetch-mine-async uuid include-merged))
+    (setq gp-helm--merged-recent-cache
+          (cond
+           ((or (not gp-helm-show-merged-recent) include-merged) nil)
+           ((car merged-hit) (gp-helm--merged-recently (cdr merged-hit)))
+           (t 'loading)))
+    (when (and gp-helm-show-merged-recent (not include-merged) (not (car merged-hit)))
+      (gp-helm--fetch-merged-recent-async uuid))
     (let ((reviewing-source
            (helm-build-sync-source "Needs my review"
              :candidates #'gp-helm--reviewing-candidates
@@ -898,16 +1030,16 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
             (cons reviewing-source
                   (delq nil
                         (list
-                         (gp-helm--source "My pull requests"
-                                                 (plist-get cat :mine) actions nil km)
+                         (gp-helm--mine-source "My pull requests" :mine nil actions km)
                          voted-source
                          covered-source
-                         (gp-helm--source "My drafts"
-                                                 (plist-get cat :drafts) actions t km)
+                         (gp-helm--mine-source "My drafts" :drafts t actions km)
                          ;; last, and styled like drafts: merged work is
-                         ;; reference rather than something to act on
-                         (gp-helm--source (gp-helm--merged-section-label)
-                                          merged-recent actions t km)))))
+                         ;; reference rather than something to act on.  Omitted
+                         ;; outright rather than shown empty-and-loading when
+                         ;; include-merged already covers it via "mine" above.
+                         (when (and gp-helm-show-merged-recent (not include-merged))
+                           (gp-helm--merged-recent-source actions km))))))
       ;; reviewing PRs have no fast endpoint: serve from cache, else scan
       ;; repos in parallel (non-blocking) and fill the section as batches land
       (let ((hit (gp-cache-get (list 'reviewing uuid states))))
@@ -930,14 +1062,6 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
           (run-with-idle-timer
            0.1 nil
            (lambda () (gp-helm--scan-reviewing-async uuid states)))))
-      ;; fetch pipeline statuses and review tallies for the immediately-known
-      ;; PRs in the background
-      (run-with-idle-timer
-       0.1 nil
-       (lambda ()
-         (let ((known (append (plist-get cat :mine) (plist-get cat :drafts))))
-           (gp-helm--scan-pipelines-async known)
-           (gp-helm--scan-review-tallies-async known))))
       (helm :sources sources
             :truncate-lines t
             :buffer gp-helm-buffer

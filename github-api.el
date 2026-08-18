@@ -465,29 +465,90 @@ STATE is \"OPEN\"/\"MERGED\"/\"DECLINED\"-shaped like Bitbucket's, but
 GitHub search only distinguishes open/closed -- \"MERGED\"/\"DECLINED\"
 are both mapped to a closed-PR search, and the caller can tell them
 apart afterwards via `github-pr-draft-p'/`merged_at'."
-  (let* ((login (or login (github-user-login)))
-         (open-p (or (null state) (equal state "OPEN")))
-         (q (format "is:pr author:%s %s" login (if open-p "is:open" "is:closed"))))
-    (github--search-pull-requests q max-items)))
+  (github--search-pull-requests
+   (github--workspace-pr-query (or login (github-user-login)) state)
+   max-items))
+
+(defun github--workspace-pr-query (login state)
+  "Return the issue-search query for LOGIN's PRs in STATE.
+Shared by the sync and async listings so the two cannot drift on which
+PRs they consider in scope."
+  (format "is:pr author:%s %s"
+          login
+          (if (or (null state) (equal state "OPEN")) "is:open" "is:closed")))
+
+(defun github--search-pull-requests-async (q callback &optional max-items)
+  "Async twin of `github--search-pull-requests'; CALLBACK gets (OK PRS).
+Genuinely non-blocking, in two chained async stages: the issue search
+itself, then one `github-pull-request-async' per hit to turn the
+issue-shaped hits into full PR objects (the search API returns no
+head/base branch, reviewers or draft flag).
+
+Wrapping the synchronous version in a timer instead would NOT do:
+each stage is its own blocking request, so a timer just relocates the
+multi-second freeze -- Emacs never reaches redisplay, and the caller's
+spinner stays invisible.  Every hit must therefore go through the
+async fetch too, not just the search.
+
+Individual PR fetches that fail are dropped, mirroring the
+`ignore-errors' in the synchronous variant: one unreadable repo
+should not lose the whole list.  CALLBACK runs exactly once, after
+the last outstanding fetch settles."
+  (github-api-paged-async
+   "/search/issues"
+   `(("q" . ,q))
+   (lambda (ok hits)
+     (if (not ok)
+         (funcall callback nil nil)
+       (let* ((targets
+               (delq nil
+                     (mapcar (lambda (hit)
+                               (let ((full-name (github--full-name-of-search-hit hit))
+                                     (number (alist-get 'number hit)))
+                                 (and full-name number (cons full-name number))))
+                             hits)))
+              (pending (length targets))
+              ;; Preserve the search's ordering (relevance/recency) rather
+              ;; than letting completion order decide: fill a fixed-length
+              ;; vector by index, since the fetches finish out of order.
+              (slots (make-vector (length targets) nil)))
+         (if (zerop pending)
+             (funcall callback t nil)
+           (let ((i -1))
+             (dolist (target targets)
+               (setq i (1+ i))
+               (let ((idx i))
+                 (github-pull-request-async
+                  (car target) (cdr target)
+                  (lambda (pr-ok pr)
+                    (when pr-ok (aset slots idx pr))
+                    (setq pending (1- pending))
+                    (when (zerop pending)
+                      (funcall callback t (delq nil (append slots nil)))))))))))))
+   max-items))
 
 (defun github-workspace-pull-requests-async (callback &optional login state max-items)
   "Async twin of `github-workspace-pull-requests'; CALLBACK gets (OK PRS).
-Deferred rather than truly non-blocking: the listing goes through
-issue-search plus one PR fetch per hit (see
-`github--search-pull-requests'), which has no single-request async
-form, so this mirrors `github-reviewing-pull-requests-async' and runs
-the synchronous scan on a timer.  That still lets the caller paint a
-spinner first, and keeps the overview refresh identical across
-backends.  Uses a wall-clock `run-at-time', NOT `run-with-idle-timer'
--- see `github-pull-request-comments-async' for why."
-  (run-at-time
-   0 nil
-   (lambda ()
-     (condition-case e
-         (funcall callback t (github-workspace-pull-requests login state max-items))
-       (error
-        (gp-log-error "github workspace PR scan: %s" (error-message-string e))
-        (funcall callback nil nil))))))
+Truly non-blocking, via `github--search-pull-requests-async'.
+
+LOGIN must be supplied by the caller when known: resolving the
+default through `github-user-login' is itself a blocking request, and
+doing it here would freeze Emacs before the first async stage even
+starts -- exactly what this exists to avoid.  When LOGIN is nil the
+lookup is deferred onto a timer so the caller can still paint first."
+  (if login
+      (github--search-pull-requests-async
+       (github--workspace-pr-query login state) callback max-items)
+    (run-at-time
+     0 nil
+     (lambda ()
+       (condition-case e
+           (github--search-pull-requests-async
+            (github--workspace-pr-query (github-user-login) state)
+            callback max-items)
+         (error
+          (gp-log-error "github workspace PR scan: %s" (error-message-string e))
+          (funcall callback nil nil)))))))
 
 (defun github-reviewing-pull-requests (&optional login limit states)
   "Return PRs across GitHub where LOGIN is a requested reviewer.

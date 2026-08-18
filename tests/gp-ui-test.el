@@ -2110,7 +2110,7 @@ test controls exactly when, and whether, the fetch completes."
        ,@body)))
 
 (ert-deftest gp-test-refresh-shows-spinner-before-fetching ()
-  "The \u23f3 marker is on screen while the fetch is still in flight."
+  "The ⏳ marker is on screen while the fetch is still in flight."
   (gp-test--with-stubbed-list-fetch calls
     (with-temp-buffer
       (gp-list-mode)
@@ -2118,7 +2118,7 @@ test controls exactly when, and whether, the fetch completes."
       ;; the fetch was dispatched but has NOT called back yet
       (should (= (length calls) 1))
       ;; a fresh (blank) buffer gets the inline loading line
-      (should (string-match-p "\u23f3" (substring-no-properties (buffer-string)))))))
+      (should (string-match-p "⏳" (substring-no-properties (buffer-string)))))))
 
 (ert-deftest gp-test-refresh-keeps-old-list-visible-while-loading ()
   "An in-flight refresh leaves the previously rendered PRs readable."
@@ -2144,7 +2144,7 @@ test controls exactly when, and whether, the fetch completes."
       (should-not gp--list-loading)
       (let ((text (substring-no-properties (buffer-string))))
         (should (string-match-p "My pull requests (10)" text))
-        (should-not (string-match-p "\u23f3" text)))
+        (should-not (string-match-p "⏳" text)))
       (should (= (length gp--prs) 10)))))
 
 (ert-deftest gp-test-refresh-ignores-stale-callback ()

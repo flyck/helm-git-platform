@@ -2054,7 +2054,7 @@ Includes the title and repo so buffers are easy to tell apart, e.g.
 (defun gp-list ()
   "Open (or refresh) the pull-request list.
 The buffer is displayed BEFORE the refresh is kicked off, so the
-\u23f3 spinner and any previously fetched PRs are on screen while the
+⏳ spinner and any previously fetched PRs are on screen while the
 new list is fetched in the background (see `gp-refresh')."
   (interactive)
   (let ((buf (get-buffer-create gp-list-buffer-name)))
@@ -2071,7 +2071,7 @@ new list is fetched in the background (see `gp-refresh')."
     buf))
 
 (defun gp--list-show-loading ()
-  "Mark the current list buffer as loading with a \u23f3 near the top.
+  "Mark the current list buffer as loading with a ⏳ near the top.
 Leaves existing content intact so a refresh keeps showing the old PRs
 while the new ones are in flight; only a fresh buffer is blank, and
 gets a single minimal line rather than a full-screen banner.
@@ -2082,11 +2082,11 @@ Mirrors `gp--detail-show-loading'."
     (save-excursion
       (goto-char (point-min))
       (if (= (point-min) (point-max))
-          (insert (propertize "\u23f3 loading pull requests\u2026\n" 'face 'shadow))
+          (insert (propertize "⏳ loading pull requests…\n" 'face 'shadow))
         (end-of-line)
         (let ((ov (make-overlay (point) (point))))
           (overlay-put ov 'after-string
-                       (propertize "  \u23f3 refreshing\u2026" 'face 'shadow))
+                       (propertize "  ⏳ refreshing…" 'face 'shadow))
           (setq gp--list-loading ov))))))
 
 (defun gp--list-clear-loading ()
@@ -2110,7 +2110,7 @@ Point returns to the last-visited PR when it is still in the list."
 (defun gp-refresh ()
   "Fetch and redraw the PR list asynchronously, never freezing the buffer.
 
-A \u23f3 spinner is painted FIRST -- before any network call -- and the PR
+A ⏳ spinner is painted FIRST -- before any network call -- and the PR
 list is then fetched in the background, so the buffer stays responsive
 and any previously shown PRs remain readable and navigable while the
 fetch is in flight.  A monotonic token (`gp--list-refresh-token')

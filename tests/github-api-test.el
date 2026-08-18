@@ -662,5 +662,120 @@ DELETE aimed at the content would 404."
     (should-not (github-remove-comment-reaction "acme/web" '((id . 7)) "+1"))
     (should (= (length (github-comment-reactions "acme/web" '((id . 7)))) 1))))
 
+;;;; Async workspace PR listing ----------------------------------------------
+;;
+;; Regression coverage for a real bug: the async listing was first written as
+;; the SYNCHRONOUS scan wrapped in `run-at-time 0'.  That looks async but is
+;; not: the search and every per-hit PR fetch still block, so Emacs never
+;; reaches redisplay and the caller's spinner stays invisible for the whole
+;; multi-second scan.  These pin down that BOTH stages go through the async
+;; API -- if either reverts to a blocking call, the stubs here are bypassed
+;; and the test fails rather than silently freezing the UI again.
+
+(defvar github-test--async-blocking-calls nil
+  "Names of synchronous API functions called during an async listing.")
+
+(defun github-test--stub-pr (full-name number prs)
+  "Return the stub PR for FULL-NAME/NUMBER from the alist PRS."
+  (cdr (assoc (format "%s#%s" full-name number) prs)))
+
+(defmacro github-test--with-async-stubs (search-hits prs &rest body)
+  "Run BODY with the async GitHub endpoints stubbed.
+SEARCH-HITS is the issue-search result; PRS maps \"owner/repo#number\"
+to the PR object its async fetch returns.  Any call to a *blocking*
+entry point is recorded in `github-test--async-blocking-calls'."
+  (declare (indent 2))
+  `(let ((github-test--async-blocking-calls nil))
+     (cl-letf (((symbol-function 'github-api-paged-async)
+                (lambda (_path _params callback &optional _max)
+                  (funcall callback t ,search-hits)))
+               ((symbol-function 'github-pull-request-async)
+                (lambda (full-name number callback)
+                  (funcall callback t
+                           (github-test--stub-pr full-name number ,prs))))
+               ;; blocking twins must NOT be reached
+               ((symbol-function 'github-api-paged)
+                (lambda (&rest _)
+                  (push 'github-api-paged github-test--async-blocking-calls)
+                  nil))
+               ((symbol-function 'github-pull-request)
+                (lambda (&rest _)
+                  (push 'github-pull-request github-test--async-blocking-calls)
+                  nil)))
+       ,@body)))
+
+(ert-deftest github-test-workspace-prs-async-uses-only-async-endpoints ()
+  "The async listing never falls back to a blocking search or PR fetch."
+  (github-test--with-async-stubs
+      '(((number . 7) (repository_url . "https://api.github.com/repos/acme/web"))
+        ((number . 9) (repository_url . "https://api.github.com/repos/acme/api")))
+      '(("acme/web#7" . ((id . 7) (title . "seven")))
+        ("acme/api#9" . ((id . 9) (title . "nine"))))
+    (let (result)
+      (github-workspace-pull-requests-async
+       (lambda (ok prs) (setq result (list ok prs)))
+       "ada")
+      (should (car result))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (cadr result)) '(7 9)))
+      ;; the whole point: no blocking call was made
+      (should-not github-test--async-blocking-calls))))
+
+(ert-deftest github-test-workspace-prs-async-preserves-search-order ()
+  "Out-of-order async completions still yield the search's ordering."
+  (let ((pending '()))
+    (cl-letf (((symbol-function 'github-api-paged-async)
+               (lambda (_p _q callback &optional _m)
+                 (funcall callback t
+                          '(((number . 1) (repository_url . "https://api.github.com/repos/o/a"))
+                            ((number . 2) (repository_url . "https://api.github.com/repos/o/b"))
+                            ((number . 3) (repository_url . "https://api.github.com/repos/o/c"))))))
+              ((symbol-function 'github-pull-request-async)
+               (lambda (_fn number callback)
+                 ;; defer instead of answering inline, so we control the order
+                 (push (cons number callback) pending))))
+      (let (result)
+        (github-workspace-pull-requests-async
+         (lambda (ok prs) (setq result (and ok (mapcar (lambda (p) (alist-get 'id p)) prs))))
+         "ada")
+        ;; complete in reverse arrival order
+        (dolist (entry pending)
+          (funcall (cdr entry) t (list (cons 'id (car entry)))))
+        (should (equal result '(1 2 3)))))))
+
+(ert-deftest github-test-workspace-prs-async-drops-failed-fetches ()
+  "A PR fetch that fails is skipped, not fatal to the whole list."
+  (github-test--with-async-stubs
+      '(((number . 7) (repository_url . "https://api.github.com/repos/acme/web"))
+        ((number . 9) (repository_url . "https://api.github.com/repos/acme/api")))
+      '(("acme/web#7" . ((id . 7))))
+    (cl-letf* ((orig (symbol-function 'github-pull-request-async))
+               ((symbol-function 'github-pull-request-async)
+                (lambda (full-name number callback)
+                  (if (equal number 9)
+                      (funcall callback nil nil)
+                    (funcall orig full-name number callback)))))
+      (let (result)
+        (github-workspace-pull-requests-async
+         (lambda (ok prs) (setq result (and ok prs))) "ada")
+        (should (equal (mapcar (lambda (p) (alist-get 'id p)) result) '(7)))))))
+
+(ert-deftest github-test-workspace-prs-async-empty-search-completes ()
+  "An empty search still calls back exactly once, with an empty list."
+  (github-test--with-async-stubs '() '()
+    (let ((calls 0) result)
+      (github-workspace-pull-requests-async
+       (lambda (ok prs) (setq calls (1+ calls) result (list ok prs))) "ada")
+      (should (= calls 1))
+      (should (equal result '(t nil))))))
+
+(ert-deftest github-test-workspace-prs-async-search-failure-reports-not-ok ()
+  "A failed search reports OK nil rather than an empty success."
+  (cl-letf (((symbol-function 'github-api-paged-async)
+             (lambda (_p _q callback &optional _m) (funcall callback nil nil))))
+    (let (result)
+      (github-workspace-pull-requests-async
+       (lambda (ok prs) (setq result (list ok prs))) "ada")
+      (should (equal result '(nil nil))))))
+
 (provide 'github-api-test)
 ;;; github-api-test.el ends here
