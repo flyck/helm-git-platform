@@ -165,17 +165,68 @@ second of wall-clock cost.")
 (defvar gp-pipeline--spinner-misses 0
   "Consecutive `gp-pipeline--spinner-tick' runs that found no spinner.")
 
+(defvar gp-pipeline--elapsed-last-second nil
+  "Wall-clock second at which elapsed times were last reticked.
+Throttles the elapsed repaint to once a second: the spinner ticks
+about twelve times as often, and a seconds display cannot change
+faster than the clock.")
+
+(defun gp-pipeline--elapsed-repaint-buffer ()
+  "Retick every running step's elapsed-time text in the current buffer.
+The duration is derived from `started_on', so it only advances when
+something redraws it -- and the pipeline poll skips the redraw while a
+running step's JSON is unchanged, which is the whole time it runs.
+Rewrites just the tagged text, so point, marks and folding stay put.
+Returns non-nil when at least one duration was found."
+  (let ((inhibit-read-only t)
+        (buffer-undo-list t)
+        (found nil)
+        (pos (point-min)))
+    (save-excursion
+      (while (setq pos (text-property-not-all pos (point-max)
+                                              'gp-pipeline-elapsed nil))
+        (let* ((started (get-text-property pos 'gp-pipeline-elapsed))
+               (end (or (next-single-property-change
+                         pos 'gp-pipeline-elapsed nil (point-max))
+                        (point-max)))
+               (new (ignore-errors
+                      (format "  %s"
+                              (gp-pipeline--format-secs
+                               (max 0 (floor (- (float-time)
+                                                (float-time
+                                                 (date-to-time started))))))))))
+          (setq found t)
+          (when (and new (not (string= (buffer-substring-no-properties pos end)
+                                       new)))
+            (let ((props (text-properties-at pos)))
+              (goto-char pos)
+              (delete-region pos end)
+              (insert (apply #'propertize new props))
+              (setq end (+ pos (length new)))))
+          (setq pos (max end (1+ pos))))))
+    (set-buffer-modified-p nil)
+    found))
+
 (defun gp-pipeline--spinner-tick ()
   "Advance the spinner and repaint it in every buffer showing one.
 Stops the timer once no live buffer has contained a spinner for
 `gp-pipeline--spinner-grace-ticks' consecutive ticks."
   (setq gp-pipeline--spinner-index (1+ gp-pipeline--spinner-index))
-  (let ((frame (gp-pipeline--spinner-frame))
-        (any nil))
+  (let* ((frame (gp-pipeline--spinner-frame))
+         (now (floor (float-time)))
+         (tick-elapsed (not (equal now gp-pipeline--elapsed-last-second)))
+         (any nil))
+    (when tick-elapsed (setq gp-pipeline--elapsed-last-second now))
     (dolist (buf (buffer-list))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (derived-mode-p 'magit-section-mode)
+            ;; Retick elapsed times on the same clock as the spinner: a step
+            ;; that is running is exactly a step whose duration must advance.
+            ;; Only once a second though -- the seconds display cannot change
+            ;; faster than that, and the spinner ticks ~12x more often.
+            (when (and tick-elapsed (gp-pipeline--elapsed-repaint-buffer))
+              (setq any t))
             (when (gp-pipeline--spinner-repaint-buffer frame)
               (setq any t))))))
     (if any
@@ -298,7 +349,16 @@ the indistinguishable running state."
                 (when rerunnable
                   (propertize "  [rerun ▸ P]" 'face 'gp-pipeline-running-face))
                 (unless (string-empty-p dur)
-                  (propertize (format "  %s" dur) 'face 'shadow))
+                  ;; A running step's duration is computed from `started_on'
+                  ;; at RENDER time, so it is a snapshot, not a clock.  The
+                  ;; poll deliberately skips the rerender while fetched data
+                  ;; is unchanged, which is exactly what a still-running step
+                  ;; returns -- so tag the text with its start timestamp and
+                  ;; let `gp-pipeline--spinner-tick' retick it in place.
+                  (apply #'propertize (format "  %s" dur) 'face 'shadow
+                         (when (gp-pipeline-step-running-p step)
+                           (list 'gp-pipeline-elapsed
+                                 (alist-get 'started_on step)))))
                 (propertize "   l:log" 'face 'shadow))))))
 
 (defun gp-pipeline--short-hash (hash)

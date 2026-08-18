@@ -354,6 +354,36 @@ cover this hint -- which is how it went stale once already."
                         (oref section children)))))
 
 
+(ert-deftest gp-test-elapsed-repaint-advances-in-place ()
+  "A running step's elapsed time reticks without a full rerender.
+Regression: the duration was computed at render time only, and the
+poll skips the rerender while a running step's JSON is unchanged, so
+the counter sat frozen until a manual `g'."
+  (with-temp-buffer
+    (let* ((started (format-time-string "%Y-%m-%dT%H:%M:%SZ"
+                                        (time-subtract (current-time) 65)
+                                        t))
+           (inhibit-read-only t))
+      ;; stale text: what a render 60s ago would have produced
+      (insert "  x "
+              (propertize "  5s" 'face 'shadow 'gp-pipeline-elapsed started)
+              "\n")
+      (should (gp-pipeline--elapsed-repaint-buffer))
+      ;; now recomputed from `started_on', so it reflects the real elapsed
+      (should (string-match-p "1m0[0-9]s" (buffer-string)))
+      (should-not (string-match-p "  5s" (buffer-string)))
+      ;; still tagged, so the next tick finds it again
+      (should (text-property-not-all (point-min) (point-max)
+                                     'gp-pipeline-elapsed nil)))))
+
+(ert-deftest gp-test-elapsed-repaint-ignores-untagged-text ()
+  "Only tagged (running) durations are reticked; finished ones stay put."
+  (with-temp-buffer
+    (insert "  x " (propertize "  1m30s" 'face 'shadow) "\n")
+    (let ((before (buffer-string)))
+      (should-not (gp-pipeline--elapsed-repaint-buffer))
+      (should (equal before (buffer-string))))))
+
 ;;;; Manual-step deploy hook ----------------------------------------------------
 
 (defconst gp-test--deploy-pipeline
