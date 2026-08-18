@@ -2726,5 +2726,79 @@ own state wins -- `gp--collapse-resolved-sections' must not re-hide it."
         (should sec)
         (should-not (oref sec hidden))))))
 
+(defun gp--test-body-invisible-p (section)
+  "Return non-nil if SECTION's body is actually hidden in the buffer.
+Checks for the `invisible' overlay, not just the `hidden' slot -- the two
+came apart on refresh, which is what made collapsed sections look
+re-expanded."
+  (and (oref section content)
+       (cl-some (lambda (o) (overlay-get o 'invisible))
+                (overlays-in (oref section content) (oref section end)))))
+
+(ert-deftest gp-test-collapsed-section-stays-hidden-in-buffer-after-refresh ()
+  "A collapsed section is still visually hidden after a redraw.
+`magit-section-hide' hides a body with an `evaporate' overlay, so the
+`erase-buffer' in `gp--render-detail-into' destroys it.  The rebuilt
+section keeps its `hidden' slot but used to lose the overlay, so the
+body rendered in full while the model said collapsed."
+  ;; a description makes `gp--insert-description' emit a real section
+  (let ((pr '((id . 1) (title . "t")
+              (description . "a multi-line\nPR description")))
+        (comments nil))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (gp--render-detail-into (current-buffer) pr comments nil)
+      (let ((sec (cl-find 'gp-description (oref magit-root-section children)
+                          :key (lambda (s) (oref s type)))))
+        (should sec)
+        ;; user collapses it -- slot and overlay agree
+        (magit-section-hide sec)
+        (should (oref sec hidden))
+        (should (gp--test-body-invisible-p sec)))
+      ;; refresh
+      (gp--render-detail-into (current-buffer) pr comments nil)
+      (let ((sec (cl-find 'gp-description (oref magit-root-section children)
+                          :key (lambda (s) (oref s type)))))
+        (should sec)
+        (should (oref sec hidden))
+        ;; the regression: slot said hidden but the text was visible
+        (should (gp--test-body-invisible-p sec))))))
+
+(ert-deftest gp-test-apply-section-visibility-rebuilds-overlays ()
+  "`gp--apply-section-visibility' re-hides every section whose slot says so."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (magit-insert-section (gp-comment-section '((id . 7)))
+          (magit-insert-heading "head")
+          (insert "body\n"))))
+    (let ((sec (car (oref magit-root-section children))))
+      (magit-section-hide sec)
+      (should (gp--test-body-invisible-p sec))
+      ;; simulate what erase-buffer does to `evaporate' overlays
+      (remove-overlays (point-min) (point-max) 'invisible t)
+      (should-not (gp--test-body-invisible-p sec))
+      ;; the slot still says hidden, so reapplying must restore the overlay
+      (should (oref sec hidden))
+      (gp--apply-section-visibility)
+      (should (oref sec hidden))
+      (should (gp--test-body-invisible-p sec)))))
+
+(ert-deftest gp-test-apply-section-visibility-leaves-expanded-sections-alone ()
+  "Reapplying visibility does not hide sections the user has expanded."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (magit-insert-section (gp-comment-section '((id . 7)))
+          (magit-insert-heading "head")
+          (insert "body\n"))))
+    (let ((sec (car (oref magit-root-section children))))
+      (should-not (oref sec hidden))
+      (gp--apply-section-visibility)
+      (should-not (oref sec hidden))
+      (should-not (gp--test-body-invisible-p sec)))))
+
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here

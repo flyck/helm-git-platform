@@ -2404,7 +2404,9 @@ Point returns to the last-visited PR when it is still in the list."
     (setq gp--prs prs)
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (gp--render-list prs uuid))
+      (gp--render-list prs uuid)
+      ;; rebuild the invisibility overlays `erase-buffer' just destroyed
+      (gp--apply-section-visibility))
     (goto-char (or (and last-id (gp--list-find-pr-point last-id))
                    (point-min)))))
 
@@ -2666,7 +2668,28 @@ to pick the tracking back up."
         (when first-render
           (gp--collapse-resolved-sections)
           (setq gp--detail-rendered-once t)))
+      (gp--apply-section-visibility)
       (goto-char (min pos (point-max))))))
+
+(defun gp--apply-section-visibility ()
+  "Make the buffer's text match its sections' `hidden' slots.
+
+`magit-section-hide' hides a body with an overlay marked `evaporate',
+so `erase-buffer' at the top of a redraw destroys every one of them.
+The rebuilt sections do get their `hidden' slot back (from the
+visibility cache / the previous tree), but nothing recreates the
+overlay -- leaving sections that are collapsed as far as the model is
+concerned while the buffer shows their bodies in full.  That is what
+made every collapsed section look re-expanded after `g'.
+
+`magit-section-show' on the root walks the tree and re-hides each child
+whose slot says hidden, which rebuilds the overlays; magit's own
+refresh does exactly this (see `magit--refresh-buffer').  The
+`magit-section-cache-visibility' binding keeps that walk from writing
+the state it is only supposed to be reapplying."
+  (when magit-root-section
+    (let ((magit-section-cache-visibility nil))
+      (magit-section-show magit-root-section))))
 
 (defun gp--detail-rerender (buf)
   "Redraw BUF's detail view from its cached buffer-locals (no refetch).
