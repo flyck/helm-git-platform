@@ -233,5 +233,43 @@ Outdated-ness is computed from the diff: line 2 is in the hunk
       (gp-overlay-apply-to-buffer (current-buffer) gp-overlay--lines)
       (should (= (length gp-overlay--list) 1)))))
 
+(ert-deftest gp-overlay-fill-wraps-long-text ()
+  "Long comment text is hard-wrapped; overlay after-string never soft-wraps.
+Neither `word-wrap' nor `truncate-lines' apply to an overlay's
+`after-string', so the text has to be filled when rendered or a long
+comment runs off the right edge."
+  (let ((gp-overlay-wrap-width 60))
+    ;; every produced line fits, including the first (which is charged
+    ;; for the "    <avatar> Author: " head)
+    (let* ((text (mapconcat #'identity (make-list 40 "word") " "))
+           (lines (split-string (gp-overlay--fill text "       " 14) "\n")))
+      (should (> (length lines) 1))
+      (dolist (l lines)
+        (should (<= (length l) 60))))
+    ;; continuation lines carry the indent prefix
+    (should (string-match-p "\n       "
+                            (gp-overlay--fill
+                             (mapconcat #'identity (make-list 40 "w") " ")
+                             "       " 14)))))
+
+(ert-deftest gp-overlay-fill-preserves-structure ()
+  "Filling keeps existing line breaks, indentation and over-long tokens."
+  (let ((gp-overlay-wrap-width 60))
+    ;; a line that already fits is passed through byte-for-byte, so
+    ;; indented code blocks are not re-flowed
+    (should (equal (gp-overlay--fill "a    b" "  " 2) "a    b"))
+    ;; explicit newlines survive
+    (should (equal (gp-overlay--fill "one\ntwo" "" 0) "one\ntwo"))
+    ;; a single unbreakable token is left intact rather than split
+    (let ((url (concat "https://example.com/" (make-string 90 ?x))))
+      (should (string-match-p (regexp-quote url)
+                              (gp-overlay--fill url "  " 2))))))
+
+(ert-deftest gp-overlay-fill-can-be-disabled ()
+  "Nil `gp-overlay-wrap-width' restores unwrapped rendering."
+  (let ((gp-overlay-wrap-width nil))
+    (let ((text (make-string 300 ?a)))
+      (should (equal (gp-overlay--fill text "  " 2) text)))))
+
 (provide 'gp-overlay-test)
 ;;; gp-overlay-test.el ends here

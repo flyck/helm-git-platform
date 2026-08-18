@@ -146,8 +146,9 @@ setup (the write actions simply 403).
 | Feature | Turn on | Turn off |
 |---|---|---|
 | **Inline comment overlays** — review comments drawn on the code | on by default | `(setq gp-overlay-enabled nil)` or `M-x gp-overlay-toggle-globally` |
+| **Wrapping of long comment text** — overlay text is hard-wrapped to the window | on by default | `(setq gp-overlay-wrap-width nil)`, or an integer for a fixed column |
 | **Auto-overlay + mode-line counts** — per-repo PR count and comments while you visit files | `(gp-watch-mode 1)` | omit it, or `(gp-watch-mode -1)` |
-| **Comments in magit diffs** | `(gp-magit-mode 1)` | omit it |
+| **Comments in magit diffs** | `(gp-magit-mode 1)` (also needs `gp-watch-mode`) | omit it |
 | **CI pipelines in the detail view** — the PR branch's pipelines, tabbable, with stop / trigger / manual-run / logs | on by default | `(setq gp-detail-show-pipelines nil)` |
 | **Shell-rc env import** (macOS convenience) | `(require 'bitbucket-env)` + `(bitbucket-env-load)` | omit it (default) |
 | **Send a PR comment to an AI terminal session** (iTerm2 or Ghostty) | `(setq gp-helm-terminal-backend 'iterm2)` or `'ghostty` | omit it (default) |
@@ -163,6 +164,21 @@ The core browsing (`gp-helm`, `gp-list`, checkout) works with none of these on.
 | `gp-helm-repo` | List open PRs in one repository |
 | `gp-watch-mode` | Global: live per-repo PR count + auto comment overlays |
 | `gp-magit-mode` | PR comments inside magit-diff buffers |
+
+### Comments in a magit diff
+
+With `(gp-magit-mode 1)` *and* `(gp-watch-mode 1)` on, any magit diff of a branch that has an open
+PR shows that PR's inline comments as overlays, drawn as soon as the diff renders. Inside such a
+buffer:
+
+| Key | What it does |
+|---|---|
+| `C-c B n` | Add an inline PR comment on the file:line at point |
+| `C-c B g` | Refetch and redraw the comments |
+
+Both keys are no-ops outside a PR-branch diff, so ordinary magit use (status, log, rebase) is
+untouched. Comments are cached for `gp-magit-comments-cache-ttl` seconds (60) so redraws on every
+magit refresh stay off the network; `C-c B g` always refetches.
 
 In the detail buffer and on overlays, most actions show their key in `[brackets]` and the buttons
 are clickable (reply, resolve, new comment, open, diff). Comments are written in Markdown with

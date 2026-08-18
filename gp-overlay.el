@@ -213,6 +213,72 @@ default to collapsed and the rest to expanded."
           ((eq explicit 'expanded) nil)
           (t (gp-comment-resolved-p comment)))))
 
+(defcustom gp-overlay-wrap-width 'window
+  "How wide comment text may run in an overlay before it is wrapped.
+Overlay `after-string' text is not soft-wrapped by Emacs (neither
+`word-wrap' nor `truncate-lines' apply to it), so long comments are
+hard-wrapped when rendered.
+
+An integer is a fixed column width.  The symbol `window' wraps to the
+width of the window showing the buffer.  nil disables wrapping and
+restores the old run-off-the-edge behaviour."
+  :type '(choice (const :tag "Fit the window" window)
+                 (const :tag "Do not wrap" nil)
+                 (integer :tag "Fixed columns"))
+  :group 'bitbucket)
+
+(defun gp-overlay--wrap-width ()
+  "Return the column to wrap comment text at, or nil for no wrapping."
+  (pcase gp-overlay-wrap-width
+    ('nil nil)
+    ('window (max 40 (- (window-body-width
+                         (get-buffer-window (current-buffer)))
+                        2)))
+    ((and (pred integerp) n) (max 20 n))
+    (_ nil)))
+
+(defun gp-overlay--fill (text prefix &optional first-indent)
+  "Hard-wrap TEXT, indenting continuation lines with PREFIX.
+Text properties (link faces, buttons) survive the fill, so the
+result can be used directly in an overlay `after-string'.  Existing
+line breaks in TEXT are preserved: each line is wrapped on its own,
+so Markdown lists and code blocks keep their shape.
+
+FIRST-INDENT is the width already occupied before TEXT starts (the
+\"    <avatar> Author: \" head).  It is charged against the very first
+output line only, so that line does not overflow the wrap column
+while the rest of the block still uses the full width."
+  (let ((width (gp-overlay--wrap-width)))
+    (if (not width)
+        text
+      (let* ((limit (max 1 (- width (length prefix))))
+             (first-limit (max 1 (- width (or first-indent (length prefix)))))
+             (first t)
+             (out nil))
+        (dolist (line (split-string text "\n"))
+          (if (<= (length line) (if first first-limit limit))
+              ;; already fits: pass through verbatim so indentation inside
+              ;; code blocks and aligned text is not collapsed.
+              (progn (push line out) (setq first nil))
+          (let ((cur nil) (cur-len 0))
+            (dolist (word (split-string line " " t))
+              ;; greedy word wrap; an over-long word is left intact rather
+              ;; than broken mid-token, so URLs stay clickable.
+              (let* ((wl (length word))
+                     (cap (if first first-limit limit)))
+                (cond
+                 ((null cur) (setq cur (list word) cur-len wl))
+                 ((<= (+ cur-len 1 wl) cap)
+                  (push word cur)
+                  (setq cur-len (+ cur-len 1 wl)))
+                 (t (push (string-join (nreverse cur) " ") out)
+                    (setq first nil)
+                    (setq cur (list word) cur-len wl)))))
+            ;; a blank source line yields a blank output line
+            (push (if cur (string-join (nreverse cur) " ") "") out)
+            (setq first nil))))
+        (string-join (nreverse out) (concat "\n" prefix))))))
+
 (defun gp-overlay--comment-string (comment &optional uuid)
   "Render a single COMMENT to a propertized string (with trailing newline).
 Shows a one-line summary when collapsed or resolved, full text
@@ -242,8 +308,13 @@ authenticated."
                 (cond (resolved "  ✓ resolved")
                       (collapsed "  …"))
                 ": "))
+         ;; Continuation lines line up under the comment text, past the
+         ;; "    <avatar> Author: " head, so wrapped prose reads as one block.
          (body (gp-overlay--face-body
-                (gp-linkify-string (if collapsed first-line raw)) face))
+                (gp-overlay--fill
+                 (gp-linkify-string (if collapsed first-line raw))
+                 "       " (string-width head))
+                face))
          (buttons (gp-overlay--comment-buttons
                    comment resolved collapsed
                    (gp-comment-resolvable-p comment)

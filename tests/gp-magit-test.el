@@ -9,6 +9,22 @@
 
 (require 'ert)
 (require 'gp-magit)
+(require 'magit-diff nil t)
+
+;; The require above is noerror: in a clean CI checkout magit can fail to
+;; load outright (a transient version conflict is enough).  Declare what
+;; the tests call so byte-compilation does not fail on undefined
+;; functions; the tests themselves skip when magit is absent.
+(declare-function magit-diff-range "magit-diff")
+(declare-function magit-diff-hunk-line "magit-diff")
+(declare-function magit-diff-mode "magit-diff")
+(declare-function magit-current-section "magit-section")
+(declare-function magit-get-mode-buffer "magit-mode")
+
+;; `gp-watch' is required at RUNTIME inside `skip-unless', so its minor-mode
+;; variable is not special at compile time -- a `let' on it would otherwise
+;; read as an unused lexical binding.
+(defvar gp-watch-mode)
 
 (ert-deftest gp-magit-comment-line-positions ()
   "Added (+) lines are mapped to their new-side line numbers."
@@ -50,6 +66,62 @@
      "+yes\n")
     (let ((pos (gp-magit--comment-line-positions "wanted.el")))
       (should (equal (mapcar #'car pos) '(2))))))
+
+(ert-deftest gp-magit-comment-line-positions-magit-section-tree ()
+  "Positions are found in a real magit-diff buffer, which has no `+++ b/'.
+Magit washes the diff: the `--- a/PATH' / `+++ b/PATH' headers are
+removed from the buffer and stashed in the file section's `header'
+slot, leaving only a \"modified   PATH\" heading.  This is the format
+the feature actually runs against, so it must be covered."
+  (skip-unless (require 'magit-diff nil t))
+  (let ((dir (make-temp-file "gp-magit-test" t)))
+    (unwind-protect
+        (let ((default-directory (file-name-as-directory dir)))
+          (call-process "git" nil nil nil "init" "-q")
+          (call-process "git" nil nil nil "config" "user.email" "t@example.com")
+          (call-process "git" nil nil nil "config" "user.name" "T")
+          (with-temp-file (expand-file-name "a.el" dir)
+            (insert "one\ntwo\nthree\n"))
+          (call-process "git" nil nil nil "add" "-A")
+          (call-process "git" nil nil nil "commit" "-q" "-m" "init")
+          (with-temp-file (expand-file-name "a.el" dir)
+            (insert "one\ntwo\nadded-3\nadded-4\nthree\n"))
+          (call-process "git" nil nil nil "add" "-A")
+          (call-process "git" nil nil nil "commit" "-q" "-m" "change")
+          (magit-diff-range "HEAD~1")
+          (let ((buf (magit-get-mode-buffer 'magit-diff-mode)))
+            (should buf)
+            (with-current-buffer buf
+              ;; sanity: the washed buffer really has no +++ header
+              (should-not (save-excursion
+                            (goto-char (point-min))
+                            (re-search-forward "^\\+\\+\\+ b/" nil t)))
+              (let ((pos (gp-magit--comment-line-positions "a.el")))
+                ;; the two added lines land on new-side lines 3 and 4
+                (should (equal (mapcar #'car pos) '(3 4)))
+                ;; and every position agrees with magit's own line number
+                (dolist (p pos)
+                  (save-excursion
+                    (goto-char (cdr p))
+                    (should (equal (magit-diff-hunk-line
+                                    (magit-current-section) nil)
+                                   (car p)))))))))
+      (delete-directory dir t))))
+
+(ert-deftest gp-magit-keys-win-over-gp-watch-prefix ()
+  "`C-c B n' reaches gp-magit, without killing gp-watch's other keys.
+Both modes use the `C-c B' prefix, and minor-mode maps outrank the
+buffer-local map -- so the magit keys have to go through
+`minor-mode-overriding-map-alist' to win.  That override must still
+let gp-watch's unshadowed keys (`C-c B p') through."
+  (skip-unless (and (require 'magit-diff nil t) (require 'gp-watch nil t)))
+  (let ((gp-watch-mode t))
+    (with-temp-buffer
+      (magit-diff-mode)
+      (gp-magit--activate-keys)
+      (should (eq (key-binding (kbd "C-c B n")) 'gp-magit-add-comment))
+      (should (eq (key-binding (kbd "C-c B g")) 'gp-magit-refresh-comments))
+      (should (eq (key-binding (kbd "C-c B p")) 'gp-watch-visit-branch-pr)))))
 
 (provide 'gp-magit-test)
 ;;; gp-magit-test.el ends here
