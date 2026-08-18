@@ -190,5 +190,54 @@ A cap must then keep the NEWEST commits, not the oldest ones."
         (should (equal (mapcar (lambda (c) (plist-get c :hash)) result)
                        '("c3" "c2")))))))
 
+
+(ert-deftest github-test-normalize-newlines-crlf-and-lone-cr ()
+  "CRLF and lone CR both collapse to LF; non-strings pass through.
+GitHub's web textareas submit CRLF per the HTML form spec, and the
+REST API echoes the body back verbatim."
+  (should (equal (github--normalize-newlines "a\r\nb\r\n\r\nc") "a\nb\n\nc"))
+  (should (equal (github--normalize-newlines "a\rb") "a\nb"))
+  ;; already-LF text (what Bitbucket sends) is untouched
+  (should (equal (github--normalize-newlines "a\nb") "a\nb"))
+  (should (equal (github--normalize-newlines "") ""))
+  ;; JSON null arrives as :null, not nil -- must survive for the
+  ;; caller's own type check
+  (should (eq (github--normalize-newlines :null) :null))
+  (should (eq (github--normalize-newlines nil) nil)))
+
+(ert-deftest github-test-reshape-pr-normalizes-body-crlf ()
+  "A PR body typed in GitHub's web UI loses its CRLFs at the boundary,
+and the caller's own alist is left unmutated."
+  (let* ((raw '((id . 501) (number . 42)
+                (body . "Adds the toggle.\r\n\r\n- [x] tests\r\n")))
+         (out (github--reshape-pr raw)))
+    (should (equal (alist-get 'body out) "Adds the toggle.\n\n- [x] tests\n"))
+    ;; reshaping must not rewrite the object it was handed
+    (should (equal (alist-get 'body raw) "Adds the toggle.\r\n\r\n- [x] tests\r\n"))
+    ;; the existing id/number reshaping still holds
+    (should (equal (alist-get 'id out) 42))
+    (should (equal (alist-get 'gh-database-id out) 501))))
+
+(ert-deftest github-test-comment-bodies-normalize-crlf ()
+  "Issue and review comment bodies are web-authored too, so both
+reshapers strip CRLF before the shared `content.raw' accessor sees it."
+  (let ((issue (github--reshape-issue-comment
+                '((id . 9001) (body . "line one\r\nline two")
+                  (user (login . "bea")))))
+        (review (github--reshape-review-comment
+                 '((id . 9002) (body . "nit:\r\n\r\nrename this")
+                   (path . "widget.el") (line . 10)
+                   (user (login . "bea"))))))
+    (should (equal (let-alist issue .content.raw) "line one\nline two"))
+    (should (equal (let-alist review .content.raw) "nit:\n\nrename this"))))
+
+(ert-deftest github-test-commit-message-normalizes-crlf ()
+  "Commit messages written in GitHub's web editor carry CRLF as well."
+  (github-mock-with-service
+    (let ((github-mock-overrides
+           '(("/commits/abc123\\'" . ((commit (message . "subject\r\n\r\nbody line\r\n")))))))
+      (should (equal (github-commit-message "acme/web" "abc123")
+                     "subject\n\nbody line\n")))))
+
 (provide 'github-api-test)
 ;;; github-api-test.el ends here
