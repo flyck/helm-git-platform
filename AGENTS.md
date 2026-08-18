@@ -28,6 +28,13 @@ The short version:
   works too but is easy to get wrong (e.g. clobbering the untracked
   `*-autoloads.el`/`*-pkg.el` package-manager files) — prefer
   `package-vc-upgrade`.
+- **A reload does not refresh `defcustom` values.** `defcustom`/`defvar` skip
+  an already-bound symbol, so re-loading a file picks up new *functions* but
+  keeps the *old defaults* -- a changed `defcustom` default silently does not
+  take effect. `reload.sh` only unbinds keymaps (`*-map`). When a change alters
+  a default, `makunbound` that symbol before loading, e.g.
+  `emacsclient -e '(progn (makunbound (quote gp-pipeline-spinner-frames)) (load "..."))'`,
+  and verify the new value rather than assuming the reload took.
 - **Every new behaviour ships with an ERT test in the same change.** The suite
   is fully offline (Bitbucket and GitHub are both mocked); a green run
   precedes every reload.
