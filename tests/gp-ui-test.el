@@ -288,6 +288,20 @@ naive `eq' implementation would hit across two separate renders."
       (should-not (gp-pr-description '((id . 42) (body . :null))))
       (should-not (gp-pr-description '((id . 42)))))))
 
+(ert-deftest gp-test-pr-description-strips-github-crlf ()
+  "A GitHub body authored in the web UI arrives CRLF-terminated; by the
+time it reaches the description accessor the ^M are gone, so the
+detail buffer renders clean lines."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (let ((pr (github--reshape-pr
+                 '((id . 501) (number . 42)
+                   (body . "Adds the toggle.\r\n\r\n- [x] tests")))))
+        (let ((desc (gp-pr-description pr)))
+          (should (equal desc "Adds the toggle.\n\n- [x] tests"))
+          (should-not (string-match-p "\r" desc)))))))
+
+
 (ert-deftest gp-test-render-detail-shows-description-for-github-pr ()
   "The detail view renders the description section from GitHub's `body'."
   (github-mock-with-service
