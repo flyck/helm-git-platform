@@ -209,6 +209,28 @@ into an issue report."
           (t data))))
     (format "%S" printed)))
 
+;;;; Text normalisation ---------------------------------------------------------
+
+(defun github--normalize-newlines (text)
+  "Return TEXT with CRLF and lone CR turned into plain LF.
+Non-strings (including the `:null' the JSON parser yields for an
+empty body) are returned unchanged, so callers can normalise first
+and type-check afterwards.
+
+GitHub's web UI submits its textareas as part of an HTML form, and
+the HTML spec mandates CRLF for textarea line breaks; the REST API
+then hands that body back verbatim.  So every piece of text a human
+typed into github.com -- PR bodies, issue and review comment bodies,
+commit messages written in the web editor -- arrives with CRLF, which
+would otherwise render as stray ^M in the detail buffer.  Bitbucket
+normalises to LF server-side, which is why this is GitHub-only.
+
+Deliberately NOT applied to diffs/patch text or Action logs: there a
+carriage return can be part of the content being shown."
+  (if (not (stringp text))
+      text
+    (replace-regexp-in-string "\r\n?" "\n" text)))
+
 (defun github-api-request (method path &optional params data extra-headers)
   "Perform a synchronous GitHub API request and return parsed JSON.
 
@@ -656,12 +678,16 @@ holds `number' -- the rest of the app never needs to know GitHub
 draws this distinction.  The original database id survives under
 `gh-database-id' in case something ever needs it."
   (when pr
-    (let ((number (alist-get 'number pr)))
+    (let* ((number (alist-get 'number pr))
+           ;; Copy first: never mutate the alist the caller handed us.
+           (pr (copy-alist pr))
+           (body (assq 'body pr)))
+      (when body (setcdr body (github--normalize-newlines (cdr body))))
       (if (not number)
           pr
         (cons (cons 'id number)
               (cons (cons 'gh-database-id (alist-get 'id pr))
-                    (assq-delete-all 'id (assq-delete-all 'gh-database-id (copy-alist pr)))))))))
+                    (assq-delete-all 'id (assq-delete-all 'gh-database-id pr))))))))
 
 (defun github-pull-request (full-name number)
   "Return the full PR object for FULL-NAME (\"owner/repo\") and PR NUMBER."
@@ -1367,7 +1393,7 @@ NAMES require the reactions endpoint, which is why that fetch is lazy."
   `((reaction-counts . ,(github--reaction-counts c))
     (reaction-mine . ,(gethash (alist-get 'id c) github--viewer-reactions))
     (id . ,(alist-get 'id c))
-    (content (raw . ,(alist-get 'body c)))
+    (content (raw . ,(github--normalize-newlines (alist-get 'body c))))
     (user (display_name . ,(let-alist c .user.login))
           (uuid . ,(let-alist c .user.login))
           (links (avatar (href . ,(let-alist c .user.avatar_url)))))
@@ -1381,7 +1407,7 @@ NAMES require the reactions endpoint, which is why that fetch is lazy."
   `((reaction-counts . ,(github--reaction-counts c))
     (reaction-mine . ,(gethash (alist-get 'id c) github--viewer-reactions))
     (id . ,(alist-get 'id c))
-    (content (raw . ,(alist-get 'body c)))
+    (content (raw . ,(github--normalize-newlines (alist-get 'body c))))
     (user (display_name . ,(let-alist c .user.login))
           (uuid . ,(let-alist c .user.login))
           (links (avatar (href . ,(let-alist c .user.avatar_url)))))
@@ -1844,7 +1870,8 @@ commits whose email matches no account."
   (let ((name (or (let-alist c .author.login)
                   (let-alist c .commit.author.name))))
     (list :hash (alist-get 'sha c)
-          :summary (github-commit-summary (let-alist c .commit.message))
+          :summary (github-commit-summary
+                    (github--normalize-newlines (let-alist c .commit.message)))
           :author name
           :date (let-alist c .commit.author.date))))
 
@@ -1966,8 +1993,9 @@ status-posting integration/check enabled."
   "Return the commit message for HASH in FULL-NAME, or nil."
   (when (and full-name hash)
     (ignore-errors
-      (let-alist (github-api-request "GET" (format "/repos/%s/commits/%s" full-name hash))
-        .commit.message))))
+      (github--normalize-newlines
+       (let-alist (github-api-request "GET" (format "/repos/%s/commits/%s" full-name hash))
+         .commit.message)))))
 
 (defun github-commit-message-async (full-name hash callback)
   "Fetch the commit message for HASH in FULL-NAME; CALLBACK gets it (or nil).
@@ -1984,7 +2012,8 @@ Bitbucket side uses; a warm entry calls CALLBACK synchronously."
          (format "/repos/%s/commits/%s" full-name hash)
          nil
          (lambda (parsed)
-           (let ((msg (and parsed (let-alist parsed .commit.message))))
+           (let ((msg (github--normalize-newlines
+                       (and parsed (let-alist parsed .commit.message)))))
              (when msg (gp-cache-put key msg))
              (funcall callback msg))))))))
 
