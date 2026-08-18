@@ -143,9 +143,28 @@ non-nil when the buffer contained at least one spinner."
     (set-buffer-modified-p nil)
     found))
 
+(defconst gp-pipeline--spinner-grace-ticks 25
+  "Empty ticks tolerated before the spinner timer stops itself.
+
+A detail buffer is erased and rebuilt wholesale on every rerender, so
+a tick landing inside that window sees no spinner even though one is
+about to reappear.  Stopping on the FIRST empty tick made the spinner
+freeze: only `gp-pipeline--status-glyph' restarts the timer, and the
+pipeline poll deliberately skips the rerender while fetched data is
+unchanged -- exactly the steady state of a long-running pipeline.  So
+nothing repainted the glyph until the next unrelated redraw.
+
+At the default 0.12s interval this grace spans ~3s of genuine absence
+before the timer retires, which idle buffers reach in well under a
+second of wall-clock cost.")
+
+(defvar gp-pipeline--spinner-misses 0
+  "Consecutive `gp-pipeline--spinner-tick' runs that found no spinner.")
+
 (defun gp-pipeline--spinner-tick ()
   "Advance the spinner and repaint it in every buffer showing one.
-Stops the timer once no live buffer contains a spinner."
+Stops the timer once no live buffer has contained a spinner for
+`gp-pipeline--spinner-grace-ticks' consecutive ticks."
   (setq gp-pipeline--spinner-index (1+ gp-pipeline--spinner-index))
   (let ((frame (gp-pipeline--spinner-frame))
         (any nil))
@@ -155,16 +174,24 @@ Stops the timer once no live buffer contains a spinner."
           (when (derived-mode-p 'magit-section-mode)
             (when (gp-pipeline--spinner-repaint-buffer frame)
               (setq any t))))))
-    (unless any (gp-pipeline--spinner-stop))))
+    (if any
+        (setq gp-pipeline--spinner-misses 0)
+      (cl-incf gp-pipeline--spinner-misses)
+      (when (>= gp-pipeline--spinner-misses gp-pipeline--spinner-grace-ticks)
+        (gp-pipeline--spinner-stop)))))
 
 (defun gp-pipeline--spinner-stop ()
   "Cancel the spinner timer."
   (when (timerp gp-pipeline--spinner-timer)
     (cancel-timer gp-pipeline--spinner-timer))
-  (setq gp-pipeline--spinner-timer nil))
+  (setq gp-pipeline--spinner-timer nil
+        gp-pipeline--spinner-misses 0))
 
 (defun gp-pipeline--spinner-ensure ()
-  "Start the spinner timer unless it is already running."
+  "Start the spinner timer unless it is already running.
+Also clears the miss counter, so a buffer that draws a spinner again
+resets the grace window rather than inheriting a nearly-expired one."
+  (setq gp-pipeline--spinner-misses 0)
   (unless (timerp gp-pipeline--spinner-timer)
     (setq gp-pipeline--spinner-timer
           (run-with-timer gp-pipeline-spinner-interval

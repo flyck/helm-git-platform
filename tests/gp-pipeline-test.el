@@ -46,6 +46,46 @@
           (should (= (string-width f) (string-width (aref gp-pipeline-spinner-frames 0)))))
         gp-pipeline-spinner-frames))
 
+(ert-deftest gp-test-pipeline-spinner-survives-rerender-gap ()
+  "A tick landing in a rerender's erase window must not stop the animation.
+Regression: the timer stopped on the FIRST spinner-less tick, and only a
+render restarted it -- but the pipeline poll skips the render while data
+is unchanged, so the glyph froze mid-run."
+  (unwind-protect
+      (let ((buf (get-buffer-create " *gp-spinner-test*")))
+        (unwind-protect
+            (progn
+              (with-current-buffer buf
+                (magit-section-mode)
+                (let ((inhibit-read-only t))
+                  (insert "x " (gp-pipeline--spinner-glyph) "\n")))
+              (gp-pipeline--spinner-ensure)
+              ;; buffer erased mid-rerender: a few empty ticks
+              (with-current-buffer buf
+                (let ((inhibit-read-only t)) (erase-buffer)))
+              (dotimes (_ 3) (gp-pipeline--spinner-tick))
+              (should (timerp gp-pipeline--spinner-timer))
+              ;; glyph reappears -- grace window resets
+              (with-current-buffer buf
+                (let ((inhibit-read-only t))
+                  (insert "x " (gp-pipeline--spinner-glyph) "\n")))
+              (gp-pipeline--spinner-tick)
+              (should (timerp gp-pipeline--spinner-timer))
+              (should (= gp-pipeline--spinner-misses 0)))
+          (kill-buffer buf)))
+    (gp-pipeline--spinner-stop)))
+
+(ert-deftest gp-test-pipeline-spinner-stops-when-really-gone ()
+  "The timer still retires once the grace window is exhausted."
+  (unwind-protect
+      (progn
+        (gp-pipeline--spinner-ensure)
+        (should (timerp gp-pipeline--spinner-timer))
+        (dotimes (_ (1+ gp-pipeline--spinner-grace-ticks))
+          (gp-pipeline--spinner-tick))
+        (should (null gp-pipeline--spinner-timer)))
+    (gp-pipeline--spinner-stop)))
+
 (ert-deftest gp-test-pipeline-spinner-repaint-in-place ()
   "Repainting swaps the spinner char only, leaving the rest of the line intact."
   (with-temp-buffer

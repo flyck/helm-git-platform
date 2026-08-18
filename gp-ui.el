@@ -1667,6 +1667,18 @@ live deployment without a manual refresh."
                            (unless keep
                              (setq gp--detail-pipelines data)
                              (when changed (gp--detail-rerender buf)))
+                           ;; Re-arm the animation from STATE, not from the
+                           ;; render.  `gp-pipeline--spinner-ensure' otherwise
+                           ;; only runs while drawing a glyph, and the
+                           ;; `changed' guard above deliberately skips the
+                           ;; redraw whenever a poll returns identical data --
+                           ;; the steady state of a long-running pipeline.  A
+                           ;; spinner timer that retired in the meantime would
+                           ;; then never come back and the glyph would sit
+                           ;; frozen while the run was still going.
+                           (when (gp--detail-pipelines-running-p
+                                  gp--detail-pipelines)
+                             (gp-pipeline--spinner-ensure))
                            (gp--detail-cancel-pipeline-timer)
                            ;; keep polling against whatever we're actually showing
                            ;; (`visible' -> any frame, not just the selected one)
