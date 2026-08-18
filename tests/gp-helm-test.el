@@ -138,33 +138,30 @@ the badge has no natural neutral symbol)."
                t)))
     (should (memq 'gp-helm-draft-face (gp-helm-test--faces-at 0 line)))))
 
-(ert-deftest gp-test-helm-draft-dimming-keeps-label-colors ()
-  "Dimming a draft row must add to each cell's face, not replace it.
-A plain `propertize' over the whole line dropped the per-label colours
-and re-slanted those cells italic, so the padding no longer measured what
-the label column reserved and every later column drifted -- visible as
-outsized gaps in the drafts section only."
+(ert-deftest gp-test-helm-draft-rows-are-uniformly-grey ()
+  "A draft row is dimmed as one flat grey, labels included.
+Deliberate: the whole-row grey is what makes drafts scannable, and it
+wins over keeping each label's colour (and its exact alignment) there."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
           (gp-helm-labels-width 18))
       (cl-letf (((symbol-function 'display-color-cells) (lambda (&rest _) 16777216)))
         (let* ((pr (github-pull-request "acme/web" 42))
                (line (gp-helm--pr-display pr t))
-               (plain (substring-no-properties line))
-               (at (string-match "bug" plain))
-               (faces (gp-helm-test--faces-at at line)))
-          ;; the label keeps its own colour face *and* gains the dimming
-          (should (memq 'gp-helm-draft-face faces))
-          (should (cl-find-if (lambda (f)
-                                (and (symbolp f)
-                                     (string-prefix-p "gp-label-color-"
-                                                      (symbol-name f))))
-                              faces))
-          ;; and the row is still the same width as its non-draft twin, so
-          ;; the columns after the labels cannot drift
-          (should (= (string-width plain)
-                     (string-width (substring-no-properties
-                                    (gp-helm--pr-display pr nil))))))))))
+               (at (string-match "bug" (substring-no-properties line))))
+          ;; every cell, the labels included, carries only the draft face
+          (should (eq (get-text-property at 'face line) 'gp-helm-draft-face))
+          (should (eq (get-text-property 0 'face line) 'gp-helm-draft-face))
+          ;; the non-draft row still keeps its per-label colour
+          (let* ((plain-line (gp-helm--pr-display pr nil))
+                 (faces (gp-helm-test--faces-at
+                         (string-match "bug" (substring-no-properties plain-line))
+                         plain-line)))
+            (should (cl-find-if (lambda (f)
+                                  (and (symbolp f)
+                                       (string-prefix-p "gp-label-color-"
+                                                        (symbol-name f))))
+                                faces))))))))
 
 (ert-deftest gp-test-helm-header-shows-count ()
   (should (equal (gp-helm--header "My drafts" '(a b c)) "My drafts (3)"))

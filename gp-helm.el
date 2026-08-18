@@ -198,29 +198,6 @@ shows until the status arrives."
       ('nil        "  ")              ;; resolved: no pipeline ran
       (_           (propertize "⚫" 'help-echo "Pipeline status loading…")))))
 
-(defun gp-helm--dim-draft (line)
-  "Return LINE dimmed as a draft row, keeping any faces it already carries.
-A plain `propertize' would *replace* the `face' property, which drops the
-per-label colours `gp--format-labels' set and re-slants those cells --
-and since `gp-helm-draft-face' is italic, the relabelled cell no longer
-measures what `gp-helm--labels-cell' padded it to, so the columns after
-it drift.  Appending to the face list instead leaves each cell's own face
-in place and merely adds the dimming on top."
-  (let ((line (copy-sequence line))
-        (pos 0))
-    (while (< pos (length line))
-      (let* ((next (or (next-single-property-change pos 'face line)
-                       (length line)))
-             (existing (get-text-property pos 'face line)))
-        (put-text-property pos next 'face
-                           (append (if (listp existing)
-                                       existing
-                                     (list existing))
-                                   '(gp-helm-draft-face))
-                           line)
-        (setq pos next)))
-    line))
-
 (defun gp-helm--pr-display (pr &optional draft)
   "Return an aligned, multi-column, propertized Helm line for PR.
 DRAFT non-nil dims the whole row.  A leading author avatar is
@@ -249,7 +226,10 @@ shown on graphical displays."
                      (if (string-empty-p cell) "" (concat cell "  "))))
            (line (format "%s %s%s  %s  %s%s  %s%s%s"
                          bubble avatar id title labels repo author reviews badge)))
-      (if draft (gp-helm--dim-draft line) line))))
+      ;; Drafts are dimmed as a whole row on purpose: one flat grey reads as
+      ;; "not ready yet" at a glance, which is worth more than keeping the
+      ;; label colours (and their exact column alignment) on those rows.
+      (if draft (propertize line 'face 'gp-helm-draft-face) line))))
 
 (defcustom gp-helm-review-style 'tally
   "How reviewer state is shown in the PR list.
