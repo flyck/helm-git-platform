@@ -243,7 +243,10 @@ comment navigation snappy on repeated use."
   "Check out PR's source branch in its local clone via the checkout service.
 DIR overrides the auto-resolved directory; if there is no local
 clone, one is cloned when `gp-checkout-clone-base' is set.
-Returns the plist from `gp-checkout-run' with :dir added."
+Returns the plist from `gp-checkout-run', which carries the :dir
+actually prepared -- that may be a sibling worktree already holding
+the branch rather than the DIR we asked about, so it is taken from
+the result and not overwritten here."
   (require 'gp-checkout)
   (let* ((full-name (gp-pr-full-name pr))
          (branch (gp-pr-source-branch pr))
@@ -251,7 +254,7 @@ Returns the plist from `gp-checkout-run' with :dir added."
          (dir (or dir (gp-local-resolve-dir full-name t))))
     (unless branch (user-error "PR has no source branch"))
     (let ((res (gp-checkout-run dir branch base)))
-      (append (list :dir dir) res))))
+      (if (plist-member res :dir) res (append (list :dir dir) res)))))
 
 (provide 'gp-local)
 ;;; gp-local.el ends here

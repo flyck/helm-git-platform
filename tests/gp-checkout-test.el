@@ -47,6 +47,31 @@
     (should (equal (gp-checkout--clone-command "ws/slug" "/tmp/slug")
                    '("clone" "git@bitbucket.org:ws/slug.git" "/tmp/slug")))))
 
+(ert-deftest gp-test-worktree-for-branch-finds-sibling ()
+  "A branch held by another worktree is reported with its path."
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (lambda (_dir &rest _args)
+               (cons 0 (concat
+                        "worktree /repo\n"
+                        "HEAD abc\n"
+                        "branch refs/heads/main\n\n"
+                        "worktree /repo/.wt/labels\n"
+                        "HEAD def\n"
+                        "branch refs/heads/feat/pr-labels\n")))))
+    (should (equal (gp-checkout-worktree-for-branch "/repo" "feat/pr-labels")
+                   "/repo/.wt/labels"))
+    ;; a branch nobody has checked out
+    (should-not (gp-checkout-worktree-for-branch "/repo" "other"))
+    ;; the branch DIR itself holds is not a "different" worktree
+    (should-not (gp-checkout-worktree-for-branch "/repo" "main"))))
+
+(ert-deftest gp-test-worktree-detached-head-ignored ()
+  "A detached worktree has no branch line and must not match."
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (lambda (_dir &rest _args)
+               (cons 0 "worktree /repo\nHEAD abc\ndetached\n"))))
+    (should-not (gp-checkout-worktree-for-branch "/repo" "main"))))
+
 (defmacro gp-test-with-fake-git (script &rest body)
   "Run BODY with `gp-checkout--git' replaced by SCRIPT.
 SCRIPT is a function (dir &rest args) returning (CODE . OUTPUT);
@@ -69,8 +94,8 @@ all invocations are recorded in the dynamically-bound list
     (let ((res (gp-checkout-run "/repo" "feature")))
       (should (plist-get res :ok))
       (should-not (plist-get res :stashed))
-      ;; status + rev-parse + fetch + checkout + pull
-      (should (= (length git-calls) 5))
+      ;; worktree-list + status + rev-parse + fetch + checkout + pull
+      (should (= (length git-calls) 6))
       (should-not (cl-find "stash" git-calls
                            :key (lambda (c) (cadr c)) :test #'equal)))))
 
@@ -118,4 +143,40 @@ all invocations are recorded in the dynamically-bound list
       (should (equal (gp-checkout-pop-stash "/repo") "Dropped stash")))))
 
 (provide 'gp-checkout-test)
+(ert-deftest gp-test-run-redirects-to-worktree-without-stashing ()
+  "When a sibling worktree holds BRANCH, use it and never stash.
+This is the regression guard: the old code ran the plan anyway, so
+`git checkout' failed with \"already used by worktree\" AFTER the
+auto-stash step had already run -- stranding the user's work."
+  (let ((calls '()))
+    (cl-letf (((symbol-function 'gp-checkout--git)
+               (lambda (_dir &rest args)
+                 (setq calls (append calls (list args)))
+                 (if (equal (car args) "worktree")
+                     (cons 0 (concat "worktree /repo\nHEAD a\n"
+                                     "branch refs/heads/main\n\n"
+                                     "worktree /repo/.wt/x\nHEAD b\n"
+                                     "branch refs/heads/feature\n"))
+                   (cons 0 "")))))
+      (let ((res (gp-checkout-run "/repo" "feature" "main")))
+        (should (plist-get res :ok))
+        (should (equal (plist-get res :dir) "/repo/.wt/x"))
+        (should-not (plist-get res :stashed))
+        ;; only the worktree query ran -- no stash, no checkout
+        (should (equal calls '(("worktree" "list" "--porcelain"))))))))
+
+(ert-deftest gp-test-run-normal-path-still-switches ()
+  "With no competing worktree the ordinary plan still runs."
+  (let ((calls '()))
+    (cl-letf (((symbol-function 'gp-checkout--git)
+               (lambda (_dir &rest args)
+                 (setq calls (append calls (list args)))
+                 (cons 0 (if (equal (car args) "worktree")
+                             "worktree /repo\nHEAD a\nbranch refs/heads/main\n"
+                           "")))))
+      (let ((res (gp-checkout-run "/repo" "feature")))
+        (should (plist-get res :ok))
+        (should (equal (plist-get res :dir) "/repo"))
+        (should (member '("checkout" "feature") calls))))))
+
 ;;; gp-checkout-test.el ends here
