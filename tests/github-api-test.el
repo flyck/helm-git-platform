@@ -190,5 +190,73 @@ A cap must then keep the NEWEST commits, not the oldest ones."
         (should (equal (mapcar (lambda (c) (plist-get c :hash)) result)
                        '("c3" "c2")))))))
 
+(ert-deftest github-test-build-states-merge-status-and-checks ()
+  "Both CI channels are consulted, so a repo using either reports state."
+  (github-mock-with-service
+   (let ((states (github-commit-build-states "acme/web" "abc123")))
+     ;; the legacy commit status AND the check run both land in the list
+     (should (equal states '("SUCCESSFUL" "SUCCESSFUL")))
+     (should (eq (gp-build-states-summary states) 'successful)))))
+
+(ert-deftest github-test-check-conclusion-translation ()
+  "Incomplete runs are INPROGRESS; neutral/skipped are not verdicts."
+  (should (equal (github--check-conclusion->bitbucket "completed" "success") "SUCCESSFUL"))
+  (should (equal (github--check-conclusion->bitbucket "completed" "failure") "FAILED"))
+  (should (equal (github--check-conclusion->bitbucket "completed" "timed_out") "FAILED"))
+  (should (equal (github--check-conclusion->bitbucket "completed" "cancelled") "STOPPED"))
+  ;; still running: conclusion is null, status decides
+  (should (equal (github--check-conclusion->bitbucket "in_progress" nil) "INPROGRESS"))
+  (should (equal (github--check-conclusion->bitbucket "queued" nil) "INPROGRESS"))
+  ;; a skipped matrix leg must not drag a green bubble to grey
+  (should (null (github--check-conclusion->bitbucket "completed" "skipped")))
+  (should (null (github--check-conclusion->bitbucket "completed" "neutral")))
+  (should (eq (gp-build-states-summary
+               (delq nil (list (github--check-conclusion->bitbucket "completed" "success")
+                               (github--check-conclusion->bitbucket "completed" "skipped"))))
+              'successful)))
+
+(ert-deftest github-test-empty-combined-status-is-not-a-running-build ()
+  "A repo posting no commit statuses answers pending with total_count 0.
+That is missing data, not CI in flight: reporting INPROGRESS would
+strand the helm bubble on blue forever.  With no check runs either,
+there are no states at all, so the bubble stays blank."
+  (cl-letf (((symbol-function 'github-api-request)
+             (lambda (_m path &rest _)
+               (if (string-suffix-p "/status" path)
+                   '((state . "pending") (total_count . 0) (statuses . ()))
+                 '((total_count . 0) (check_runs . ()))))))
+    (should (null (github-commit-build-states "acme/web" "abc123")))
+    (should (null (gp-build-states-summary
+                   (github-commit-build-states "acme/web" "abc123"))))))
+
+(ert-deftest github-test-checks-only-repo-reports-failure ()
+  "Actions-only repo (no commit statuses): the failing check still wins.
+This is the case that showed no bubble at all before check runs were
+consulted -- e.g. a repo whose CI is purely GitHub Actions."
+  (cl-letf (((symbol-function 'github-api-request)
+             (lambda (_m path &rest _)
+               (if (string-suffix-p "/status" path)
+                   '((state . "pending") (total_count . 0) (statuses . ()))
+                 '((total_count . 3)
+                   (check_runs . (((status . "completed") (conclusion . "success"))
+                                  ((status . "completed") (conclusion . "skipped"))
+                                  ((status . "completed") (conclusion . "failure")))))))))
+    (should (eq (gp-build-states-summary
+                 (github-commit-build-states "acme/web" "abc123"))
+                'failed))))
+
+(ert-deftest github-test-checks-only-repo-still-running ()
+  "An Actions-only repo mid-run reports running, not blank."
+  (cl-letf (((symbol-function 'github-api-request)
+             (lambda (_m path &rest _)
+               (if (string-suffix-p "/status" path)
+                   '((state . "pending") (total_count . 0) (statuses . ()))
+                 '((total_count . 2)
+                   (check_runs . (((status . "completed") (conclusion . "success"))
+                                  ((status . "in_progress") (conclusion . nil)))))))))
+    (should (eq (gp-build-states-summary
+                 (github-commit-build-states "acme/web" "abc123"))
+                'running))))
+
 (provide 'github-api-test)
 ;;; github-api-test.el ends here

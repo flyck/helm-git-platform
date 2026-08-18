@@ -142,15 +142,60 @@ turning this on is cheap."
                   (gp-overlay--avatar-image (gp-pr-author-avatar pr)))))
     (if img (concat (propertize " " 'display img) " ") "")))
 
+(defcustom gp-helm-pipeline-settling-ttl 60
+  "Seconds to cache a build state that has not settled yet.
+A build reported as running (or as having no result at all) is a
+snapshot of a moving target: it will finish, and the bubble must
+notice.  Terminal states -- failed, successful, stopped -- describe
+an immutable commit and are cached indefinitely.
+
+Lower this for a snappier bubble at the cost of more API calls; 0
+re-fetches non-terminal states on every scan."
+  :type 'integer :group 'bitbucket)
+
 (defvar gp-helm--pipeline-cache (make-hash-table :test 'equal)
-  "commit-hash -> pipeline state symbol (see `gp-build-states-summary').")
+  "commit-hash -> (EXPIRY . STATE) for the pipeline bubble.
+STATE is a symbol from `gp-build-states-summary'.  EXPIRY is nil for
+a terminal state (cached forever, since a finished build on a given
+commit never changes) or a `float-time' deadline for one that is
+still settling -- see `gp-helm-pipeline-settling-ttl'.")
+
+(defun gp-helm--pipeline-terminal-p (state)
+  "Return non-nil when STATE is a final verdict for a commit.
+`running' is obviously not final; nil (\"no build reported\") is not
+either, because CI may simply not have registered yet."
+  (memq state '(failed successful stopped)))
+
+(defun gp-helm--pipeline-cache-put (hash state)
+  "Cache STATE for commit HASH, expiring it unless it is terminal.
+Mirrors the optional-TTL contract of `gp-cache-put': the caller
+scopes the entry's lifetime to how long the value stays true."
+  (puthash hash
+           (cons (unless (gp-helm--pipeline-terminal-p state)
+                   (+ (float-time) gp-helm-pipeline-settling-ttl))
+                 state)
+           gp-helm--pipeline-cache)
+  state)
+
+(defun gp-helm--pipeline-cache-get (hash)
+  "Return (FOUND . STATE) for commit HASH, treating an expired entry as a miss."
+  (let ((entry (gethash hash gp-helm--pipeline-cache)))
+    (cond ((null entry) (cons nil nil))
+          ((or (null (car entry)) (< (float-time) (car entry)))
+           (cons t (cdr entry)))
+          (t (cons nil nil)))))
 
 (defun gp-helm--pipeline-bubble (pr)
   "Return a colored pipeline-status bubble for PR's latest commit.
 Reads the async `gp-helm--pipeline-cache'; a neutral bubble
-shows until the status arrives."
-  (let* ((hash (let-alist pr .source.commit.hash))
-         (state (and hash (gethash hash gp-helm--pipeline-cache 'unknown))))
+shows until the status arrives.  The commit hash goes through
+`gp-pr-source-commit' -- the same accessor that keys the cache in
+`gp-helm--scan-pipelines-async' -- because the raw alist path
+differs per backend (Bitbucket .source.commit.hash vs GitHub
+.head.sha)."
+  (let* ((hash (ignore-errors (gp-pr-source-commit pr)))
+         (hit (and hash (gp-helm--pipeline-cache-get hash)))
+         (state (if (car hit) (cdr hit) 'unknown)))
     (pcase state
       ('failed     (propertize "🔴" 'help-echo "Pipeline failed"))
       ('running    (propertize "🔵" 'help-echo "Pipeline running"))
@@ -787,12 +832,12 @@ Results land in `gp-helm--pipeline-cache' keyed by commit hash."
   (dolist (pr prs)
     (let ((hash (gp-pr-source-commit pr))
           (full-name (gp-pr-full-name pr)))
-      (when (and hash full-name (eq (gethash hash gp-helm--pipeline-cache 'miss) 'miss))
+      (when (and hash full-name
+                 (not (car (gp-helm--pipeline-cache-get hash))))
         (gp-commit-build-states-async
          full-name hash
          (lambda (states)
-           (puthash hash (gp-build-states-summary states)
-                    gp-helm--pipeline-cache)
+           (gp-helm--pipeline-cache-put hash (gp-build-states-summary states))
            (gp-helm--refresh-if-alive)))))))
 
 (defun gp-helm--refresh-if-alive ()
