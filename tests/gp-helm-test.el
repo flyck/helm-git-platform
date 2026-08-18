@@ -126,12 +126,45 @@ the badge has no natural neutral symbol)."
   (should (string-suffix-p "…" (gp-helm--pad "abcdef" 4)))
   (should (eq (get-text-property 0 'face (gp-helm--pad "x" 3 'bold)) 'bold)))
 
+(defun gp-helm-test--faces-at (pos line)
+  "Return the face property at POS in LINE, always as a list."
+  (let ((f (get-text-property pos 'face line)))
+    (if (listp f) f (list f))))
+
 (ert-deftest gp-test-helm-draft-rows-dimmed ()
   (let ((line (gp-helm--pr-display
                '((id . 1) (title . "wip") (author (display_name . "me"))
                  (destination (repository (slug . "r"))))
                t)))
-    (should (eq (get-text-property 0 'face line) 'gp-helm-draft-face))))
+    (should (memq 'gp-helm-draft-face (gp-helm-test--faces-at 0 line)))))
+
+(ert-deftest gp-test-helm-draft-dimming-keeps-label-colors ()
+  "Dimming a draft row must add to each cell's face, not replace it.
+A plain `propertize' over the whole line dropped the per-label colours
+and re-slanted those cells italic, so the padding no longer measured what
+the label column reserved and every later column drifted -- visible as
+outsized gaps in the drafts section only."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (gp-helm-labels-width 18))
+      (cl-letf (((symbol-function 'display-color-cells) (lambda (&rest _) 16777216)))
+        (let* ((pr (github-pull-request "acme/web" 42))
+               (line (gp-helm--pr-display pr t))
+               (plain (substring-no-properties line))
+               (at (string-match "bug" plain))
+               (faces (gp-helm-test--faces-at at line)))
+          ;; the label keeps its own colour face *and* gains the dimming
+          (should (memq 'gp-helm-draft-face faces))
+          (should (cl-find-if (lambda (f)
+                                (and (symbolp f)
+                                     (string-prefix-p "gp-label-color-"
+                                                      (symbol-name f))))
+                              faces))
+          ;; and the row is still the same width as its non-draft twin, so
+          ;; the columns after the labels cannot drift
+          (should (= (string-width plain)
+                     (string-width (substring-no-properties
+                                    (gp-helm--pr-display pr nil))))))))))
 
 (ert-deftest gp-test-helm-header-shows-count ()
   (should (equal (gp-helm--header "My drafts" '(a b c)) "My drafts (3)"))
