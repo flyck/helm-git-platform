@@ -190,5 +190,77 @@ A cap must then keep the NEWEST commits, not the oldest ones."
         (should (equal (mapcar (lambda (c) (plist-get c :hash)) result)
                        '("c3" "c2")))))))
 
+(ert-deftest github-test-pr-labels-read-off-the-payload ()
+  "Labels come from the PR object itself -- no request of their own.
+GitHub embeds `labels' in the PR payload, which is what makes a plain
+PR re-fetch refresh them; if this ever needed its own endpoint, the
+detail view would show stale labels after an edit."
+  (github-mock-with-service
+    (let* ((github-mock-calls nil)
+           (pr (github-pull-request "acme/web" 42))
+           (labels (github-pr-labels pr)))
+      (should (equal (mapcar (lambda (l) (plist-get l :name)) labels)
+                     '("bug" "ui")))
+      (should (equal (plist-get (car labels) :color) "d73a4a"))
+      ;; exactly the one PR fetch; nothing label-specific
+      (should-not (cl-find-if (lambda (c) (string-match-p "labels" (nth 1 c)))
+                              github-mock-calls)))))
+
+(ert-deftest github-test-pr-labels-absent-and-null ()
+  "A PR with no `labels' key, or a JSON null, yields nil -- not an error.
+GitHub sends `:null' rather than nil for an empty field, which would
+break a bare `append'."
+  (should-not (github-pr-labels '((id . 43) (title . "no labels here"))))
+  (should-not (github-pr-labels '((id . 43) (labels . :null))))
+  (should-not (github-pr-labels '((id . 43) (labels . [])))))
+
+(ert-deftest github-test-label-drops-nameless-entries ()
+  "A malformed label (no name) is dropped rather than rendered blank."
+  (should (equal (github-pr-labels '((labels . [((color . "ff0000"))
+                                                ((name . "ok") (color . "00ff00"))])))
+                 '((:name "ok" :color "00ff00")))))
+
+(ert-deftest github-test-label-missing-color-is-nil ()
+  "A label with no colour keeps its name and reports colour nil,
+so the renderer can fall back to a plain face."
+  (should (equal (github-pr-labels '((labels . [((name . "plain"))])))
+                 '((:name "plain" :color nil)))))
+
+(ert-deftest github-test-repo-labels-returns-the-pool-and-caches ()
+  "The repo label pool is fetched once and served from cache after."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (should (equal (mapcar (lambda (l) (plist-get l :name))
+                             (github-repo-labels "acme/web"))
+                     '("bug" "ui" "chore")))
+      (let ((fetches (cl-count-if (lambda (c) (string-match-p "/labels\\'" (nth 1 c)))
+                                  github-mock-calls)))
+        (should (= fetches 1))
+        ;; second call must not re-page the pool
+        (github-repo-labels "acme/web")
+        (should (= (cl-count-if (lambda (c) (string-match-p "/labels\\'" (nth 1 c)))
+                                github-mock-calls)
+                   1))))))
+
+(ert-deftest github-test-set-pull-request-labels-puts-the-whole-set ()
+  "Setting labels PUTs the complete list to the issues endpoint.
+Callers pass the desired end state, so a single PUT both adds and
+removes -- no delta requests."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (should (github-set-pull-request-labels "acme/web" 42 '("bug" "chore")))
+      (let ((call (car github-mock-calls)))
+        (should (equal (nth 0 call) "PUT"))
+        (should (equal (nth 1 call) "/repos/acme/web/issues/42/labels"))
+        ;; a vector, as JSON encoding requires -- a list would serialise wrong
+        (should (equal (alist-get 'labels (nth 3 call)) ["bug" "chore"]))))))
+
+(ert-deftest github-test-set-pull-request-labels-can-clear-all ()
+  "An empty desired set is a legitimate PUT that strips every label."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (should (github-set-pull-request-labels "acme/web" 42 '()))
+      (should (equal (alist-get 'labels (nth 3 (car github-mock-calls))) [])))))
+
 (provide 'github-api-test)
 ;;; github-api-test.el ends here

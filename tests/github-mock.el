@@ -46,6 +46,8 @@ params data) returning one.  Consulted before the built-in routes.")
     (head (ref . "feature/widget") (sha . "abc123") (repo (full_name . "acme/web")))
     (base (ref . "main") (repo (full_name . "acme/web")))
     (requested_reviewers . [])
+    (labels . [((id . 1) (name . "bug") (color . "d73a4a"))
+               ((id . 2) (name . "ui") (color . "a2eeef"))])
     (additions . 12) (deletions . 3) (changed_files . 2) (commits . 1)
     (html_url . "https://github.com/acme/web/pull/42")))
 
@@ -58,6 +60,14 @@ params data) returning one.  Consulted before the built-in routes.")
     (requested_reviewers . [])
     (additions . 4) (deletions . 1) (changed_files . 1) (commits . 1)
     (html_url . "https://github.com/acme/web/pull/43")))
+
+(defconst github-mock--repo-labels
+  '[((id . 1) (name . "bug") (color . "d73a4a"))
+    ((id . 2) (name . "ui") (color . "a2eeef"))
+    ((id . 3) (name . "chore") (color . "cfd3d7"))]
+  "The repo's whole label pool, as GET /repos/:o/:r/labels returns it.
+A superset of any one PR's labels, so tests can add one that is in the
+pool but not yet on the PR.")
 
 (defconst github-mock--search-hit
   '((number . 42) (repository_url . "https://api.github.com/repos/acme/web")))
@@ -92,6 +102,10 @@ params data) returning one.  Consulted before the built-in routes.")
      (append `((id . 9099) (created_at . "2026-01-01T00:10:00Z")) data))
     ((and (equal method "POST") (string-match-p "/pulls/[0-9]+/comments\\'" path))
      (append `((id . 9098) (created_at . "2026-01-01T00:11:00Z")) data))
+    ((and (equal method "PUT") (string-match-p "/issues/[0-9]+/labels\\'" path))
+     ;; GitHub echoes back the resulting label set
+     (vconcat (mapcar (lambda (n) `((name . ,n) (color . "ededed")))
+                      (append (alist-get 'labels data) nil))))
     ((string-match-p "/repos/[^/]+/[^/]+\\'" path) '((default_branch . "main")))
     ((string-match-p "/commits/[^/]+/status\\'" path) '((state . "success")))
     (t (error "github-mock: no route for %s %s" method path)))))
@@ -107,6 +121,7 @@ params data) returning one.  Consulted before the built-in routes.")
    ((string-match-p "/pulls/[0-9]+/comments\\'" path) (list github-mock--review-comment))
    ((string-match-p "/pulls\\'" path) (list github-mock--pr-1 github-mock--pr-2))
    ((string-match-p "/actions/runs\\'" path) nil)
+   ((string-match-p "/labels\\'" path) (append github-mock--repo-labels nil))
    ((string-match-p "/collaborators\\'" path)
     (list '((login . "ada") (name . "Ada Lovelace"))
           '((login . "bea") (name . nil))))
@@ -131,7 +146,10 @@ Seeds a token, clears caches and the call log."
          (github-mock-calls nil)
          (github-mock-graphql-calls nil)
          (github--resolved-thread-comment-ids (make-hash-table :test 'eql))
-         (github--thread-id-cache (make-hash-table :test 'equal)))
+         (github--thread-id-cache (make-hash-table :test 'equal))
+         ;; `github-repo-labels' caches through the shared `gp-cache-*' table;
+         ;; rebind it so a pool cached by one test can't answer another's fetch
+         (gp--result-cache (make-hash-table :test 'equal)))
      (cl-letf (((symbol-function 'github-api-request) #'github-mock-request)
                ((symbol-function 'github-api-paged) #'github-mock-paged)
                ((symbol-function 'github-graphql-request) #'github-mock-graphql))

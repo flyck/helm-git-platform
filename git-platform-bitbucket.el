@@ -59,6 +59,15 @@
   (bitbucket-request-changes-pr full-name id unrequest))
 (cl-defmethod gp--review-retraction-kind ((_ git-platform-bitbucket))
   'retract)
+;; Bitbucket Cloud PRs have no labels: no field on the PR, no repo-level
+;; label pool, nothing to set.  Reporting that here (rather than returning an
+;; empty list from `gp--pr-labels' alone) is what lets the UI drop the label
+;; affordances entirely instead of showing a slot that can never fill.
+(cl-defmethod gp--labels-supported-p ((_ git-platform-bitbucket)) nil)
+(cl-defmethod gp--pr-labels ((_ git-platform-bitbucket) _pr) nil)
+(cl-defmethod gp--repo-labels ((_ git-platform-bitbucket) _full-name) nil)
+(cl-defmethod gp--set-pull-request-labels ((_ git-platform-bitbucket) _full-name _id _labels)
+  (user-error "Bitbucket pull requests do not support labels"))
 (cl-defmethod gp--open-pr-for-branch ((_ git-platform-bitbucket) full-name branch)
   (bitbucket-open-pr-for-branch full-name branch))
 (cl-defmethod gp--repo-default-branch ((_ git-platform-bitbucket) full-name)

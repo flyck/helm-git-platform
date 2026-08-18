@@ -101,6 +101,72 @@
   "Face for comments marked for batch terminal handoff."
   :group 'bitbucket-faces)
 
+(defface gp-label-face '((t :inherit magit-tag))
+  "Fallback face for a PR label with no usable colour.
+Also the base every colour-derived label face inherits from, so a
+theme can restyle all labels (box, weight, height) in one place while
+each keeps its own platform colour."
+  :group 'bitbucket-faces)
+
+(defcustom gp-label-colors t
+  "When non-nil, render each PR label in the colour the platform gives it.
+GitHub assigns every label a hex colour; honouring it makes the list
+scan the same way the web UI does.  Set to nil to render every label
+in `gp-label-face' instead -- useful on a terminal whose palette
+fights the repo's colours."
+  :type 'boolean :group 'bitbucket)
+
+(defvar gp--label-face-cache (make-hash-table :test 'equal)
+  "HEX -> face symbol, for faces derived from platform label colours.
+Faces are interned, so they are built once per distinct colour rather
+than per render (a list view repeats the same handful of labels across
+many rows).")
+
+(defun gp--color-luminance (hex)
+  "Return the relative luminance (0..1) of \"RRGGBB\" string HEX, or nil.
+Used only to decide whether black or white text reads on top of it, so
+this is the cheap sRGB approximation, not the gamma-corrected form."
+  (when (and (stringp hex) (string-match-p "\\`[0-9A-Fa-f]\\{6\\}\\'" hex))
+    (let ((r (/ (string-to-number (substring hex 0 2) 16) 255.0))
+          (g (/ (string-to-number (substring hex 2 4) 16) 255.0))
+          (b (/ (string-to-number (substring hex 4 6) 16) 255.0)))
+      (+ (* 0.299 r) (* 0.587 g) (* 0.114 b)))))
+
+(defun gp--label-face (hex)
+  "Return a face rendering a label whose platform colour is HEX.
+Falls back to `gp-label-face' when HEX is missing or malformed, when
+`gp-label-colors' is nil, or when the display has too few colours to
+place an arbitrary background (a 16-colour TTY would snap every label
+to the same approximate shade, losing the distinction the colour was
+carrying)."
+  (let ((lum (and gp-label-colors (gp--color-luminance hex))))
+    (if (or (null lum) (< (display-color-cells) 256))
+        'gp-label-face
+      (or (gethash hex gp--label-face-cache)
+          (let ((face (intern (format "gp-label-color-%s" (downcase hex)))))
+            (unless (facep face)
+              (make-face face)
+              (set-face-attribute face nil
+                                  :inherit 'gp-label-face
+                                  :background (concat "#" hex)
+                                  ;; dark labels need light text and vice versa
+                                  :foreground (if (> lum 0.6) "black" "white")))
+            (puthash hex face gp--label-face-cache)
+            face)))))
+
+(defun gp--format-labels (labels)
+  "Return LABELS as one propertized string, or \"\" when there are none.
+LABELS is `gp-pr-labels' shape.  Returns the empty string rather than
+nil so callers can `concat' it unconditionally."
+  (if (null labels)
+      ""
+    (mapconcat
+     (lambda (l)
+       (propertize (format " %s " (plist-get l :name))
+                   'face (gp--label-face (plist-get l :color))
+                   'help-echo (format "label: %s" (plist-get l :name))))
+     labels " ")))
+
 ;;;; Section types -----------------------------------------------------------
 
 ;; Both section types stash their backing object in the standard `value'
@@ -151,11 +217,16 @@ lands (see `gp--insert-action-button/spinner').")
 (defun gp--pr-heading (pr)
   "Return a one-line propertized heading string for PR."
   (let-alist pr
-    (let ((count (gp-pr-comment-count pr)))
+    (let ((count (gp-pr-comment-count pr))
+          ;; Labels sit with the title -- they say what the PR *is*.  Platforms
+          ;; without them (Bitbucket) contribute nothing here, so no empty slot
+          ;; is left behind and the line reads exactly as it did before.
+          (labels (gp--format-labels (gp-pr-labels pr))))
       (concat
        (propertize (format "#%s" .id) 'face 'gp-pr-id-face)
        " "
        (propertize (or .title "(no title)") 'face 'gp-pr-title-face)
+       (if (string-empty-p labels) "" (concat "  " labels))
        "  "
        (propertize (format "[%s]" (or (gp-pr-repo-slug pr) "?"))
                    'face 'gp-branch-face)
@@ -657,6 +728,29 @@ that is exactly when you need a way to add the first one."
          (lambda () (gp-ui-edit-reviewers pr))))
       (insert "\n"))))
 
+(defun gp--insert-labels-line (pr)
+  "Insert PR's labels as a line in the detail buffer's top section.
+Nothing at all is inserted on a platform without labels: Bitbucket
+users get no empty \"no labels\" slot that could never fill, which is
+why this asks `gp-labels-supported-p' rather than just checking
+whether PR happens to carry any.  Where they are supported an edit
+button follows on open PRs -- shown even with no labels yet, since
+that is when you need a way to add the first one."
+  (when (gp-labels-supported-p)
+    (let ((labels (gp-pr-labels pr))
+          (editable (gp-pr-open-p pr)))
+      (when (or labels editable)
+        (insert "🏷 ")
+        (if labels
+            (insert (gp--format-labels labels))
+          (insert (propertize "no labels" 'face 'shadow)))
+        (when editable
+          (insert "   ")
+          (gp--insert-action-button
+           "✎ edit [L]" "Add or remove labels on this PR"
+           (lambda () (gp-ui-edit-labels pr))))
+        (insert "\n")))))
+
 (defun gp--render-detail (pr comments)
   "Render PR and its COMMENTS into the current detail buffer."
   (require 'button)
@@ -713,6 +807,7 @@ that is exactly when you need a way to add the first one."
                   (propertize (format "-%d" (plist-get s :removed)) 'face 'diff-removed)
                   "\n")))
       (gp--insert-reviewers-line gp--detail-reviewers pr)
+      (gp--insert-labels-line pr)
       (insert "\n")
       (gp--insert-action-button
        "← Back [b]" "Return to the pull-request list"
@@ -833,6 +928,7 @@ that is exactly when you need a way to add the first one."
   "K"   #'gp-detail-delete        ;; delete a comment (see `gp-comment-delete-others')
   "D"   #'gp-detail-toggle-draft
   "V"   #'gp-detail-edit-reviewers  ;; add / remove reviewers (open PRs)
+  "L"   #'gp-detail-edit-labels     ;; add / remove labels (open PRs, GitHub)
   "a"   #'gp-detail-approve         ;; approve / unapprove (others' open PRs)
   "c"   #'gp-detail-request-changes ;; request changes / clear (others' open PRs)
   "RET" #'gp-detail-ret
@@ -1026,6 +1122,51 @@ without a second fetch."
   (unless (gp-pr-open-p pr)
     (user-error "Only open pull requests can have their reviewers changed"))
   (gp-reviewers-edit pr gp--detail-reviewers))
+
+(defun gp-ui-edit-labels (pr)
+  "Set PR's labels from the minibuffer, then refresh the detail buffer.
+Prompts with the repo's whole label pool for completion and the PR's
+current labels pre-filled, so the edit reads as \"adjust this set\":
+leaving the default untouched is a no-op, deleting a name drops that
+label, and typing one adds it.  Only names in the pool are accepted --
+GitHub would silently *create* an unknown label on the repo, which is
+never what a typo means.
+
+`completing-read-multiple' rather than the checkbox form
+`gp-ui-edit-reviewers' opens, because labels are short plain strings
+with no per-item state to display or lock."
+  (unless (gp-labels-supported-p)
+    (user-error "%s pull requests do not support labels" (gp-backend-name)))
+  (unless (gp-pr-open-p pr)
+    (user-error "Only open pull requests can have their labels changed"))
+  (let* ((full-name (gp-pr-full-name pr))
+         (id (alist-get 'id pr))
+         (pool (mapcar (lambda (l) (plist-get l :name)) (gp-repo-labels full-name)))
+         (current (mapcar (lambda (l) (plist-get l :name)) (gp-pr-labels pr)))
+         ;; the pool can legitimately be empty (a repo with no labels defined);
+         ;; still offer the current ones so an unwanted label can be removed
+         (candidates (delete-dups (append pool current)))
+         (chosen (completing-read-multiple
+                  (format "Labels for #%s (comma-separated): " id)
+                  candidates nil t
+                  (when current (concat (mapconcat #'identity current ",") ","))))
+         (unknown (cl-remove-if (lambda (n) (member n candidates)) chosen)))
+    (when unknown
+      (user-error "No such label in %s: %s" full-name
+                  (mapconcat #'identity unknown ", ")))
+    (if (equal (sort (copy-sequence chosen) #'string<)
+               (sort (copy-sequence current) #'string<))
+        (message "Labels unchanged")
+      (gp-set-pull-request-labels full-name id chosen)
+      (message "Labels on #%s: %s" id
+               (if chosen (mapconcat #'identity chosen ", ") "(none)"))
+      (gp-invalidate-pr-caches pr)
+      (gp-detail-refresh))))
+
+(defun gp-detail-edit-labels ()
+  "Add or remove labels on the PR shown in this buffer."
+  (interactive)
+  (gp-ui-edit-labels gp--pr))
 
 (defun gp-ui-set-resolution (pr comment resolve)
   "Resolve (RESOLVE non-nil) or reopen COMMENT on PR, then refresh the buffer."
