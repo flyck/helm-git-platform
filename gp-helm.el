@@ -532,8 +532,8 @@ from everyone else's.")
 
 (defun gp-helm--reviewing-candidates ()
   "Helm `:candidates' for the reviewing source: reads the async cache.
-Only PRs still awaiting the user's vote; ones already approved (or
-sent back for changes) are served by `gp-helm--voted-candidates'."
+Only PRs still needing the user's attention; ones already approved
+are served by `gp-helm--voted-candidates'."
   (cond
    ((eq gp-helm--reviewing-cache 'loading)
     (list (cons (propertize "  ⏳ scanning repositories for review requests…"
@@ -546,7 +546,7 @@ sent back for changes) are served by `gp-helm--voted-candidates'."
    (t nil)))
 
 (defun gp-helm--voted-candidates ()
-  "Helm `:candidates' for PRs the user has already voted on."
+  "Helm `:candidates' for PRs the user has already approved."
   (when (listp gp-helm--reviewing-cache)
     (gp-helm--pr-candidates
      (cdr (gp-helm--partition-reviewing gp-helm--reviewing-cache
@@ -675,7 +675,7 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
           ;; pending work, so they sit in their own section rather than
           ;; padding "Needs my review".
           (voted-source
-           (helm-build-sync-source "Reviewed by me"
+           (helm-build-sync-source "Approved by me"
              :candidates #'gp-helm--voted-candidates
              :volatile t
              :action actions :nomark t :keymap km
@@ -703,6 +703,16 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
       (let ((hit (gp-cache-get (list 'reviewing uuid states))))
         (if (car hit)
             (progn (setq gp-helm--reviewing-cache (cdr hit))
+                   ;; Served from cache, so `gp-helm--scan-reviewing-async'
+                   ;; (and the tally/pipeline fetches hanging off its on-done)
+                   ;; never runs -- without this the badges on every cached
+                   ;; reviewing row stay blank until the cache expires.
+                   (let ((cached (cdr hit)))
+                     (run-with-idle-timer
+                      0.1 nil
+                      (lambda ()
+                        (gp-helm--scan-pipelines-async cached)
+                        (gp-helm--scan-review-tallies-async cached))))
                    (run-with-idle-timer 0.1 nil #'gp-helm--refresh-if-alive))
           (run-with-idle-timer
            0.1 nil
@@ -750,13 +760,17 @@ which degrades to the previous behaviour rather than erroring."
        (ignore-errors (gp-pr-my-review-state pr uuid))))
 
 (defun gp-helm--voted-p (pr uuid)
-  "Non-nil when UUID has already approved or requested changes on PR.
+  "Non-nil when UUID has already APPROVED PR.
 Such a PR no longer needs the user's action, so it moves out of
-`Needs my review' into its own section."
-  (and (gp-helm--my-vote pr uuid) t))
+`Needs my review' into the `Approved by me' section.
+
+Deliberately approval-only: a PR you sent back with changes requested
+is still yours to re-review once the author pushes, so it belongs in
+the pending list, not filed away as done."
+  (eq (gp-helm--my-vote pr uuid) 'approved))
 
 (defun gp-helm--partition-reviewing (prs uuid)
-  "Split PRS into (NEEDS-ACTION . ALREADY-VOTED) for UUID."
+  "Split PRS into (NEEDS-ACTION . APPROVED) for UUID."
   (let (todo done)
     (dolist (pr prs)
       (if (gp-helm--voted-p pr uuid) (push pr done) (push pr todo)))
