@@ -265,6 +265,13 @@ CREATE TABLE IF NOT EXISTS participants (
                (if state (list uuid uuid state) (list uuid uuid)))))
     (if max-items (seq-take prs max-items) prs)))
 
+(cl-defmethod gp--workspace-pull-requests-async ((backend git-platform-mock) callback
+                                                 &optional uuid state max-items)
+  ;; a small delay keeps the overview's "⏳ refreshing…" visible for a beat,
+  ;; like live, and exercises the async redraw path in the mock UI
+  (let ((prs (gp--workspace-pull-requests backend uuid state max-items)))
+    (run-at-time 0.4 nil callback t prs)))
+
 (defun gp-mock--reviewing (uuid states)
   "Return PRs where UUID reviews someone else's work, filtered to STATES."
   (gp-mock--select-prs

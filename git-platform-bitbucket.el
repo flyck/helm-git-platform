@@ -23,6 +23,9 @@
   (bitbucket-user-uuid))
 (cl-defmethod gp--workspace-pull-requests ((_ git-platform-bitbucket) &optional uuid state max-items)
   (bitbucket-workspace-pull-requests uuid state max-items))
+(cl-defmethod gp--workspace-pull-requests-async ((_ git-platform-bitbucket) callback
+                                                 &optional uuid state max-items)
+  (bitbucket-workspace-pull-requests-async callback uuid state max-items))
 (cl-defmethod gp--reviewing-pull-requests ((_ git-platform-bitbucket) &optional uuid limit states)
   (bitbucket-reviewing-pull-requests uuid limit states))
 (cl-defmethod gp--reviewing-pull-requests-async ((_ git-platform-bitbucket) uuid states on-batch on-done &optional limit)

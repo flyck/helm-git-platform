@@ -79,6 +79,12 @@ ARGLIST may contain &optional; &rest is not supported here."
   "Return the authenticated user's id.")
 (gp-defop workspace-pull-requests (&optional uuid state max-items)
   "Return PRs authored by UUID.")
+(gp-defop workspace-pull-requests-async (callback &optional uuid state max-items)
+  "Async twin of `gp-workspace-pull-requests'; CALLBACK gets (OK PRS).
+Used by the overview buffer's refresh so fetching the list never
+freezes Emacs.  CALLBACK is always called exactly once; on failure OK
+is nil and PRS is nil, and the caller is expected to keep whatever it
+was already showing.")
 (gp-defop reviewing-pull-requests (&optional uuid limit states)
   "Return PRs where UUID is a reviewer (synchronous).")
 (gp-defop reviewing-pull-requests-async (uuid states on-batch on-done &optional limit)

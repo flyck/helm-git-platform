@@ -470,6 +470,25 @@ apart afterwards via `github-pr-draft-p'/`merged_at'."
          (q (format "is:pr author:%s %s" login (if open-p "is:open" "is:closed"))))
     (github--search-pull-requests q max-items)))
 
+(defun github-workspace-pull-requests-async (callback &optional login state max-items)
+  "Async twin of `github-workspace-pull-requests'; CALLBACK gets (OK PRS).
+Deferred rather than truly non-blocking: the listing goes through
+issue-search plus one PR fetch per hit (see
+`github--search-pull-requests'), which has no single-request async
+form, so this mirrors `github-reviewing-pull-requests-async' and runs
+the synchronous scan on a timer.  That still lets the caller paint a
+spinner first, and keeps the overview refresh identical across
+backends.  Uses a wall-clock `run-at-time', NOT `run-with-idle-timer'
+-- see `github-pull-request-comments-async' for why."
+  (run-at-time
+   0 nil
+   (lambda ()
+     (condition-case e
+         (funcall callback t (github-workspace-pull-requests login state max-items))
+       (error
+        (gp-log-error "github workspace PR scan: %s" (error-message-string e))
+        (funcall callback nil nil))))))
+
 (defun github-reviewing-pull-requests (&optional login limit states)
   "Return PRs across GitHub where LOGIN is a requested reviewer.
 LIMIT is accepted for signature parity with the Bitbucket op (which
