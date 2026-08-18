@@ -72,6 +72,28 @@ is an error."
                               (or remote gp-checkout-remote) branch)))
     (and (= (car res) 0) (not (string-empty-p (cdr res))))))
 
+(defun gp-checkout-worktree-for-branch (dir branch)
+  "Return the worktree directory in DIR's repo that has BRANCH checked out.
+Nil when no worktree holds BRANCH, or when it is held by DIR itself
+-- callers only care about a DIFFERENT worktree, since that is the
+case git refuses to check out again.  Parses `git worktree list
+--porcelain', whose records are blank-line separated with a
+`worktree PATH' line and, for an attached head, a
+`branch refs/heads/NAME' line."
+  (let ((res (gp-checkout--git dir "worktree" "list" "--porcelain")))
+    (when (= (car res) 0)
+      (let ((self (file-truename (file-name-as-directory dir)))
+            (path nil) (hit nil))
+        (dolist (line (split-string (cdr res) "\n"))
+          (cond
+           ((string-prefix-p "worktree " line)
+            (setq path (substring line 9)))
+           ((string-prefix-p "branch refs/heads/" line)
+            (when (and path (equal (substring line 18) branch))
+              (let ((wt (file-truename (file-name-as-directory path))))
+                (unless (equal wt self) (setq hit path)))))))
+        hit))))
+
 (defun gp-checkout-commit-summaries (dir base &optional branch)
   "Return the commit summary lines on BRANCH (default HEAD) not on BASE in DIR.
 Newest first, as `git log BASE..BRANCH --format=%s' produces.  BASE
@@ -137,21 +159,34 @@ Signals if `gp-checkout-clone-base' is nil."
   "Switch DIR to BRANCH, auto-stashing dirty work first.
 When BASE (the PR's destination branch) is given, its remote ref
 is fetched too so diffs against `origin/BASE' are accurate.
-Returns a plist (:ok BOOL :stashed BOOL :log STRING).  Stops at
-the first failing git step and reports it."
-  (let* ((dirty (gp-checkout-dirty-p dir))
-         (current (gp-checkout-current-branch dir))
-         (plan (gp-checkout--plan branch dirty current base))
-         (log '())
-         (ok t))
-    (cl-block run
-      (dolist (args plan)
-        (let ((res (apply #'gp-checkout--git dir args)))
-          (push (format "$ git %s\n%s" (string-join args " ") (cdr res)) log)
-          (unless (= (car res) 0)
-            (setq ok nil)
-            (cl-return-from run)))))
-    (list :ok ok :stashed dirty :log (string-join (nreverse log) "\n"))))
+Returns a plist (:ok BOOL :stashed BOOL :log STRING :dir DIR).
+Stops at the first failing git step and reports it.
+
+When BRANCH is already checked out in ANOTHER worktree of the same
+repo, that worktree is returned as :dir and no branch switch is
+attempted: git refuses to check out one branch in two worktrees, so
+the switch could only ever fail -- and failing AFTER the auto-stash
+step would strand the user's work in a stash nobody pops.  The
+worktree already holds the branch, which is what the caller wanted."
+  (let ((wt (gp-checkout-worktree-for-branch dir branch)))
+    (if wt
+        (list :ok t :stashed nil :dir wt
+              :log (format "branch %s is checked out in worktree %s; using it"
+                           branch wt))
+      (let* ((dirty (gp-checkout-dirty-p dir))
+             (current (gp-checkout-current-branch dir))
+             (plan (gp-checkout--plan branch dirty current base))
+             (log '())
+             (ok t))
+        (cl-block run
+          (dolist (args plan)
+            (let ((res (apply #'gp-checkout--git dir args)))
+              (push (format "$ git %s\n%s" (string-join args " ") (cdr res)) log)
+              (unless (= (car res) 0)
+                (setq ok nil)
+                (cl-return-from run)))))
+        (list :ok ok :stashed dirty :dir dir
+              :log (string-join (nreverse log) "\n"))))))
 
 (defun gp-checkout-ensure-clone (full-name dest)
   "Ensure a clone of FULL-NAME exists at DEST, cloning if absent.
