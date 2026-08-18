@@ -79,24 +79,28 @@ spinner picks up whatever blue/accent hue the active theme uses."
 ;;;; Spinner -------------------------------------------------------------------
 
 ;; An in-progress pipeline/step renders as a one-character animated spinner
-;; instead of a static glyph.  The frames sweep a Braille dot pair left to
-;; right across the cell, so the motion reads horizontally -- like progress
-;; along the pipeline -- rather than as a vertical orbit.  All frames are
-;; single-width characters from the same Braille block, so the animation never
-;; reflows the line: the timer only swaps the character in place, it never
-;; inserts or deletes.
+;; instead of a static glyph.  The frames orbit a Braille dot around the cell:
+;; a step is RUNNING, not loading toward a known finish, so the animation has
+;; to read as indeterminate motion.  A bar that fills and empties (the earlier
+;; default) implied measurable progress and, worse, appeared to reset to zero
+;; on every cycle.  All frames are single-width characters from the same
+;; Braille block, so the animation never reflows the line: the timer only
+;; swaps the character in place, it never inserts or deletes.
 
 (defcustom gp-pipeline-spinner-frames
-  ["▏" "▎" "▍" "▌" "▋" "▊" "▉" "▊" "▋" "▌" "▍" "▎"]
+  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Frames of the in-progress spinner.
-The default is a bar that grows and shrinks horizontally, so the
-motion reads left-to-right rather than as a vertical orbit.
-Every frame must be a single character of the same display width, or
-the animation will shift the rest of the line."
+The default orbits a Braille dot, the conventional indeterminate
+spinner: a running job has no measurable percentage, so the motion
+must not suggest one.  Every frame must be a single character of the
+same display width, or the animation will shift the rest of the line."
   :type '(vector string) :group 'bitbucket)
 
-(defcustom gp-pipeline-spinner-interval 0.12
-  "Seconds between in-progress spinner frames."
+(defcustom gp-pipeline-spinner-interval 0.08
+  "Seconds between in-progress spinner frames.
+With the 10-frame default this is one rotation every 0.8s -- the
+usual pace for an indeterminate spinner.  The previous 0.12s was
+tuned for a 12-frame bar and reads sluggishly as a rotation."
   :type 'number :group 'bitbucket)
 
 (defvar gp-pipeline--spinner-index 0
@@ -154,7 +158,7 @@ pipeline poll deliberately skips the rerender while fetched data is
 unchanged -- exactly the steady state of a long-running pipeline.  So
 nothing repainted the glyph until the next unrelated redraw.
 
-At the default 0.12s interval this grace spans ~3s of genuine absence
+At the default 0.08s interval this grace spans ~2s of genuine absence
 before the timer retires, which idle buffers reach in well under a
 second of wall-clock cost.")
 
