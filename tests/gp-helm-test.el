@@ -201,5 +201,44 @@ so it must stay a single source of truth rather than a literal."
   (dolist (suffix '("files" "comments" "open" "repo" "repo-branch"))
     (should (string-prefix-p "*gp: " (gp-helm--buffer suffix)))))
 
+
+;;;; Reviewing partition --------------------------------------------------------
+
+(ert-deftest gp-test-helm-partition-reviewing-splits-on-own-vote ()
+  "PRs the user already voted on move out of the needs-action list."
+  (cl-letf (((symbol-function 'gp-pr-my-review-state)
+             (lambda (pr _uuid) (alist-get 'my-state pr))))
+    (let* ((todo1 '((id . 1)))
+           (todo2 '((id . 2) (my-state . nil)))
+           (done1 '((id . 3) (my-state . approved)))
+           (done2 '((id . 4) (my-state . changes)))
+           (res (gp-helm--partition-reviewing
+                 (list todo1 done1 todo2 done2) "{me}")))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (car res)) '(1 2)))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (cdr res)) '(3 4))))))
+
+(ert-deftest gp-test-helm-partition-reviewing-preserves-order ()
+  "Both halves keep the incoming order, so the list does not jump around."
+  (cl-letf (((symbol-function 'gp-pr-my-review-state)
+             (lambda (pr _uuid) (alist-get 'my-state pr))))
+    (let ((res (gp-helm--partition-reviewing
+                '(((id . 1)) ((id . 2)) ((id . 3))) "{me}")))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (car res))
+                     '(1 2 3)))
+      (should (null (cdr res))))))
+
+(ert-deftest gp-test-helm-my-vote-tolerates-missing-backend-op ()
+  "A backend without `gp-pr-my-review-state' reports no vote, not an error.
+The mock has no implementation, so this must degrade rather than break
+the whole list."
+  (cl-letf (((symbol-function 'gp-pr-my-review-state)
+             (lambda (&rest _) (error "no applicable method"))))
+    (should-not (gp-helm--my-vote '((id . 1)) "{me}"))
+    (should-not (gp-helm--voted-p '((id . 1)) "{me}"))))
+
+(ert-deftest gp-test-helm-my-vote-nil-uuid-is-no-vote ()
+  "With no known identity nothing is classed as already-voted."
+  (should-not (gp-helm--my-vote '((id . 1)) nil)))
+
 (provide 'gp-helm-test)
 ;;; gp-helm-test.el ends here

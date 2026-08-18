@@ -525,16 +525,32 @@ INCLUDE-MERGED)."
   "Async-filled list of reviewer PRs for the current `gp-helm' run.
 Symbol `loading' while the background scan runs.")
 
+(defvar gp-helm--reviewing-uuid nil
+  "The uuid the current reviewing scan belongs to.
+Needed by the candidate functions to tell the user's own vote apart
+from everyone else's.")
+
 (defun gp-helm--reviewing-candidates ()
-  "Helm `:candidates' for the reviewing source: reads the async cache."
+  "Helm `:candidates' for the reviewing source: reads the async cache.
+Only PRs still awaiting the user's vote; ones already approved (or
+sent back for changes) are served by `gp-helm--voted-candidates'."
   (cond
    ((eq gp-helm--reviewing-cache 'loading)
     (list (cons (propertize "  ⏳ scanning repositories for review requests…"
                             'face 'shadow)
                 nil)))
    (gp-helm--reviewing-cache
-    (gp-helm--pr-candidates gp-helm--reviewing-cache))
+    (gp-helm--pr-candidates
+     (car (gp-helm--partition-reviewing gp-helm--reviewing-cache
+                                        gp-helm--reviewing-uuid))))
    (t nil)))
+
+(defun gp-helm--voted-candidates ()
+  "Helm `:candidates' for PRs the user has already voted on."
+  (when (listp gp-helm--reviewing-cache)
+    (gp-helm--pr-candidates
+     (cdr (gp-helm--partition-reviewing gp-helm--reviewing-cache
+                                        gp-helm--reviewing-uuid)))))
 
 (defcustom gp-helm-create-from-magit t
   "When non-nil, `gp-helm' from a magit buffer on a branch with no
@@ -635,7 +651,8 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
          (cat (gp-categorize-pull-requests mine-prs uuid))
          (actions (gp-helm--pr-actions))
          (km (gp-helm--list-keymap include-merged)))
-    (setq gp-helm--reviewing-cache 'loading)
+    (setq gp-helm--reviewing-cache 'loading
+          gp-helm--reviewing-uuid uuid)
     (let ((reviewing-source
            (helm-build-sync-source "Needs my review"
              :candidates #'gp-helm--reviewing-candidates
@@ -647,9 +664,30 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
              (lambda (name)
                (concat name
                        (if (listp gp-helm--reviewing-cache)
-                           (format " (%d)" (length gp-helm--reviewing-cache))
+                           (format " (%d)"
+                                   (length (car (gp-helm--partition-reviewing
+                                                 gp-helm--reviewing-cache
+                                                 gp-helm--reviewing-uuid))))
                          " (…)")
                        "   (C-c g reload · C-c G refresh · C-c m merged)"))))
+          ;; PRs where the user's vote is already in: still worth seeing
+          ;; (a follow-up push may need another look), but they are not
+          ;; pending work, so they sit in their own section rather than
+          ;; padding "Needs my review".
+          (voted-source
+           (helm-build-sync-source "Reviewed by me"
+             :candidates #'gp-helm--voted-candidates
+             :volatile t
+             :action actions :nomark t :keymap km
+             :header-name
+             (lambda (name)
+               (concat name
+                       (if (listp gp-helm--reviewing-cache)
+                           (format " (%d)"
+                                   (length (cdr (gp-helm--partition-reviewing
+                                                 gp-helm--reviewing-cache
+                                                 gp-helm--reviewing-uuid))))
+                         " (…)")))))
           (sources nil))
       (setq sources
             (cons reviewing-source
@@ -657,6 +695,7 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                         (list
                          (gp-helm--source "My pull requests"
                                                  (plist-get cat :mine) actions nil km)
+                         voted-source
                          (gp-helm--source "My drafts"
                                                  (plist-get cat :drafts) actions t km)))))
       ;; reviewing PRs have no fast endpoint: serve from cache, else scan
@@ -701,6 +740,27 @@ Results land in `gp-helm--pipeline-cache' keyed by commit hash."
   "Redraw the live helm session, if any."
   (when (and (bound-and-true-p helm-alive-p) (fboundp 'helm-update))
     (ignore-errors (helm-update))))
+
+(defun gp-helm--my-vote (pr uuid)
+  "Return UUID's own review state on PR, or nil.
+Wrapped because not every backend implements `gp-pr-my-review-state'
+\(the mock does not); a backend without it simply reports no vote,
+which degrades to the previous behaviour rather than erroring."
+  (and uuid
+       (ignore-errors (gp-pr-my-review-state pr uuid))))
+
+(defun gp-helm--voted-p (pr uuid)
+  "Non-nil when UUID has already approved or requested changes on PR.
+Such a PR no longer needs the user's action, so it moves out of
+`Needs my review' into its own section."
+  (and (gp-helm--my-vote pr uuid) t))
+
+(defun gp-helm--partition-reviewing (prs uuid)
+  "Split PRS into (NEEDS-ACTION . ALREADY-VOTED) for UUID."
+  (let (todo done)
+    (dolist (pr prs)
+      (if (gp-helm--voted-p pr uuid) (push pr done) (push pr todo)))
+    (cons (nreverse todo) (nreverse done))))
 
 (defun gp-helm--scan-reviewing-async (uuid states)
   "Scan reviewer PRs for UUID/STATES in parallel, updating helm live."
