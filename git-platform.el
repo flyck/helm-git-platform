@@ -614,6 +614,68 @@ across diff refreshes, since outdatedness never reverses."
             (puthash id t gp--comment-outdated-cache))
           outdated))))
 
+;;;; OS notifications -----------------------------------------------------------
+
+(defcustom gp-notify t
+  "Whether this package may raise OS (desktop) notifications at all.
+
+The master switch: nil silences every notification the package would
+otherwise send, regardless of any per-feature setting.  Long-running
+work -- a deploy script, a pipeline finishing -- usually outlasts the
+user's attention on Emacs, so the echo area alone goes unread; but a
+notification is an interruption, and some users want none.
+
+Per-feature options (e.g. `gp-pipeline-deploy-notify') narrow this
+further: a notification is sent only when BOTH this and the relevant
+feature switch are non-nil."
+  :type 'boolean :group 'bitbucket)
+
+(defcustom gp-notify-function nil
+  "Function used to raise a notification, or nil for the built-in one.
+Called with (TITLE BODY URGENT).  Set this to route notifications
+through `alert', a pager, or anything else; the default tries D-Bus
+`notifications-notify' and macOS `osascript' before falling back to
+the echo area."
+  :type '(choice (const :tag "Built-in" nil) function)
+  :group 'bitbucket)
+
+(defun gp-notify (title body &optional urgent)
+  "Raise an OS notification with TITLE and BODY; URGENT marks a failure.
+
+A no-op unless `gp-notify' is non-nil.  Honours `gp-notify-function'
+when set, otherwise falls through the facilities actually present:
+D-Bus `notifications-notify' (Linux), `osascript' (macOS), and finally
+the echo area -- so this is safe to call on any platform.
+
+Notification failures are swallowed: a missing or misconfigured
+notifier must never break the operation that reported through it.
+Returns non-nil when something was dispatched."
+  (when gp-notify
+    (condition-case nil
+        (cond
+         (gp-notify-function
+          (funcall gp-notify-function title body urgent)
+          t)
+         ((and (fboundp 'notifications-notify)
+               (not (eq system-type 'darwin)))
+          (notifications-notify :title title :body body
+                                :urgency (if urgent 'critical 'normal))
+          t)
+         ((eq system-type 'darwin)
+          ;; `display notification' takes these as AppleScript string
+          ;; literals, so quotes and backslashes must be escaped.
+          (let ((esc (lambda (s)
+                       (replace-regexp-in-string
+                        "[\"\\\\]" "\\\\\\&" (or s "")))))
+            (call-process "osascript" nil 0 nil
+                          "-e" (format "display notification \"%s\" with title \"%s\"%s"
+                                       (funcall esc body)
+                                       (funcall esc title)
+                                       (if urgent " sound name \"Basso\"" ""))))
+          t)
+         (t (message "%s: %s" title body) t))
+      (error nil))))
+
 ;;;; Markdown / emoji rendering helpers ---------------------------------------
 
 (defcustom gp-resolve-emoji-shortcodes t
