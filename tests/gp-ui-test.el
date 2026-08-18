@@ -2599,6 +2599,132 @@ test controls exactly when, and whether, the fetch completes."
       (funcall (car calls) nil nil)
       (should-not gp--list-loading)
       (should (string-match-p "#239" (substring-no-properties (buffer-string)))))))
+;;;; Collapse state across a refresh ----------------------------------------
+
+(defun gp--test-find-comment-section (id)
+  "Return the `gp-comment-section' for comment ID in the current buffer."
+  (let (found)
+    (cl-labels ((walk (sec)
+                  (when (and (not found)
+                             (object-of-class-p sec 'gp-comment-section)
+                             (equal (alist-get 'id (oref sec value)) id))
+                    (setq found sec))
+                  (when (slot-boundp sec 'children)
+                    (mapc #'walk (oref sec children)))))
+      (walk magit-root-section))
+    found))
+
+;; magit restores section visibility on redraw by matching sections between the
+;; old and new tree via `magit-section-ident'.  Its default identity is the
+;; section's whole `value', so a refetched comment whose `updated_on' (or body,
+;; or reply count) changed no longer matched, and a section the user collapsed
+;; came back expanded.
+
+(ert-deftest gp-test-comment-section-ident-ignores-mutable-fields ()
+  "A comment section is identified by its id, not its whole alist."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (magit-insert-section (gp-comment-section
+                               '((id . 7) (updated_on . "T1")))
+          (insert "body\n"))))
+    (let ((sec (car (oref magit-root-section children))))
+      ;; the id alone identifies it -- the timestamp is not part of the ident
+      (should (equal (magit-section-ident-value sec) 7))
+      (should (member '(gp-comment-section . 7) (magit-section-ident sec))))))
+
+(ert-deftest gp-test-commit-section-ident-uses-hash ()
+  "A commit section is identified by its hash, not its whole plist."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (magit-insert-section (gp-commit-section '(:hash "abc123" :summary "s"))
+          (insert "commit\n"))))
+    (let ((sec (car (oref magit-root-section children))))
+      (should (equal (magit-section-ident-value sec) "abc123")))))
+
+(ert-deftest gp-test-collapsed-comment-stays-collapsed-when-comment-changes ()
+  "Redrawing a collapsed comment keeps it collapsed even if its fields changed.
+This is the refresh case: the comment comes back from the API with a new
+`updated_on', which used to defeat the visibility cache."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (magit-insert-section (gp-comment-section
+                               '((id . 7) (updated_on . "T1")))
+          (insert "body\n"))))
+    ;; user collapses it
+    (magit-section-hide (car (oref magit-root-section children)))
+    (should (oref (car (oref magit-root-section children)) hidden))
+    ;; refresh: same comment id, changed timestamp
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (magit-insert-section (gp-root)
+        (magit-insert-section (gp-comment-section
+                               '((id . 7) (updated_on . "T2")))
+          (insert "body\n"))))
+    (should (oref (car (oref magit-root-section children)) hidden))))
+
+(ert-deftest gp-test-expanded-comment-stays-expanded-across-refresh ()
+  "The converse: an expanded comment is not spuriously collapsed on redraw."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (magit-insert-section (gp-comment-section '((id . 7) (updated_on . "T1")))
+          (insert "body\n"))))
+    (should-not (oref (car (oref magit-root-section children)) hidden))
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (magit-insert-section (gp-root)
+        (magit-insert-section (gp-comment-section '((id . 7) (updated_on . "T2")))
+          (insert "body\n"))))
+    (should-not (oref (car (oref magit-root-section children)) hidden))))
+
+(ert-deftest gp-test-sibling-groups-have-distinct-idents ()
+  "Each PR group is identified by its title, so collapse state is per-group."
+  (with-temp-buffer
+    (gp-list-mode)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (gp--insert-group "Needs my review" nil)
+        (gp--insert-group "My pull requests" nil)))
+    (let* ((kids (oref magit-root-section children))
+           (a (nth 0 kids))
+           (b (nth 1 kids)))
+      (should-not (equal (magit-section-ident a) (magit-section-ident b)))
+      ;; collapsing one leaves the other alone
+      (magit-section-hide a)
+      (should (oref a hidden))
+      (should-not (oref b hidden)))))
+
+(ert-deftest gp-test-resolved-collapse-only-forced-on-first-render ()
+  "A resolved thread the user expanded stays expanded on refresh.
+Resolved threads start collapsed, but after the first render the user's
+own state wins -- `gp--collapse-resolved-sections' must not re-hide it."
+  (let ((resolved '((id . 7) (updated_on . "T1")
+                    (resolution . ((type . "resolved"))))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (should (gp-comment-resolved-p resolved))
+      ;; first render: forced collapsed
+      (gp--render-detail-into (current-buffer) '((id . 1) (title . "t"))
+                              (list resolved) nil)
+      (let ((sec (gp--test-find-comment-section 7)))
+        (should sec)
+        (should (oref sec hidden))
+        ;; user expands it deliberately
+        (magit-section-show sec)
+        (should-not (oref sec hidden)))
+      ;; refresh must not force it shut again
+      (gp--render-detail-into (current-buffer) '((id . 1) (title . "t"))
+                              (list resolved) nil)
+      (let ((sec (gp--test-find-comment-section 7)))
+        (should sec)
+        (should-not (oref sec hidden))))))
 
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here

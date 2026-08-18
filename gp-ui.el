@@ -12,6 +12,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'magit-section)
 (require 'transient)
 (require 'subr-x)
@@ -215,6 +216,29 @@ the list by that label without re-deriving which one was under point."
 (defclass gp-file-section (magit-section) ())
 (defclass gp-commit-section (magit-section) ())
 
+;; magit carries section visibility across a redraw by looking the new section
+;; up in the old tree by `magit-section-ident', whose default method uses the
+;; section's whole `value'.  Ours are freshly-parsed API objects, so any changed
+;; field (`updated_on', an edited comment body, a new reply count) makes the
+;; value non-`equal', the lookup misses, and a section the user had collapsed
+;; comes back expanded.  Keying on the immutable id/hash instead keeps
+;; collapsed sections collapsed across a refresh.
+
+(cl-defmethod magit-section-ident-value ((section gp-comment-section))
+  "Identify a comment section by its comment id."
+  (or (alist-get 'id (oref section value))
+      (cl-call-next-method)))
+
+(cl-defmethod magit-section-ident-value ((section gp-pr-section))
+  "Identify a PR section by its PR id."
+  (or (alist-get 'id (oref section value))
+      (cl-call-next-method)))
+
+(cl-defmethod magit-section-ident-value ((section gp-commit-section))
+  "Identify a commit section by its commit hash."
+  (or (plist-get (oref section value) :hash)
+      (cl-call-next-method)))
+
 ;;;; Buffer-local state ------------------------------------------------------
 
 (defvar-local gp--prs nil
@@ -252,6 +276,10 @@ Newest first.  Fetched asynchronously via `gp-pull-request-commits-async'
 -- see `gp--detail-load-commits'.")
 (defvar-local gp--detail-comments nil
   "Cached comment list for the detail buffer (so it can redraw without refetch).")
+(defvar-local gp--detail-rendered-once nil
+  "Non-nil once the detail buffer has been rendered at least once.
+Resolved threads are force-collapsed only on that first render; later
+refreshes leave the user's own collapse state alone.")
 (defvar-local gp--detail-reviewers nil
   "List of plists (:name :avatar :state) for the detail buffer, or nil.
 Fetched asynchronously via `gp-pr-reviewers-async' -- see
@@ -313,8 +341,12 @@ notice about work that may not exist is worse than none.")
                                 'face 'gp-branch-face)))))
 
 (defun gp--insert-group (title prs)
-  "Insert a magit section grouping PRS under TITLE."
-  (magit-insert-section (gp-group)
+  "Insert a magit section grouping PRS under TITLE.
+TITLE doubles as the section value so each group gets a distinct
+`magit-section-ident' -- with a nil value every group shares one
+identity and a collapsed group cannot be told from its siblings when
+the buffer is redrawn."
+  (magit-insert-section (gp-group title)
     (magit-insert-heading
       (format "%s (%d)" title (length prs)))
     (if prs
@@ -2625,10 +2657,15 @@ to pick the tracking back up."
     (let ((inhibit-read-only t)
           (pos (point)))
       (erase-buffer)
-      (gp--render-detail pr comments)
-      ;; magit caches section visibility across redraws, which would re-expand
-      ;; resolved comments on refresh -- force them collapsed again
-      (gp--collapse-resolved-sections)
+      ;; Only the *first* render forces resolved threads shut.  After that the
+      ;; user's own collapse/expand state is authoritative and magit's
+      ;; visibility cache restores it (see `magit-section-ident-value' above),
+      ;; so re-collapsing here would fight a deliberately expanded thread.
+      (let ((first-render (not gp--detail-rendered-once)))
+        (gp--render-detail pr comments)
+        (when first-render
+          (gp--collapse-resolved-sections)
+          (setq gp--detail-rendered-once t)))
       (goto-char (min pos (point-max))))))
 
 (defun gp--detail-rerender (buf)
