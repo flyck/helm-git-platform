@@ -389,6 +389,19 @@ step yet caches nil, and a cached commit is never re-fetched."
                    (lambda (_pr _cb) (setq calls (1+ calls)))))
           (gp-helm--scan-deploys-async (list pr))
           (should (= calls 0)))))))
+(ert-deftest gp-test-helm-pipeline-bubble-github-shape ()
+  "GitHub PRs carry the head commit at .head.sha, not .source.commit.hash.
+The bubble must resolve the hash through `gp-pr-source-commit' so it
+reads the same cache key `gp-helm--scan-pipelines-async' wrote."
+  (require 'git-platform-github)
+  (let* ((git-platform-current-backend (git-platform-github))
+         (gp-helm--pipeline-cache (make-hash-table :test 'equal))
+         (pr '((head (sha . "deadbeef")))))
+    (should (string-match-p "⚫" (gp-helm--pipeline-bubble pr)))
+    (puthash "deadbeef" 'successful gp-helm--pipeline-cache)
+    (should (string-match-p "🟢" (gp-helm--pipeline-bubble pr)))
+    (puthash "deadbeef" 'failed gp-helm--pipeline-cache)
+    (should (string-match-p "🔴" (gp-helm--pipeline-bubble pr)))))
 
 (ert-deftest gp-test-helm-pad-truncates-and-faces ()
   (should (= (string-width (gp-helm--pad "abcdef" 4)) 4))
