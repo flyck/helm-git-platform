@@ -470,18 +470,28 @@ FOUND is nil on a miss/expiry.  Honours `gp-cache-ttl' = 0 (always a miss)."
           (progn (gp-log 'cache "hit %S" key) (cons t (cdr entry)))
         (cons nil nil)))))
 
-(defun gp-cache-put (key value)
-  "Cache VALUE under KEY for `gp-cache-ttl' seconds (no-op if 0)."
-  (when (> gp-cache-ttl 0)
-    (puthash key (cons (+ (float-time) gp-cache-ttl) value) gp--result-cache))
+(defun gp-cache-put (key value &optional ttl)
+  "Cache VALUE under KEY for TTL seconds, defaulting to `gp-cache-ttl'.
+
+TTL lets a caller scope an entry's lifetime to how long the value
+stays true, instead of every cache sharing one expiry.  A value that
+is still settling -- a build that has not finished, say -- can be
+cached briefly so repeat reads are cheap, without pinning a
+transient answer for the whole default window.  A TTL of 0 or less
+skips caching entirely, so the next read re-fetches."
+  (let ((ttl (or ttl gp-cache-ttl)))
+    (when (> ttl 0)
+      (puthash key (cons (+ (float-time) ttl) value) gp--result-cache)))
   value)
 
-(defun gp-cache-with-cache (key thunk)
-  "Return cached value for KEY, or call THUNK, caching for `gp-cache-ttl'."
+(defun gp-cache-with-cache (key thunk &optional ttl)
+  "Return cached value for KEY, or call THUNK, caching the result.
+TTL is passed to `gp-cache-put' (see there); it defaults to
+`gp-cache-ttl'."
   (let ((hit (gp-cache-get key)))
     (if (car hit)
         (cdr hit)
-      (gp-cache-put key (funcall thunk)))))
+      (gp-cache-put key (funcall thunk) ttl))))
 
 ;;;; Platform-agnostic helpers ------------------------------------------------
 

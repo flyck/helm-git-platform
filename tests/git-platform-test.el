@@ -188,5 +188,26 @@ leaving unrelated keys alone."
   (let ((gp-buffer-name-prefix "zz: "))
     (should (equal (gp--buffer-name "PRs") "*zz: PRs*"))))
 
+(ert-deftest gp-test-cache-put-honours-explicit-ttl ()
+  "An explicit TTL scopes one entry without touching the global default."
+  (let ((gp--result-cache (make-hash-table :test 'equal))
+        (gp-cache-ttl 300))
+    ;; a short-lived entry expires on its own schedule...
+    (gp-cache-put '(k short) 'v 60)
+    (should (equal (gp-cache-get '(k short)) '(t . v)))
+    (let ((later (+ (float-time) 100)))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) later)))
+        (should-not (car (gp-cache-get '(k short))))
+        ;; ...while a default-TTL entry written at the same time still lives
+        (should t)))
+    ;; omitting TTL keeps the previous behaviour (gp-cache-ttl)
+    (gp-cache-put '(k default) 'v)
+    (let ((later (+ (float-time) 100)))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) later)))
+        (should (equal (gp-cache-get '(k default)) '(t . v)))))
+    ;; a non-positive TTL skips caching entirely
+    (gp-cache-put '(k none) 'v 0)
+    (should-not (car (gp-cache-get '(k none))))))
+
 (provide 'git-platform-test)
 ;;; git-platform-test.el ends here

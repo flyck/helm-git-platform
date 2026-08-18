@@ -109,13 +109,13 @@ the badge has no natural neutral symbol)."
         (pr '((source (commit (hash . "abc"))))))
     ;; not yet fetched -> loading bubble
     (should (string-match-p "⚫" (gp-helm--pipeline-bubble pr)))
-    (puthash "abc" 'failed gp-helm--pipeline-cache)
+    (gp-helm--pipeline-cache-put "abc" 'failed)
     (should (string-match-p "🔴" (gp-helm--pipeline-bubble pr)))
-    (puthash "abc" 'running gp-helm--pipeline-cache)
+    (gp-helm--pipeline-cache-put "abc" 'running)
     (should (string-match-p "🔵" (gp-helm--pipeline-bubble pr)))
-    (puthash "abc" 'successful gp-helm--pipeline-cache)
+    (gp-helm--pipeline-cache-put "abc" 'successful)
     (should (string-match-p "🟢" (gp-helm--pipeline-bubble pr)))
-    (puthash "abc" 'stopped gp-helm--pipeline-cache)
+    (gp-helm--pipeline-cache-put "abc" 'stopped)
     (should (string-match-p "⚪" (gp-helm--pipeline-bubble pr)))))
 
 (ert-deftest gp-test-helm-pipeline-bubble-github-shape ()
@@ -127,10 +127,66 @@ reads the same cache key `gp-helm--scan-pipelines-async' wrote."
          (gp-helm--pipeline-cache (make-hash-table :test 'equal))
          (pr '((head (sha . "deadbeef")))))
     (should (string-match-p "⚫" (gp-helm--pipeline-bubble pr)))
-    (puthash "deadbeef" 'successful gp-helm--pipeline-cache)
+    (gp-helm--pipeline-cache-put "deadbeef" 'successful)
     (should (string-match-p "🟢" (gp-helm--pipeline-bubble pr)))
-    (puthash "deadbeef" 'failed gp-helm--pipeline-cache)
+    (gp-helm--pipeline-cache-put "deadbeef" 'failed)
     (should (string-match-p "🔴" (gp-helm--pipeline-bubble pr)))))
+
+(ert-deftest gp-test-helm-pipeline-cache-expires-non-terminal-states ()
+  "A running build must not be cached forever.
+This is the bug where a PR scanned mid-build kept its blue bubble
+long after CI went green: the entry was written once and the scan
+only ever re-fetched on a miss, so it was never revisited."
+  (let ((gp-helm--pipeline-cache (make-hash-table :test 'equal))
+        (gp-helm-pipeline-settling-ttl 60))
+    (gp-helm--pipeline-cache-put "abc" 'running)
+    ;; fresh: still served
+    (should (equal (gp-helm--pipeline-cache-get "abc") '(t . running)))
+    ;; once the settling window passes it reads as a miss, so the next
+    ;; scan re-fetches and can discover the build finished
+    (let ((later (+ (float-time) 100)))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) later)))
+        (should-not (car (gp-helm--pipeline-cache-get "abc")))))))
+
+(ert-deftest gp-test-helm-pipeline-cache-keeps-terminal-states ()
+  "Terminal verdicts describe an immutable commit, so they never expire."
+  (let ((gp-helm--pipeline-cache (make-hash-table :test 'equal))
+        (gp-helm-pipeline-settling-ttl 60))
+    (dolist (state '(failed successful stopped))
+      (gp-helm--pipeline-cache-put "abc" state)
+      ;; no expiry stored at all
+      (should (null (car (gethash "abc" gp-helm--pipeline-cache))))
+      ;; and still a hit far in the future
+      (let ((later (+ (float-time) 86400)))
+        (cl-letf (((symbol-function 'float-time) (lambda (&rest _) later)))
+          (should (equal (gp-helm--pipeline-cache-get "abc") (cons t state))))))))
+
+(ert-deftest gp-test-helm-pipeline-cache-nil-state-is-not-terminal ()
+  "\"No build reported\" is not a verdict -- CI may not have registered yet.
+Caching it forever would blank the bubble permanently for a PR whose
+pipeline starts a moment later."
+  (should-not (gp-helm--pipeline-terminal-p nil))
+  (should-not (gp-helm--pipeline-terminal-p 'running))
+  (should (gp-helm--pipeline-terminal-p 'failed))
+  (let ((gp-helm--pipeline-cache (make-hash-table :test 'equal))
+        (gp-helm-pipeline-settling-ttl 60))
+    (gp-helm--pipeline-cache-put "abc" nil)
+    (should (car (gethash "abc" gp-helm--pipeline-cache)))))
+
+(ert-deftest gp-test-helm-pipeline-bubble-refetches-after-settling ()
+  "End to end: the bubble goes blue, then green once the state is re-read."
+  (let* ((gp-helm--pipeline-cache (make-hash-table :test 'equal))
+         (gp-helm-pipeline-settling-ttl 60)
+         (pr '((source (commit (hash . "abc"))))))
+    (gp-helm--pipeline-cache-put "abc" 'running)
+    (should (string-match-p "🔵" (gp-helm--pipeline-bubble pr)))
+    ;; after the window the stale running entry no longer wins; the bubble
+    ;; falls back to the loading glyph until the re-fetch lands
+    (let ((later (+ (float-time) 100)))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) later)))
+        (should (string-match-p "⚫" (gp-helm--pipeline-bubble pr)))))
+    (gp-helm--pipeline-cache-put "abc" 'successful)
+    (should (string-match-p "🟢" (gp-helm--pipeline-bubble pr)))))
 
 (ert-deftest gp-test-helm-pad-truncates-and-faces ()
   (should (= (string-width (gp-helm--pad "abcdef" 4)) 4))
