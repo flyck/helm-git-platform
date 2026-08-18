@@ -148,8 +148,12 @@ turning this on is cheap."
 (defun gp-helm--pipeline-bubble (pr)
   "Return a colored pipeline-status bubble for PR's latest commit.
 Reads the async `gp-helm--pipeline-cache'; a neutral bubble
-shows until the status arrives."
-  (let* ((hash (let-alist pr .source.commit.hash))
+shows until the status arrives.  The commit hash goes through
+`gp-pr-source-commit' -- the same accessor that keys the cache in
+`gp-helm--scan-pipelines-async' -- because the raw alist path
+differs per backend (Bitbucket .source.commit.hash vs GitHub
+.head.sha)."
+  (let* ((hash (ignore-errors (gp-pr-source-commit pr)))
          (state (and hash (gethash hash gp-helm--pipeline-cache 'unknown))))
     (pcase state
       ('failed     (propertize "🔴" 'help-echo "Pipeline failed"))
