@@ -245,6 +245,29 @@ per-PR fetch."
            (puthash id tally gp-helm--review-tally-cache)
            (gp-helm--refresh-if-alive)))))))
 
+(defvar gp-helm--reviewers-cache (make-hash-table :test 'eql)
+  "PR id -> per-reviewer plists (see `gp-pr-reviewers-async').
+The aggregate tally in `gp-helm--review-tally-cache' cannot say WHO
+voted, which is what `gp-helm--covered-by-others-p' needs to exclude
+the user's own vote -- hence a second cache over the same data.
+Bitbucket answers from the already-embedded participants (no network);
+GitHub does a real per-PR fetch, exactly as the tally scan does.")
+
+(defun gp-helm--scan-reviewers-async (prs)
+  "Fetch each PR's per-reviewer breakdown in parallel, caching by id.
+Mirrors `gp-helm--scan-review-tallies-async'; feeds
+`gp-helm--covered-by-others-p'."
+  (dolist (pr prs)
+    (let ((id (alist-get 'id pr)))
+      (unless (gethash id gp-helm--reviewers-cache)
+        (gp-pr-reviewers-async
+         pr
+         (lambda (reviewers)
+           ;; cache the empty list as an empty list, not nil: nil reads as
+           ;; "not fetched yet" and would refetch on every redraw
+           (puthash id (or reviewers 'none) gp-helm--reviewers-cache)
+           (gp-helm--refresh-if-alive)))))))
+
 (defun gp-helm--pr-search-tail (pr)
   "Return an invisible, searchable suffix of PR's full untruncated fields.
 The visible row truncates the repo slug, title and author to fixed
@@ -545,12 +568,19 @@ are served by `gp-helm--voted-candidates'."
                                         gp-helm--reviewing-uuid))))
    (t nil)))
 
+(defun gp-helm--covered-candidates ()
+  "Helm `:candidates' for PRs other reviewers have already settled."
+  (when (listp gp-helm--reviewing-cache)
+    (gp-helm--pr-candidates
+     (nth 2 (gp-helm--partition-reviewing gp-helm--reviewing-cache
+                                          gp-helm--reviewing-uuid)))))
+
 (defun gp-helm--voted-candidates ()
   "Helm `:candidates' for PRs the user has already approved."
   (when (listp gp-helm--reviewing-cache)
     (gp-helm--pr-candidates
-     (cdr (gp-helm--partition-reviewing gp-helm--reviewing-cache
-                                        gp-helm--reviewing-uuid)))))
+     (nth 1 (gp-helm--partition-reviewing gp-helm--reviewing-cache
+                                          gp-helm--reviewing-uuid)))))
 
 (defcustom gp-helm-create-from-magit t
   "When non-nil, `gp-helm' from a magit buffer on a branch with no
@@ -684,9 +714,27 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                (concat name
                        (if (listp gp-helm--reviewing-cache)
                            (format " (%d)"
-                                   (length (cdr (gp-helm--partition-reviewing
-                                                 gp-helm--reviewing-cache
-                                                 gp-helm--reviewing-uuid))))
+                                   (length (nth 1 (gp-helm--partition-reviewing
+                                                   gp-helm--reviewing-cache
+                                                   gp-helm--reviewing-uuid))))
+                         " (…)")))))
+          ;; Enough other reviewers have approved (or asked for changes)
+          ;; that the user's vote would not change the outcome.  Still
+          ;; listed -- they may want to weigh in regardless -- but not
+          ;; counted as pending work.
+          (covered-source
+           (helm-build-sync-source "Covered by others"
+             :candidates #'gp-helm--covered-candidates
+             :volatile t
+             :action actions :nomark t :keymap km
+             :header-name
+             (lambda (name)
+               (concat name
+                       (if (listp gp-helm--reviewing-cache)
+                           (format " (%d)"
+                                   (length (nth 2 (gp-helm--partition-reviewing
+                                                   gp-helm--reviewing-cache
+                                                   gp-helm--reviewing-uuid))))
                          " (…)")))))
           (sources nil))
       (setq sources
@@ -696,6 +744,7 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                          (gp-helm--source "My pull requests"
                                                  (plist-get cat :mine) actions nil km)
                          voted-source
+                         covered-source
                          (gp-helm--source "My drafts"
                                                  (plist-get cat :drafts) actions t km)))))
       ;; reviewing PRs have no fast endpoint: serve from cache, else scan
@@ -769,12 +818,72 @@ is still yours to re-review once the author pushes, so it belongs in
 the pending list, not filed away as done."
   (eq (gp-helm--my-vote pr uuid) 'approved))
 
+(defcustom gp-helm-min-approvals 2
+  "Approvals by OTHER reviewers after which a PR no longer needs yours.
+
+A PR that already has this many approvals from people other than you
+moves out of \"Needs my review\" into \"Covered by others\" -- still
+listed, so you can weigh in anyway, but not counted as pending work.
+
+Your own vote is excluded from the count deliberately: the question is
+whether other people have already covered the review, not how many
+approvals exist in total.  Set to 0 to disable this grouping."
+  :type 'integer :group 'bitbucket)
+
+(defcustom gp-helm-min-rejections 2
+  "Changes-requested by OTHER reviewers after which a PR no longer needs yours.
+The `gp-helm-min-approvals' rule for the other direction: once this
+many other reviewers have asked for changes, the point is made and the
+PR moves to \"Covered by others\".  Set to 0 to disable."
+  :type 'integer :group 'bitbucket)
+
+(defun gp-helm--others-votes (pr uuid)
+  "Return (APPROVED . CHANGES) counted over reviewers other than UUID.
+nil when the per-reviewer breakdown is not available, which callers
+must treat as unknown, NOT as quorum-met -- the data arrives
+asynchronously, and assuming quorum would make rows vanish from the
+pending list and then reappear.
+
+Uses the cached reviewer list rather than `gp-pr-review-tally', whose
+aggregate counts cannot tell the user's own vote from anyone else's."
+  (let ((reviewers (gethash (alist-get 'id pr) gp-helm--reviewers-cache)))
+    (when (eq reviewers 'none) (setq reviewers nil))
+    (when (gethash (alist-get 'id pr) gp-helm--reviewers-cache)
+      (let ((a 0) (c 0))
+        (dolist (r reviewers)
+          (unless (and uuid (equal (plist-get r :id) uuid))
+            (pcase (plist-get r :state)
+              ('approved (setq a (1+ a)))
+              ('changes (setq c (1+ c))))))
+        (cons a c)))))
+
+(defun gp-helm--covered-by-others-p (pr uuid)
+  "Non-nil when other reviewers have already settled PR without UUID.
+True once approvals reach `gp-helm-min-approvals' or changes-requested
+reach `gp-helm-min-rejections', counting only other people's votes.
+Unknown vote data (still loading) is never treated as covered."
+  (let ((votes (gp-helm--others-votes pr uuid)))
+    (and votes
+         (or (and (> gp-helm-min-approvals 0)
+                  (>= (car votes) gp-helm-min-approvals))
+             (and (> gp-helm-min-rejections 0)
+                  (>= (cdr votes) gp-helm-min-rejections))))))
+
 (defun gp-helm--partition-reviewing (prs uuid)
-  "Split PRS into (NEEDS-ACTION . APPROVED) for UUID."
-  (let (todo done)
+  "Split PRS into (NEEDS-ACTION APPROVED COVERED) for UUID.
+
+NEEDS-ACTION still wants the user's review; APPROVED are ones they
+already approved; COVERED are ones other reviewers have settled (see
+`gp-helm--covered-by-others-p').  The user's own vote wins over
+quorum: a PR you approved belongs under \"Approved by me\" even if
+others have since piled on."
+  (let (todo done covered)
     (dolist (pr prs)
-      (if (gp-helm--voted-p pr uuid) (push pr done) (push pr todo)))
-    (cons (nreverse todo) (nreverse done))))
+      (cond
+       ((gp-helm--voted-p pr uuid) (push pr done))
+       ((gp-helm--covered-by-others-p pr uuid) (push pr covered))
+       (t (push pr todo))))
+    (list (nreverse todo) (nreverse done) (nreverse covered))))
 
 (defun gp-helm--scan-reviewing-async (uuid states)
   "Scan reviewer PRs for UUID/STATES in parallel, updating helm live."
@@ -798,7 +907,10 @@ the pending list, not filed away as done."
          (setq gp-helm--reviewing-cache final)
          (gp-cache-put (list 'reviewing uuid states) final)
          (gp-helm--scan-pipelines-async final)
-         (gp-helm--scan-review-tallies-async final))
+         (gp-helm--scan-review-tallies-async final)
+         ;; per-reviewer data too: the quorum split needs to know WHO
+         ;; voted, which the aggregate tally cannot say
+         (gp-helm--scan-reviewers-async final))
        (gp-helm--refresh-if-alive)))))
 
 ;;;; Others' open PRs ---------------------------------------------------------

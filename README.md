@@ -152,6 +152,7 @@ setup (the write actions simply 403).
 | **CI pipelines in the detail view** — the PR branch's pipelines, tabbable, with stop / trigger / manual-run / logs | on by default | `(setq gp-detail-show-pipelines nil)` |
 | **External deploy hook** — run your own script to advance a gated manual step | `(setq gp-pipeline-deploy-script '("~/bin/gp-deploy"))` | omit it (default) |
 | **OS notifications** — desktop alert when long-running work finishes | on by default | `(setq gp-notify nil)` |
+| **Review quorum** — PRs other reviewers already settled move out of the pending list | 2 approvals / 2 rejections | `(setq gp-helm-min-approvals 0)` / `gp-helm-min-rejections` |
 | **Shell-rc env import** (macOS convenience) | `(require 'bitbucket-env)` + `(bitbucket-env-load)` | omit it (default) |
 | **Send a PR comment to an AI terminal session** (iTerm2 or Ghostty) | `(setq gp-helm-terminal-backend 'iterm2)` or `'ghostty` | omit it (default) |
 

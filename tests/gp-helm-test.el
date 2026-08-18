@@ -213,8 +213,8 @@ so it must stay a single source of truth rather than a literal."
            (done1 '((id . 3) (my-state . approved)))
            (res (gp-helm--partition-reviewing
                  (list todo1 done1 todo2) "{me}")))
-      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (car res)) '(1 2)))
-      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (cdr res)) '(3))))))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 0 res)) '(1 2)))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 1 res)) '(3))))))
 
 (ert-deftest gp-test-helm-changes-requested-stays-pending ()
   "A PR sent back with changes requested is still the user's to re-review.
@@ -226,8 +226,8 @@ done in \"Approved by me\"."
                 '(((id . 1) (my-state . changes))
                   ((id . 2) (my-state . approved)))
                 "{me}")))
-      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (car res)) '(1)))
-      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (cdr res)) '(2))))))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 0 res)) '(1)))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 1 res)) '(2))))))
 
 (ert-deftest gp-test-helm-partition-reviewing-preserves-order ()
   "Both halves keep the incoming order, so the list does not jump around."
@@ -235,9 +235,10 @@ done in \"Approved by me\"."
              (lambda (pr _uuid) (alist-get 'my-state pr))))
     (let ((res (gp-helm--partition-reviewing
                 '(((id . 1)) ((id . 2)) ((id . 3))) "{me}")))
-      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (car res))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 0 res))
                      '(1 2 3)))
-      (should (null (cdr res))))))
+      (should (null (nth 1 res)))
+      (should (null (nth 2 res))))))
 
 (ert-deftest gp-test-helm-my-vote-tolerates-missing-backend-op ()
   "A backend without `gp-pr-my-review-state' reports no vote, not an error.
@@ -251,6 +252,73 @@ the whole list."
 (ert-deftest gp-test-helm-my-vote-nil-uuid-is-no-vote ()
   "With no known identity nothing is classed as already-voted."
   (should-not (gp-helm--my-vote '((id . 1)) nil)))
+
+
+;;;; Quorum: covered by other reviewers -----------------------------------------
+
+(defmacro gp-test-with-reviewers (alist &rest body)
+  "Run BODY with `gp-helm--reviewers-cache' seeded from ALIST (id . plists)."
+  (declare (indent 1))
+  `(let ((gp-helm--reviewers-cache (make-hash-table :test 'eql)))
+     (dolist (kv ,alist)
+       (puthash (car kv) (cdr kv) gp-helm--reviewers-cache))
+     ,@body))
+
+(ert-deftest gp-test-helm-covered-counts-only-others ()
+  "The user's own approval does not count toward the quorum."
+  (let ((gp-helm-min-approvals 2) (gp-helm-min-rejections 2))
+    ;; two approvals, but one is the user's -> only one other -> not covered
+    (gp-test-with-reviewers
+        '((1 . ((:id "{me}" :state approved)
+                (:id "{a}" :state approved))))
+      (should-not (gp-helm--covered-by-others-p '((id . 1)) "{me}")))
+    ;; two approvals from other people -> covered
+    (gp-test-with-reviewers
+        '((1 . ((:id "{a}" :state approved)
+                (:id "{b}" :state approved))))
+      (should (gp-helm--covered-by-others-p '((id . 1)) "{me}")))))
+
+(ert-deftest gp-test-helm-covered-by-rejections ()
+  "Enough changes-requested from others also covers the PR."
+  (let ((gp-helm-min-approvals 2) (gp-helm-min-rejections 2))
+    (gp-test-with-reviewers
+        '((1 . ((:id "{a}" :state changes) (:id "{b}" :state changes))))
+      (should (gp-helm--covered-by-others-p '((id . 1)) "{me}")))
+    (gp-test-with-reviewers
+        '((1 . ((:id "{a}" :state changes))))
+      (should-not (gp-helm--covered-by-others-p '((id . 1)) "{me}")))))
+
+(ert-deftest gp-test-helm-covered-unknown-is-not-covered ()
+  "A PR whose reviewer data has not arrived is never treated as covered.
+The scan is asynchronous; assuming quorum would make rows vanish from
+the pending list and then reappear once the data lands."
+  (let ((gp-helm-min-approvals 2))
+    (gp-test-with-reviewers '()
+      (should-not (gp-helm--covered-by-others-p '((id . 1)) "{me}")))))
+
+(ert-deftest gp-test-helm-covered-threshold-zero-disables ()
+  "A threshold of 0 switches that half of the rule off."
+  (gp-test-with-reviewers
+      '((1 . ((:id "{a}" :state approved) (:id "{b}" :state approved))))
+    (let ((gp-helm-min-approvals 0) (gp-helm-min-rejections 2))
+      (should-not (gp-helm--covered-by-others-p '((id . 1)) "{me}")))))
+
+(ert-deftest gp-test-helm-partition-three-way ()
+  "Own approval beats quorum: it lands in APPROVED, not COVERED."
+  (cl-letf (((symbol-function 'gp-pr-my-review-state)
+             (lambda (pr _uuid) (alist-get 'my-state pr))))
+    (let ((gp-helm-min-approvals 2) (gp-helm-min-rejections 2))
+      (gp-test-with-reviewers
+          '((1 . ((:id "{a}" :state pending)))
+            (2 . ((:id "{a}" :state approved) (:id "{b}" :state approved)))
+            (3 . ((:id "{a}" :state approved) (:id "{b}" :state approved))))
+        (let* ((todo '((id . 1)))
+               (covered '((id . 2)))
+               (mine '((id . 3) (my-state . approved)))
+               (res (gp-helm--partition-reviewing (list todo covered mine) "{me}")))
+          (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 0 res)) '(1)))
+          (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 1 res)) '(3)))
+          (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 2 res)) '(2))))))))
 
 (provide 'gp-helm-test)
 ;;; gp-helm-test.el ends here
