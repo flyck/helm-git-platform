@@ -616,11 +616,28 @@ than silently showing nothing."
     (when (fboundp 'gp-overlay-pr)
       (ignore-errors (gp-overlay-pr pr)))))
 
+(defun gp--file-path-at-line ()
+  "Return the changed-file path for the line point is on, or nil.
+A file line is \"  NAME  +N -M\" with only NAME buttonised, so requiring
+point to sit on the button itself makes RET miss from the indentation,
+the stat columns or end of line.  Scanning the whole line instead means
+anywhere on it works; only lines carrying a `gp-file-path' button match,
+so other sections are unaffected."
+  (let* ((bol (line-beginning-position))
+         (eol (line-end-position))
+         (button (or (button-at bol) (next-button bol)))
+         path)
+    (while (and button (not path) (< (button-start button) eol))
+      (setq path (button-get button 'gp-file-path))
+      (unless path
+        (setq button (next-button (button-end button)))))
+    path))
+
 (defun gp-detail-visit-file ()
-  "Open the changed file at point (detail buffer)."
+  "Open the changed file at point (detail buffer).
+Point may be anywhere on the file's line, not just on the name."
   (interactive)
-  (if-let* ((button (button-at (point)))
-            (path (button-get button 'gp-file-path)))
+  (if-let* ((path (gp--file-path-at-line)))
       (gp-ui-open-file gp--pr path)
     (user-error "Point is not on a changed file")))
 
@@ -931,8 +948,7 @@ grants it for the active backend."
   (interactive)
   (let ((sec (magit-current-section)))
     (cond
-     ((and (button-at (point))
-           (button-get (button-at (point)) 'gp-file-path))
+     ((gp--file-path-at-line)
       (gp-detail-visit-file))
      ((and sec (object-of-class-p sec 'gp-commit-section))
       (gp-detail-show-commit))
