@@ -596,6 +596,16 @@ discard an approval."
           :commits (or (cadr row) 0)
           :file-list files)))
 
+(cl-defmethod gp--pull-request-stats-async ((backend git-platform-mock) full-name id pr callback)
+  ;; local sqlite, so there is nothing to wait on -- a short timer keeps the
+  ;; detail view's async ordering (spinner, then fold-in) exercised
+  (let ((stats (gp--pull-request-stats backend full-name id pr)))
+    (run-at-time 0.2 nil callback stats)))
+
+(cl-defmethod gp--pull-request-diff-async ((backend git-platform-mock) full-name id commit _pr callback)
+  (let ((diff (gp--pull-request-diff backend full-name id commit)))
+    (run-at-time 0.2 nil callback diff)))
+
 ;;;; Simulated pipelines -----------------------------------------------------------
 
 ;; PR #101 runs a live pipeline against the wall clock: Build finishes

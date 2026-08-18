@@ -34,6 +34,13 @@
 (cl-defmethod gp--workspace-pull-requests-async ((_ git-platform-github) callback
                                                  &optional uuid state max-items)
   (github-workspace-pull-requests-async callback uuid state max-items))
+(cl-defmethod gp--pull-request-stats-async ((_ git-platform-github) full-name id pr callback)
+  (github-pull-request-stats-async full-name id pr callback))
+(cl-defmethod gp--pull-request-diff-async ((_ git-platform-github) full-name id commit pr callback)
+  ;; GitHub serves the diff off the PR resource via content negotiation, so
+  ;; it needs neither the commit hash nor the PR object -- both still
+  ;; accepted (and ignored) to match the protocol op's arity.
+  (github-pull-request-diff-async full-name id commit pr callback))
 (cl-defmethod gp--reviewing-pull-requests ((_ git-platform-github) &optional uuid limit states)
   (github-reviewing-pull-requests uuid limit states))
 (cl-defmethod gp--reviewing-pull-requests-async ((_ git-platform-github) uuid states on-batch on-done &optional limit)
@@ -52,10 +59,6 @@
   (github-pull-request-diff full-name id commit))
 (cl-defmethod gp--pull-request-stats ((_ git-platform-github) full-name id &optional pr)
   (github-pull-request-stats full-name id pr))
-(cl-defmethod gp--pull-request-diff-async ((_ git-platform-github) full-name id commit pr callback)
-  (github-pull-request-diff-async full-name id commit pr callback))
-(cl-defmethod gp--pull-request-stats-async ((_ git-platform-github) full-name id pr callback)
-  (github-pull-request-stats-async full-name id pr callback))
 (cl-defmethod gp--create-comment ((_ git-platform-github) full-name id text &optional inline parent-id)
   (github-create-comment full-name id text inline parent-id))
 (cl-defmethod gp--resolve-comment ((_ git-platform-github) full-name id comment-id)

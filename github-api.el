@@ -411,6 +411,42 @@ Signals on transport/HTTP failure or a GraphQL-level `errors' array."
           (error "GitHub GraphQL errors: %S" (alist-get 'errors parsed)))
         (alist-get 'data parsed)))))
 
+(defun github-graphql-request-async (query variables callback)
+  "Run GraphQL QUERY with VARIABLES asynchronously; CALLBACK gets (OK DATA).
+Non-blocking twin of `github-graphql-request'.  Errors -- transport,
+HTTP, or a GraphQL-level `errors' array -- are reported as OK nil
+rather than signalled, since the callers use GraphQL for optional
+enrichment (thread resolution) and must degrade to plain REST data
+instead of failing the whole fetch.  CALLBACK runs exactly once."
+  (if (not (github-api-token-value))
+      (run-at-time 0 nil (lambda () (funcall callback nil nil)))
+    (let* ((data `((query . ,query) (variables . ,(or variables '#s(hash-table)))))
+           (url-request-method "POST")
+           (auth (github--auth-header))
+           (url-request-extra-headers
+            `(,@(when auth (list auth))
+              ("Content-Type" . "application/json")))
+           (url-request-data (encode-coding-string (json-encode data) 'utf-8)))
+      (url-retrieve
+       github-graphql-url
+       (lambda (status-plist)
+         (let ((ok nil) (out nil))
+           (condition-case e
+               (if (plist-get status-plist :error)
+                   (gp-log-error "async graphql -> %S" (plist-get status-plist :error))
+                 (pcase-let ((`(,status ,_headers ,body)
+                              (github--split-response (current-buffer))))
+                   (let ((parsed (github--parse-json body)))
+                     (cond
+                      ((or (< status 200) (>= status 300))
+                       (gp-log-error "async graphql -> HTTP %d" status))
+                      ((alist-get 'errors parsed)
+                       (gp-log-error "async graphql errors: %S" (alist-get 'errors parsed)))
+                      (t (setq ok t out (alist-get 'data parsed)))))))
+             (error (gp-log-error "async graphql: %s" (error-message-string e))))
+           (funcall callback ok out)))
+       nil t t))))
+
 ;;;; High-level endpoints: identity ---------------------------------------------
 
 (defun github-current-user ()
@@ -1147,27 +1183,37 @@ was nothing to remove."
   "Comment id -> t for review comments known to sit in a resolved thread.
 Populated by `github--refresh-resolved-threads'.")
 
+(defconst github--resolved-threads-query
+  "query($owner:String!,$repo:String!,$number:Int!){
+     repository(owner:$owner,name:$repo){
+       pullRequest(number:$number){
+         reviewThreads(first:100){nodes{
+           isResolved
+           comments(first:100){nodes{databaseId}}}}}}}"
+  "GraphQL query listing a PR's review threads and their resolution state.
+Shared by the sync and async resolved-thread refreshes.")
+
+(defun github--record-resolved-threads (data)
+  "Cache the comment ids of every resolved review thread in DATA."
+  (let-alist data
+    (dolist (thread .repository.pullRequest.reviewThreads.nodes)
+      (when (alist-get 'isResolved thread)
+        (dolist (c (let-alist thread .comments.nodes))
+          (puthash (alist-get 'databaseId c) t
+                   github--resolved-thread-comment-ids))))))
+
 (defun github--refresh-resolved-threads (full-name number)
   "Query GraphQL for PR NUMBER's resolved review threads; cache their comment ids.
 Populates `github--resolved-thread-comment-ids'.  Swallows errors
 (GraphQL needs a token) so plain REST comment listing still works
 without one; resolution just won't be reflected."
   (ignore-errors
-    (let* ((owner (car (split-string full-name "/")))
-           (repo (cadr (split-string full-name "/")))
-           (data (github-graphql-request
-                  "query($owner:String!,$repo:String!,$number:Int!){
-                     repository(owner:$owner,name:$repo){
-                       pullRequest(number:$number){
-                         reviewThreads(first:100){nodes{
-                           isResolved
-                           comments(first:100){nodes{databaseId}}}}}}}"
-                  `((owner . ,owner) (repo . ,repo) (number . ,number)))))
-      (let-alist data
-        (dolist (thread .repository.pullRequest.reviewThreads.nodes)
-          (when (alist-get 'isResolved thread)
-            (dolist (c (let-alist thread .comments.nodes))
-              (puthash (alist-get 'databaseId c) t github--resolved-thread-comment-ids))))))))
+    (let ((owner (car (split-string full-name "/")))
+          (repo (cadr (split-string full-name "/"))))
+      (github--record-resolved-threads
+       (github-graphql-request
+        github--resolved-threads-query
+        `((owner . ,owner) (repo . ,repo) (number . ,number)))))))
 
 (defvar github--viewer-reactions (make-hash-table :test 'eql)
   "Comment id -> list of reaction contents the viewer has reacted with.
@@ -1241,21 +1287,58 @@ and, for inline comments, `inline.path'/`inline.to'."
 
 (defun github-pull-request-comments-async (full-name number callback &optional max-items)
   "Async twin of `github-pull-request-comments'.  CALLBACK gets (OK COMMENTS).
-Uses a wall-clock `run-at-time', NOT `run-with-idle-timer' -- this is
-typically fired alongside `github-pull-request-async', whose
-`url-retrieve' network I/O can keep Emacs from ever registering a
-fresh idle period in the right window, in which case an idle timer
-here would silently never fire and the caller's pending-count would
-never reach zero (see the identical note on `gp--detail-load-stats-diff'
-in gp-ui.el, and `gp--detail-load-pipelines', which hit this exact bug)."
-  (run-at-time
-   0 nil
-   (lambda ()
-     (condition-case e
-         (funcall callback t (github-pull-request-comments full-name number max-items))
-       (error
-        (gp-log-error "github comments fetch: %s" (error-message-string e))
-        (funcall callback nil nil))))))
+Genuinely non-blocking: the three requests behind a comment list -- the
+GraphQL thread-resolution query, the issue comments and the review
+comments -- all run through their async twins concurrently, and the
+merged result is delivered once the last one settles.
+
+Wrapping the synchronous version in a timer instead (what this used to
+do) does NOT work: all three requests still block, roughly a second in
+total on a real PR, so Emacs never reaches redisplay and the detail
+buffer's ⏳ spinner stays invisible for the whole load.
+
+The GraphQL stage is optional enrichment -- it only marks which
+comments sit in a resolved thread -- so its failure is tolerated and
+the REST comments are still returned."
+  (let ((pending 3)
+        (issue nil)
+        (review nil)
+        (failed nil))
+    (cl-labels
+        ((settle ()
+           (setq pending (1- pending))
+           (when (zerop pending)
+             (let ((all (append
+                         (mapcar #'github--reshape-issue-comment issue)
+                         (mapcar #'github--reshape-review-comment review))))
+               ;; Reshaping must happen HERE, not as each response lands: the
+               ;; issue/review reshapers consult
+               ;; `github--resolved-thread-comment-ids', which the GraphQL
+               ;; stage fills in -- doing it earlier would drop resolution
+               ;; markers whenever GraphQL answered last.
+               (funcall callback (not failed)
+                        (if max-items
+                            (cl-subseq all 0 (min max-items (length all)))
+                          all))))))
+      (let ((owner (car (split-string full-name "/")))
+            (repo (cadr (split-string full-name "/"))))
+        (github-graphql-request-async
+         github--resolved-threads-query
+         `((owner . ,owner) (repo . ,repo) (number . ,number))
+         (lambda (ok data)
+           ;; optional: a GraphQL failure must not fail the comment list
+           (when ok (github--record-resolved-threads data))
+           (settle))))
+      (github-api-paged-async
+       (format "/repos/%s/issues/%s/comments" full-name number) nil
+       (lambda (ok values)
+         (if ok (setq issue values) (setq failed t))
+         (settle)))
+      (github-api-paged-async
+       (format "/repos/%s/pulls/%s/comments" full-name number) nil
+       (lambda (ok values)
+         (if ok (setq review values) (setq failed t))
+         (settle))))))
 
 (defun github--reaction-counts (c)
   "Extract ((CONTENT . COUNT) …) from comment C's inline `reactions' object.
