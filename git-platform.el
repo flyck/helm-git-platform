@@ -435,6 +435,15 @@ True for your own comments always, and for anyone's when
   "Return PIPELINE's result/stage string, or nil.")
 (gp-defop pipeline-finished-p (pipeline)
   "Return non-nil if PIPELINE has finished.")
+(gp-defop pipeline-id (pipeline)
+  "Return the identifier PIPELINE's own endpoints accept, or nil.
+Bitbucket keys a pipeline by `uuid'; GitHub Actions keys a workflow run
+by `id'.  Everything that fetches steps, stops a run or reads a log
+takes this value, so reading `uuid' directly works only against
+Bitbucket -- on GitHub it is nil and the steps silently never load.")
+(gp-defop pipeline-step-id (step)
+  "Return the identifier STEP's own endpoints accept, or nil.
+As `pipeline-id', for a step/job: Bitbucket `uuid', Actions `id'.")
 (gp-defop pipeline-number (pipeline)
   "Return PIPELINE's build number, or nil.")
 (gp-defop pipeline-commit (pipeline)

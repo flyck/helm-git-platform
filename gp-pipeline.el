@@ -425,13 +425,13 @@ list of prior-commit pipelines shown as a one-line status summary."
 Paged fetches can duplicate a run when a new pipeline starts
 mid-pagination (the pages shift) -- dedupe by uuid first."
   (let* ((all (cl-remove-duplicates all
-                                    :key (lambda (p) (alist-get 'uuid p))
+                                    :key (lambda (p) (gp-pipeline-id p))
                                     :test #'equal
                                     :from-end t))
          (current (gp-pipelines-match-commit all commit))
-         (current-uuids (mapcar (lambda (p) (alist-get 'uuid p)) current)))
+         (current-uuids (mapcar (lambda (p) (gp-pipeline-id p)) current)))
     (cons current
-          (cl-remove-if (lambda (p) (member (alist-get 'uuid p) current-uuids))
+          (cl-remove-if (lambda (p) (member (gp-pipeline-id p) current-uuids))
                         all))))
 
 (defun gp-pipeline--assemble (current steps-of recent summaries)
@@ -440,12 +440,12 @@ STEPS-OF maps a pipeline uuid to its steps; SUMMARIES maps a commit
 hash to its commit message."
   (let ((counts (make-hash-table :test 'equal)))
     (dolist (p current)
-      (puthash (alist-get 'uuid p)
-               (length (gethash (alist-get 'uuid p) steps-of))
+      (puthash (gp-pipeline-id p)
+               (length (gethash (gp-pipeline-id p) steps-of))
                counts))
     (list :current
           (mapcar (lambda (p)
-                    (cons p (gethash (alist-get 'uuid p) steps-of)))
+                    (cons p (gethash (gp-pipeline-id p) steps-of)))
                   (gp-pipelines-sort current counts))
           :recent
           (mapcar (lambda (p)
@@ -477,7 +477,7 @@ any error (the detail view degrades gracefully; the error is logged)."
            (steps-of (make-hash-table :test 'equal))
            (summaries (make-hash-table :test 'equal)))
       (dolist (p current)
-        (let ((uuid (alist-get 'uuid p)))
+        (let ((uuid (gp-pipeline-id p)))
           (puthash uuid (gp-pipeline-steps full-name uuid) steps-of)))
       ;; attach each run's commit summary (one extra lookup per run,
       ;; cached) so the renderer needs no network access
@@ -533,7 +533,7 @@ the caller treats that like the synchronous nil (keeps stale data)."
                      (funcall callback (gp-pipeline--assemble
                                         current steps-of recent summaries))
                    (dolist (p current)
-                     (let ((uuid (alist-get 'uuid p)))
+                     (let ((uuid (gp-pipeline-id p)))
                        (gp-pipeline-steps-async
                         full-name uuid
                         (lambda (steps)
@@ -639,9 +639,9 @@ resolved are omitted rather than exported empty, so a script can tell
                 (cons "GP_PIPELINE_ID"
                       (let ((n (gp-pipeline-number pipeline)))
                         (and n (format "%s" n))))
-                (cons "GP_PIPELINE_UUID" (alist-get 'uuid pipeline))
+                (cons "GP_PIPELINE_UUID" (gp-pipeline-id pipeline))
                 (cons "GP_STEP_NAME" (alist-get 'name step))
-                (cons "GP_STEP_UUID" (alist-get 'uuid step))
+                (cons "GP_STEP_UUID" (gp-pipeline-step-id step))
                 (cons "GP_STEP_STATE" (gp-pipeline-step-state step))
                 (cons "GP_PR_ID"
                       (let ((id (alist-get 'id pr)))
@@ -745,7 +745,7 @@ point is not within a pipeline."
   (let* ((pp (gp-pipeline--at-point))
          (pipeline (car pp))
          (full-name (gp-pr-full-name gp--pr))
-         (uuid (alist-get 'uuid pipeline)))
+         (uuid (gp-pipeline-id pipeline)))
     (when (yes-or-no-p (format "Stop pipeline #%s? "
                                (or (gp-pipeline-number pipeline) "?")))
       (condition-case e
@@ -844,7 +844,7 @@ there).  Only offered when the backend reports the step rerunnable."
       (user-error "Step %S cannot be re-run individually on this backend" name))
     (condition-case e
         (progn
-          (gp-pipeline-step-rerun full-name (alist-get 'uuid pipeline) step)
+          (gp-pipeline-step-rerun full-name (gp-pipeline-id pipeline) step)
           (message "Re-running step %S" name)
           (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
       (error (message "Could not re-run step: %s" (error-message-string e))))))
@@ -905,8 +905,8 @@ captured historical log."
          ;; buffer-local to the detail buffer we are leaving
          (pr gp--pr)
          (full-name (gp-pr-full-name pr))
-         (pipeline-uuid (alist-get 'uuid pipeline))
-         (step-uuid (alist-get 'uuid step))
+         (pipeline-uuid (gp-pipeline-id pipeline))
+         (step-uuid (gp-pipeline-step-id step))
          (running (gp-pipeline-step-running-p step))
          (buf (get-buffer-create
                (gp--buffer-name

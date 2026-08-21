@@ -396,6 +396,18 @@ hard block on commenting at all."
   (cl-letf (((symbol-function 'github-pull-request-diff) (lambda (&rest _) nil)))
     (should-not (github-inline-target-problem "acme/web" 7 "anything.el" 1))))
 
+;;;; Pipeline identity ----------------------------------------------------------
+
+(ert-deftest github-test-pipeline-id-is-the-run-id-not-a-uuid ()
+  "A workflow run is keyed by `id'; it has no `uuid'.
+`gp-pipeline.el' used to read `uuid' directly, which is Bitbucket's
+field name -- on GitHub that is nil, so every steps/stop/log lookup got
+nil and the detail view showed \"(no steps)\" for every run."
+  (let ((git-platform-current-backend (git-platform-github)))
+    (should (equal (gp-pipeline-id '((id . 32188796940) (name . "CI"))) 32188796940))
+    (should-not (gp-pipeline-id '((uuid . "{bitbucket-shaped}"))))
+    (should (equal (gp-pipeline-step-id '((id . 95878412069))) 95878412069))))
+
 ;;;; Reactions ----------------------------------------------------------------
 
 (ert-deftest github-test-reaction-base-differs-per-comment-kind ()

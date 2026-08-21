@@ -188,5 +188,17 @@ leaving unrelated keys alone."
   (let ((gp-buffer-name-prefix "zz: "))
     (should (equal (gp--buffer-name "PRs") "*zz: PRs*"))))
 
+(ert-deftest gp-test-pipeline-id-differs-per-backend ()
+  "Each backend names its pipeline identifier differently.
+Bitbucket keys a pipeline by `uuid', GitHub Actions a run by `id'.
+Reading either field directly works on one forge and silently returns
+nil on the other."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (equal (gp-pipeline-id '((uuid . "{abc}"))) "{abc}"))
+    (should (equal (gp-pipeline-step-id '((uuid . "{step}"))) "{step}")))
+  (let ((git-platform-current-backend (git-platform-github)))
+    (should (equal (gp-pipeline-id '((id . 42))) 42))
+    (should (equal (gp-pipeline-step-id '((id . 7))) 7))))
+
 (provide 'git-platform-test)
 ;;; git-platform-test.el ends here

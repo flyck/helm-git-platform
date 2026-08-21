@@ -214,6 +214,11 @@
   (github-pipeline-result pipeline))
 (cl-defmethod gp--pipeline-finished-p ((_ git-platform-github) pipeline)
   (github-pipeline-finished-p pipeline))
+(cl-defmethod gp--pipeline-id ((_ git-platform-github) pipeline)
+  ;; a workflow run is keyed by `id'; it has no `uuid'
+  (alist-get 'id pipeline))
+(cl-defmethod gp--pipeline-step-id ((_ git-platform-github) step)
+  (alist-get 'id step))
 (cl-defmethod gp--pipeline-number ((_ git-platform-github) pipeline)
   (github-pipeline-number pipeline))
 (cl-defmethod gp--pipeline-commit ((_ git-platform-github) pipeline)
