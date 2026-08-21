@@ -1198,6 +1198,60 @@ whose response IS the per-file list)."
           :commits (or (alist-get 'commits pr) 0)
           :file-list (mapcar #'github--diffstat-entry files))))
 
+(defun github-api-get-raw-async (path callback &optional extra-headers)
+  "GET PATH asynchronously and call CALLBACK with the raw body text.
+CALLBACK receives the body, or nil on error (logged).  The
+JSON-parsing twin is `github-api-get-async'; diffs come back as
+text/plain via content negotiation, so the body must not be parsed."
+  (let* ((url (github--build-url path nil))
+         (url-request-method "GET")
+         (auth (github--auth-header))
+         (url-request-extra-headers `(,@(when auth (list auth)) ,@extra-headers))
+         (start (float-time)))
+    (url-retrieve
+     url
+     (lambda (status-plist)
+       (let (result)
+         (condition-case e
+             (if-let* ((err (plist-get status-plist :error)))
+                 (gp-log-error "async raw %s -> %S" path err)
+               (pcase-let ((`(,code ,_headers ,body) (github--split-response (current-buffer))))
+                 (when gp-log-requests
+                   (gp-log (if (and (>= code 200) (< code 300)) 'http 'error)
+                           "GET %s -> %d (%.0fms, async raw)"
+                           path code (* 1000 (- (float-time) start))))
+                 (setq result (cond ((equal code 404) "")
+                                    ((and (>= code 200) (< code 300)) body)))))
+           (error (gp-log-error "async raw %s: %s" path (error-message-string e))))
+         (funcall callback result)))
+     nil t t)))
+
+(defun github-pull-request-diff-async (full-name number _commit _pr callback)
+  "Fetch PR FULL-NAME/NUMBER's unified diff asynchronously.
+CALLBACK gets the diff text, or nil on error.  GitHub serves the diff
+off the PR resource via content negotiation, so no signed URL (and
+hence no PR object) is needed -- the argument list matches the
+protocol op, which Bitbucket needs it for."
+  (github-api-get-raw-async
+   (format "/repos/%s/pulls/%s" full-name number)
+   callback
+   '(("Accept" . "application/vnd.github.v3.diff"))))
+
+(defun github-pull-request-stats-async (full-name number pr callback)
+  "Fetch PR FULL-NAME/NUMBER's stats plist asynchronously.
+CALLBACK gets the plist, or nil on error.  The totals come off PR
+itself; only the per-file list needs fetching (see
+`github-pull-request-stats')."
+  (github-api-paged-async
+   (format "/repos/%s/pulls/%s/files" full-name number) nil
+   (lambda (_ok files)
+     (funcall callback
+              (list :files (or (alist-get 'changed_files pr) 0)
+                    :added (or (alist-get 'additions pr) 0)
+                    :removed (or (alist-get 'deletions pr) 0)
+                    :commits (or (alist-get 'commits pr) 0)
+                    :file-list (mapcar #'github--diffstat-entry files))))))
+
 ;;;; Commit statuses ------------------------------------------------------------
 
 (defun github--status-state->bitbucket (state)

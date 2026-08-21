@@ -1720,47 +1720,51 @@ fresh data bind `gp-cache-ttl' to 0 around the call."
          (lambda (ok value) (finish-one ok value 'comments)))))))
 
 (defun gp--detail-load-stats-diff (buf pr ttl)
-  "Fetch PR's stats and diff on an idle timer and fold them into BUF.
+  "Fetch PR's stats and diff asynchronously and fold them into BUF.
 Kept out of the visible-render path: stats/diff are cached by source
-commit, so a revisit is instant, but a cold fetch is synchronous and
-must not block the first paint.  Relevance is checked by PR id (see
-`gp--detail-buffer-shows-p'), not a refresh token.  TTL carries the
-caller's cache policy (0 forces fresh on `g')."
+commit, so a revisit is instant, while a cold fetch is two round-trips.
+Both are fetched with the async ops, so a cold fetch never blocks
+Emacs -- the synchronous twins froze the UI for the whole round-trip
+(~1.2s) shortly after every `g'.
+
+Relevance is checked by PR id (see `gp--detail-buffer-shows-p'), not a
+refresh token: a rapid series of refreshes starts several fetches and
+only the last-started token would match, so a strict token check could
+drop the only result that ever arrives and leave stats/diff empty
+forever.  Keying on the PR id is the real invariant -- same PR, so the
+fetched stats/diff are valid whichever refresh asked for them.
+
+TTL carries the caller's cache policy (0 forces fresh on `g')."
   (when (or gp-detail-show-stats gp-detail-show-file-diffs)
-    ;; Wall-clock timer, NOT `run-with-idle-timer' -- see the twin comment in
-    ;; `gp--detail-load-pipelines': idle timers scheduled from a url sentinel
-    ;; during an ongoing idle period can silently never fire.
-    (run-at-time
-     0.1 nil
-     (lambda ()
-       ;; Proceed as long as BUF is still showing THIS PR.  We deliberately
-       ;; do NOT require the captured TOKEN to still be current: a rapid
-       ;; series of refreshes queues several one-shot idle timers, and only
-       ;; the last-scheduled token would match -- if an earlier timer fires
-       ;; last, a strict token check would drop its result and leave stats/
-       ;; diff empty forever (nothing reschedules them).  Keying on the PR id
-       ;; is the real invariant: same PR -> the fetched stats/diff are valid.
-       (when (and (buffer-live-p buf)
-                  (gp--detail-buffer-shows-p buf pr))
-         (condition-case e
-             (let* ((gp-cache-ttl ttl)
-                    (full-name (gp-pr-full-name pr))
-                    (id (alist-get 'id pr))
-                    (commit (gp-pr-source-commit pr))
-                    (stats (when gp-detail-show-stats
-                             (ignore-errors (gp-pull-request-stats full-name id pr))))
-                    (diff (when gp-detail-show-file-diffs
-                            (ignore-errors
-                              (gp-split-diff-by-file
-                               (gp-pull-request-diff full-name id commit))))))
-               (when (and (buffer-live-p buf)
-                          (gp--detail-buffer-shows-p buf pr))
-                 (with-current-buffer buf
-                   (setq gp--detail-stats stats gp--detail-diff diff)
-                   (gp--detail-rerender buf))))
-           (error
-            (gp-log-error "stats/diff load failed: %s"
-                          (error-message-string e)))))))))
+    (let ((commit (gp-pr-source-commit pr))
+          (full-name (gp-pr-full-name pr))
+          (id (alist-get 'id pr)))
+      (cl-labels
+          ((still-relevant-p ()
+             (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr)))
+           (fold-in (setter value)
+             ;; Each result lands on its own; render what we have so far.
+             ;; A nil value means the fetch failed -- keep whatever is already
+             ;; displayed rather than blanking the section, since the two
+             ;; fetches land independently and a failure should not throw away
+             ;; a good previous result.
+             (when (and value (still-relevant-p))
+               (with-current-buffer buf
+                 (funcall setter value)
+                 (gp--detail-rerender buf)))))
+        (when gp-detail-show-stats
+          (let ((gp-cache-ttl ttl))
+            (gp-pull-request-stats-async
+             full-name id pr
+             (lambda (stats)
+               (fold-in (lambda (v) (setq gp--detail-stats v)) stats)))))
+        (when gp-detail-show-file-diffs
+          (let ((gp-cache-ttl ttl))
+            (gp-pull-request-diff-async
+             full-name id commit pr
+             (lambda (diff)
+               (fold-in (lambda (v) (setq gp--detail-diff (gp-split-diff-by-file v)))
+                        diff)))))))))
 
 (defun gp--detail-load-commits (buf pr)
   "Fetch PR's commits asynchronously and fold them into BUF.

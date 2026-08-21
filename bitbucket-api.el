@@ -212,6 +212,25 @@ test mock) to run the whole package offline."
   (let ((q (cdr (assoc "q" params))))
     (concat path (if q (format " [q=%s]" q) ""))))
 
+(defun bitbucket--read-response-text (buf)
+  "Read HTTP response in BUF into (STATUS . BODY-TEXT); kill BUF.
+The body is decoded as UTF-8 and returned unparsed -- the diff
+endpoint serves text/plain.  Does not signal on HTTP errors; the
+caller inspects STATUS.  `bitbucket--read-response' is the
+JSON-parsing twin and shares this header/body split."
+  (unwind-protect
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (let ((status (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
+                          (string-to-number (match-string 1))
+                        0)))
+          (re-search-forward "\n\n" nil t)
+          (cons status
+                (decode-coding-string
+                 (buffer-substring-no-properties (point) (point-max))
+                 'utf-8))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
+
 (defun bitbucket--read-response (buf)
   "Parse HTTP response in BUF into (STATUS . PARSED-JSON); kill BUF.
 The body is decoded as UTF-8.  Does not signal on HTTP errors --
@@ -260,6 +279,34 @@ pagination) -- intended for fan-out scans."
                                        path (error-message-string e))))
          (funcall callback result)))
       nil t t)))
+
+(defun bitbucket-api-get-text-async (url callback)
+  "GET URL asynchronously and call CALLBACK with the raw body text.
+CALLBACK receives the decoded body, or nil on any error (logged).
+The JSON-parsing twin is `bitbucket-api-get-async'; the diff endpoint
+returns text/plain, so it needs a reader that does not parse."
+  (let* ((url-request-method "GET")
+         (url-request-extra-headers
+          `(("Authorization" . ,(bitbucket--auth-header))))
+         (start (float-time)))
+    (url-retrieve
+     url
+     (lambda (status-plist)
+       (let (result)
+         (condition-case e
+             (if-let* ((err (plist-get status-plist :error)))
+                 (gp-log-error "async diff -> %S" err)
+               (let* ((sc (bitbucket--read-response-text (current-buffer)))
+                      (code (car sc)))
+                 (when gp-log-requests
+                   (gp-log (if (and (>= code 200) (< code 300)) 'http 'error)
+                           "GET diff -> %d (%.0fms, async)"
+                           code (* 1000 (- (float-time) start))))
+                 (when (and (>= code 200) (< code 300))
+                   (setq result (cdr sc)))))
+           (error (gp-log-error "async diff read: %s" (error-message-string e))))
+         (funcall callback result)))
+     nil t t)))
 
 (defun bitbucket-api-paged-async (path &optional params callback max-items)
   "GET PATH following pagination asynchronously; call CALLBACK with (OK VALUES).
@@ -955,6 +1002,76 @@ See `bitbucket-pull-request-stats'."
           :removed (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_removed s) 0)) stat))
           :commits (length commits)
           :file-list (mapcar #'bitbucket--diffstat-entry stat))))
+
+(defun bitbucket-pull-request-stats-async (full-name id pr callback)
+  "Fetch the stats plist for PR FULL-NAME/ID asynchronously.
+CALLBACK gets the plist, or nil on error.  Caching matches the
+synchronous `bitbucket-pull-request-stats': keyed by source commit,
+served from cache when warm, and only non-nil results are stored.
+
+Async because this is deferred detail-view data: the synchronous twin
+blocks Emacs for the whole round-trip (two paged fetches), which is
+felt as a freeze after every `g'."
+  (let* ((commit (let-alist pr .source.commit.hash))
+         (key (and commit (list 'pr-stats full-name id commit)))
+         (hit (and key (bitbucket-cache-get key))))
+    (if (and hit (car hit))
+        (funcall callback (cdr hit))
+      (let ((diffstat-url (let-alist pr .links.diffstat.href)))
+        (if (not diffstat-url)
+            (funcall callback nil)
+          ;; two independent paged fetches; join them when both land
+          (let ((stat nil) (commits nil) (pending 2) (failed nil))
+            (cl-labels
+                ((done ()
+                   (setq pending (1- pending))
+                   (when (zerop pending)
+                     (let ((stats
+                            (unless failed
+                              (list :files (length stat)
+                                    :added (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_added s) 0)) stat))
+                                    :removed (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_removed s) 0)) stat))
+                                    :commits (length commits)
+                                    :file-list (mapcar #'bitbucket--diffstat-entry stat)))))
+                       (when (and key stats) (bitbucket-cache-put key stats))
+                       (funcall callback stats)))))
+              (bitbucket-api-paged-async
+               diffstat-url nil
+               (lambda (ok values)
+                 (unless ok (setq failed t))
+                 (setq stat values)
+                 (done)))
+              (bitbucket-api-paged-async
+               (format "/repositories/%s/pullrequests/%s/commits" full-name id)
+               '(("fields" . "values.hash,next"))
+               (lambda (ok values)
+                 (unless ok (setq failed t))
+                 (setq commits values)
+                 (done))))))))))
+
+(defun bitbucket-pull-request-diff-async (full-name id commit pr callback)
+  "Fetch the unified diff text for PR FULL-NAME/ID asynchronously.
+CALLBACK gets the diff string, or nil on error.  Caching matches the
+synchronous `bitbucket-pull-request-diff': keyed by source COMMIT, and
+an empty diff is never cached so a transient empty response re-fetches.
+
+PR supplies `links.diff.href' -- the constructed /diff path is rejected,
+so the pre-signed link is the only one that works (see
+`bitbucket--pull-request-diff-1')."
+  (let* ((key (and commit (list 'pr-diff full-name id commit)))
+         (hit (and key (bitbucket-cache-get key))))
+    (if (and hit (car hit))
+        (funcall callback (cdr hit))
+      (let ((url (or (let-alist pr .links.diff.href)
+                     (bitbucket--build-url
+                      (format "/repositories/%s/pullrequests/%s/diff" full-name id)
+                      nil))))
+        (bitbucket-api-get-text-async
+         url
+         (lambda (diff)
+           (when (and key diff (not (string-empty-p diff)))
+             (bitbucket-cache-put key diff))
+           (funcall callback diff)))))))
 
 (defun bitbucket--commit-entry (c)
   "Normalise a Bitbucket PR commit C to (:hash :summary :author :date).

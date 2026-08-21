@@ -98,6 +98,16 @@ ARGLIST may contain &optional; &rest is not supported here."
 COMMIT, the source commit hash, lets the backend cache the diff.")
 (gp-defop pull-request-stats (full-name id &optional pr)
   "Return a stats plist for PR FULL-NAME/ID.")
+(gp-defop pull-request-diff-async (full-name id commit pr callback)
+  "Fetch the unified diff for PR FULL-NAME/ID asynchronously.
+CALLBACK gets the diff text, or nil on error.  COMMIT (the source
+commit hash) lets the backend cache the result; PR supplies the
+pre-signed diff link Bitbucket requires.  Async because a
+synchronous diff fetch blocks Emacs for the whole round-trip.")
+(gp-defop pull-request-stats-async (full-name id pr callback)
+  "Fetch the stats plist for PR FULL-NAME/ID asynchronously.
+CALLBACK gets the plist, or nil on error.  PR is the already-fetched
+PR object, which carries the diffstat link.")
 (gp-defop pull-request-commits-async (full-name id callback &optional max-items)
   "Fetch the commits on PR FULL-NAME/ID asynchronously.
 CALLBACK gets a list of plists (:hash :summary :author :date), newest

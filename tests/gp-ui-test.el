@@ -737,7 +737,13 @@ a visible stall once per interval in any open detail buffer."
                    (funcall callback t fresh-pr)))
                 ((symbol-function 'bitbucket-pull-request-comments-async)
                  (lambda (_full-name _id callback &optional _max-items)
-                   (funcall callback t comments))))
+                   (funcall callback t comments)))
+                ;; the deferred stats/diff fetch is async now, so it runs
+                ;; within this test rather than on a timer that never fires
+                ((symbol-function 'gp-pull-request-stats-async)
+                 (lambda (_fn _id _pr cb) (funcall cb nil)))
+                ((symbol-function 'gp-pull-request-diff-async)
+                 (lambda (_fn _id _c _pr cb) (funcall cb nil))))
         (gp-detail-refresh)
         (should-not show-pr-called)
         (should (equal gp--pr fresh-pr))
@@ -966,6 +972,97 @@ on the repo, which is what GitHub's endpoint would otherwise do."
   (should (eq (lookup-key gp-detail-mode-map "L") #'gp-detail-edit-labels))
   ;; lowercase `l' keeps its read-only pipeline-log meaning
   (should (eq (lookup-key gp-detail-mode-map "l") #'gp-detail-pipeline-step-log)))
+
+;;;; Async stats/diff loading ---------------------------------------------------
+
+;; `gp--detail-load-stats-diff' used to call the synchronous
+;; `gp-pull-request-stats'/`gp-pull-request-diff', which blocked Emacs for the
+;; whole round-trip (~1.2s measured) a beat after every `g'.
+
+(ert-deftest gp-test-load-stats-diff-uses-async-ops ()
+  "The loader must reach for the async ops, never the blocking twins."
+  (let ((async-calls nil)
+        (sync-calls nil)
+        (pr '((id . 7) (title . "t")
+              (destination (repository (full_name . "acme/x")))
+              (source (commit (hash . "abc123"))))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--pr pr)
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+                ((symbol-function 'gp-pull-request-stats-async)
+                 (lambda (_fn _id _pr cb) (push 'stats-async async-calls)
+                   (funcall cb '(:commits 1 :files 1 :added 0 :removed 0))))
+                ((symbol-function 'gp-pull-request-diff-async)
+                 (lambda (_fn _id _c _pr cb) (push 'diff-async async-calls) (funcall cb "diff")))
+                ((symbol-function 'gp-pull-request-stats)
+                 (lambda (&rest _) (push 'stats-sync sync-calls) nil))
+                ((symbol-function 'gp-pull-request-diff)
+                 (lambda (&rest _) (push 'diff-sync sync-calls) nil)))
+        (gp--detail-load-stats-diff (current-buffer) pr 0))
+      (should (memq 'stats-async async-calls))
+      (should (memq 'diff-async async-calls))
+      ;; the whole point: no blocking call
+      (should-not sync-calls))))
+
+(ert-deftest gp-test-load-stats-diff-folds-in-each-result ()
+  "Stats and diff land independently, each rendering what has arrived."
+  (let ((pr '((id . 7) (title . "t")
+              (destination (repository (full_name . "acme/x")))
+              (source (commit (hash . "abc123"))))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--pr pr)
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+                ((symbol-function 'gp-pull-request-stats-async)
+                 (lambda (_fn _id _pr cb) (funcall cb '(:commits 2 :files 3 :added 9 :removed 1))))
+                ((symbol-function 'gp-pull-request-diff-async)
+                 (lambda (_fn _id _c _pr cb) (funcall cb "diff --git a/x b/x")))
+                ((symbol-function 'gp-split-diff-by-file)
+                 (lambda (d) (list (cons "x" d)))))
+        (gp--detail-load-stats-diff (current-buffer) pr 0))
+      (should (equal (plist-get gp--detail-stats :files) 3))
+      (should (equal gp--detail-diff '(("x" . "diff --git a/x b/x")))))))
+
+(ert-deftest gp-test-load-stats-diff-failure-keeps-previous-content ()
+  "A failed fetch must not blank stats/diff that are already displayed.
+The two fetches land independently, so a nil result means \"this one
+failed\", not \"the PR has no stats\"."
+  (let ((pr '((id . 7) (title . "t")
+              (destination (repository (full_name . "acme/x")))
+              (source (commit (hash . "abc123")))))
+        (good-stats '(:commits 1 :files 2 :added 5 :removed 0))
+        (good-diff '(("x" . "old diff"))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--pr pr gp--detail-stats good-stats gp--detail-diff good-diff)
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+                ((symbol-function 'gp-pull-request-stats-async)
+                 (lambda (_fn _id _pr cb) (funcall cb nil)))
+                ((symbol-function 'gp-pull-request-diff-async)
+                 (lambda (_fn _id _c _pr cb) (funcall cb nil))))
+        (gp--detail-load-stats-diff (current-buffer) pr 0))
+      (should (equal gp--detail-stats good-stats))
+      (should (equal gp--detail-diff good-diff)))))
+
+(ert-deftest gp-test-load-stats-diff-ignores-results-for-another-pr ()
+  "A result arriving after the buffer moved on is dropped."
+  (let ((pr '((id . 7) (title . "t")
+              (destination (repository (full_name . "acme/x")))
+              (source (commit (hash . "abc123")))))
+        (other '((id . 99) (title . "other")
+                 (destination (repository (full_name . "acme/x"))))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      ;; buffer is showing a DIFFERENT PR than the one being fetched
+      (setq gp--pr other gp--detail-stats nil)
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+                ((symbol-function 'gp-pull-request-stats-async)
+                 (lambda (_fn _id _pr cb) (funcall cb '(:commits 1 :files 3 :added 0 :removed 0))))
+                ((symbol-function 'gp-pull-request-diff-async)
+                 (lambda (_fn _id _c _pr cb) (funcall cb nil))))
+        (gp--detail-load-stats-diff (current-buffer) pr 0))
+      (should-not gp--detail-stats))))
 
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here
