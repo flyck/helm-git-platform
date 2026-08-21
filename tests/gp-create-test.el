@@ -272,5 +272,24 @@ and `gp-create--selected-reviewer-uuids' only picks up checked ones."
          '(((uuid . "{real}") (display_name . "Real Person")))))
       (should (string-match-p "{ghost}" (or logged ""))))))
 
+(ert-deftest gp-create-test-draft-default-follows-defcustom ()
+  "The \"Create as draft\" box starts ticked iff `gp-create-draft' is non-nil.
+Guards the defcustom actually reaching the widget -- the box was once
+hardcoded to nil, which silently ignored the setting."
+  (let ((ctx '(:full-name "ws/repo" :source "feature" :dest "main"
+               :title "t" :description "d")))
+    (dolist (want '(t nil))
+      (let ((gp-create-draft want)
+            ;; the reviewers section would otherwise hit the network
+            (gp-create-preferred-reviewers nil))
+        (cl-letf (((symbol-function 'gp-repo-default-reviewers) (lambda (_) nil))
+                  ((symbol-function 'gp-repo-suggested-reviewers) (lambda (_) nil)))
+          (with-temp-buffer
+            (gp-create--build-form ctx)
+            (should (eq (and (widget-value gp-create--w-draft) t) want))
+            ;; the sibling toggle keeps its own default, unaffected
+            (should (eq (and (widget-value gp-create--w-close) t)
+                        (and gp-create-close-source-branch t)))))))))
+
 (provide 'gp-create-test)
 ;;; gp-create-test.el ends here

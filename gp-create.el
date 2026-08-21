@@ -8,8 +8,8 @@
 ;;   * a TITLE derived from the branch's commit messages (their common
 ;;     denominator -- a shared prefix, or the lone commit's summary);
 ;;   * a DESCRIPTION listing those commit summaries;
-;;   * toggles for "create as draft" and "delete source branch after
-;;     merge"; and
+;;   * toggles for "create as draft" (`gp-create-draft', on by default)
+;;     and "delete source branch after merge"; and
 ;;   * a checkbox per reviewer candidate: default reviewers (checked --
 ;;     the platform auto-adds these) and, where the backend has them,
 ;;     suggested reviewers (unchecked -- an opt-in).
@@ -91,6 +91,12 @@ shared prefix) if there is a meaningful one, else BRANCH humanised."
     (mapconcat (lambda (s) (concat "- " (string-trim s))) summaries "\n")))
 
 ;;;; Buffer template & parsing -----------------------------------------------
+
+(defcustom gp-create-draft t
+  "Default for the \"Create as draft\" toggle in the mask.
+Non-nil opens new pull requests as drafts unless you untick the box,
+which keeps a PR out of reviewers' queues until you mark it ready."
+  :type 'boolean :group 'gp-create)
 
 (defcustom gp-create-close-source-branch t
   "Default for the \"Delete source branch after merge\" toggle in the mask."
@@ -333,7 +339,7 @@ to offer for this repo."
     (widget-insert "\n")
 
     (widget-insert (propertize "Options" 'face 'gp-create-section) "\n")
-    (setq gp-create--w-draft (widget-create 'checkbox nil))
+    (setq gp-create--w-draft (widget-create 'checkbox gp-create-draft))
     (widget-insert " Create as draft\n")
     (setq gp-create--w-close
           (widget-create 'checkbox gp-create-close-source-branch))
