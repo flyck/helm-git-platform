@@ -1066,6 +1066,319 @@ reaches the server but the view keeps showing the old text."
           (should (equal refreshed-in detail-buf)))
       (when (get-buffer detail-buf) (kill-buffer detail-buf)))))
 
+(defun gp-test--buttons ()
+  "Return the buffer's button overlays, ordered by position.
+`overlays-in' returns them in an unspecified order -- and Emacs 28.2
+really does differ from 29+ here, which broke a test that assumed the
+order it happened to see locally."
+  (sort (seq-filter (lambda (o) (overlay-get o 'button))
+                    (overlays-in (point-min) (point-max)))
+        (lambda (a b) (< (overlay-start a) (overlay-start b)))))
+
+(defun gp-test--button-labels ()
+  "Return the buffer's button labels, ordered by position."
+  (mapcar (lambda (o) (buffer-substring-no-properties
+                       (overlay-start o) (overlay-end o)))
+          (gp-test--buttons)))
+
+;;;; General comments -----------------------------------------------------------
+
+(ert-deftest gp-test-comments-heading-offers-a-general-comment-button ()
+  "The Comments heading carries a real button to add a general comment.
+General comments post to the issues endpoint -- no path, no line -- so
+they are the one comment kind that cannot fail an out-of-diff check."
+  (let ((pr (car (gp-test--mock-prs)))
+        (called nil))
+    (cl-letf (((symbol-function 'gp-ui-add-general-comment)
+               (lambda (_pr) (setq called t)))
+              ((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr nil))
+        (let* ((buttons (gp-test--buttons))
+               (b (seq-find (lambda (o)
+                              (equal (buffer-substring-no-properties
+                                      (overlay-start o) (overlay-end o))
+                                     "✎ comment [C]"))
+                            buttons)))
+          (should b)
+          (should (eq (overlay-get b 'face) 'gp-link-face))
+          ;; the heading text keeps magit's face despite the button beside it
+          (goto-char (point-min))
+          (should (re-search-forward "Comments (0)" nil t))
+          (should (eq (get-text-property (match-beginning 0) 'face)
+                      'magit-section-heading))
+          (funcall (overlay-get b 'action) b)
+          (should called))))))
+
+(ert-deftest gp-test-general-comment-button-hidden-on-closed-pr ()
+  "A merged/closed PR takes no new comments, so no button is offered."
+  (let ((pr (append '((state . "MERGED")) (car (gp-test--mock-prs)))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr nil))
+        (should-not (string-match-p "comment \\[C\\]"
+                                    (substring-no-properties (buffer-string))))))))
+
+(ert-deftest gp-test-general-comment-target-has-no-inline ()
+  "The compose target must carry no :inline, or it would be posted as a
+review comment and hit the very restriction this action avoids."
+  (let ((pr (car (gp-test--mock-prs)))
+        captured)
+    (cl-letf (((symbol-function 'gp-compose) (lambda (target) (setq captured target) nil)))
+      (gp-ui-add-general-comment pr))
+    (should captured)
+    (should-not (plist-get captured :inline))
+    (should-not (plist-get captured :parent))
+    (should (equal (plist-get captured :what) "general comment"))))
+
+;;;; Reactions -----------------------------------------------------------------
+
+(ert-deftest gp-test-reaction-summary-groups-and-marks-mine ()
+  "Rows collapse to (CONTENT COUNT MINE-P), keeping first-seen order."
+  (let ((rows '(((content . "+1")   (user (uuid . "bea")))
+                ((content . "heart")(user (uuid . "ada")))
+                ((content . "+1")   (user (uuid . "ada")))
+                ((content . "+1")   (user (uuid . "cy"))))))
+    (should (equal (gp--reaction-summary rows "ada")
+                   '(("+1" 3 t ("bea" "ada" "cy")) ("heart" 1 t ("ada")))))
+    ;; a user with none of their own gets the same counts, all unmarked
+    (should (equal (gp--reaction-summary rows "zed")
+                   '(("+1" 3 nil ("bea" "ada" "cy")) ("heart" 1 nil ("ada")))))))
+
+(ert-deftest gp-test-reaction-tooltip-names-the-reactors ()
+  "Hovering a reaction says who reacted, and what a click will do."
+  (let ((tip (gp--reaction-tooltip "+1" 2 '("Ada Lovelace" "Bea") t)))
+    (should (string-match-p "2 \\+1" tip))
+    (should (string-match-p "Ada Lovelace, Bea" tip))
+    (should (string-match-p "remove yours" tip)))
+  ;; not mine yet -> the click adds
+  (should (string-match-p "add yours" (gp--reaction-tooltip "heart" 1 '("Cy") nil))))
+
+(ert-deftest gp-test-reaction-tooltip-abbreviates-a-long-list ()
+  "A widely-liked comment must not produce an unreadable echo line."
+  (let* ((names '("a" "b" "c" "d" "e" "f" "g"))
+         (gp-reaction-names-max 3)
+         (tip (gp--reaction-tooltip "+1" 7 names nil)))
+    (should (string-match-p "a, b, c" tip))
+    (should (string-match-p "\\+4 more" tip))
+    (should-not (string-match-p "\\bd\\b" tip))))
+
+(ert-deftest gp-test-reaction-summary-falls-back-when-no-display-name ()
+  "A reactor with only an id still gets named rather than dropped."
+  (should (equal (gp--reaction-summary
+                  '(((content . "+1") (user (uuid . "bea"))))
+                  "ada")
+                 '(("+1" 1 nil ("bea"))))))
+
+(ert-deftest gp-test-reaction-summary-empty-is-nil ()
+  "No reactions summarises to nil, so the renderer inserts nothing."
+  (should (null (gp--reaction-summary nil "ada"))))
+
+(ert-deftest gp-test-reaction-emoji-falls-back-to-the-token ()
+  "An unmapped token still renders readably rather than blank.
+Guards against a platform adding a ninth reaction: better to show
+\"sparkles\" than an empty button."
+  (should (equal (gp-reaction-emoji "+1") "👍"))
+  (should (equal (gp-reaction-emoji "rocket") "🚀"))
+  (should (equal (gp-reaction-emoji "sparkles") "sparkles")))
+
+(ert-deftest gp-test-reactions-unsupported-on-bitbucket ()
+  "Bitbucket Cloud's API has no reactions, so the platform reports none.
+Its web UI does have a binary Like, but no public v2.0 route exposes it
+\(BCLOUD-21346 is still only a feature request), so the UI must hide
+the affordance rather than offer an action that can only fail."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should-not (gp-reactions-supported-p))
+    (should-not (gp-reaction-choices))
+    (should-not (gp-comment-reactions "ws/repo" '((id . 1))))
+    ;; and attempting one is a clear user-error, not a confusing API failure
+    (should-error (gp-set-comment-reaction "ws/repo" '((id . 1)) "+1" t)
+                  :type 'user-error)))
+
+(ert-deftest gp-test-reactions-supported-on-github ()
+  "GitHub reports its eight reaction tokens."
+  (let ((git-platform-current-backend (git-platform-github)))
+    (should (gp-reactions-supported-p))
+    (should (equal (gp-reaction-choices)
+                   '("+1" "-1" "laugh" "confused" "heart" "hooray" "rocket" "eyes")))))
+
+(ert-deftest gp-test-no-reaction-buttons-rendered-on-bitbucket ()
+  "A platform without reactions renders no reaction affordance at all."
+  (let* ((git-platform-current-backend (git-platform-bitbucket))
+         (pr (car (gp-test--mock-prs)))
+         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should-not (string-match-p "react \\[!\\]" text))
+          (should-not (string-match-p "👍" text)))))))
+
+(ert-deftest gp-test-reaction-buttons-rendered-when-supported ()
+  "Existing reactions render as buttons, counts in brackets.
+The counts come from the comment's own `reaction-counts' -- see
+`gp-test-reaction-render-never-fetches'."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--insert-reactions
+             '((id . 42) (destination (repository (full_name . "acme/web"))))
+             '((id . 7) (reaction-counts . (("+1" . 2) ("rocket" . 1))))))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "👍 (2)" text))
+            (should (string-match-p "🚀 (1)" text)))
+          ;; real buttons, one per distinct reaction, in the given order.
+          ;; Counted via overlays: `insert-button' stores its properties
+          ;; there, and walking `next-button' past the last one signals.
+          (should (equal (gp-test--button-labels) '("👍 (2)" "🚀 (1)"))))))))
+
+(ert-deftest gp-test-reaction-pill-is-just-emoji-and-count ()
+  "The pill carries no ownership glyph.
+A tick there reads as \"resolved\"/\"done\" rather than \"me\"; the quick
+action's [+]/[-] label and the tooltip carry that instead."
+  (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
+            ((symbol-function 'gp-user-uuid) (lambda () "ada")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--insert-reactions
+         '((id . 42))
+         '((id . 7) (reaction-counts . (("+1" . 2) ("rocket" . 1)))
+                    (reaction-mine . ("+1")))))
+      (let ((txt (substring-no-properties (buffer-string))))
+        (should (string-match-p "👍 (2)" txt))
+        (should (string-match-p "🚀 (1)" txt))
+        ;; yours is not decorated -- same shape either way
+        (should-not (string-match-p "✓" txt))))))
+
+(ert-deftest gp-test-like-button-label-always-names-the-plus-key ()
+  "The quick action stays [+] in both directions.
+The bracket names the KEY, and `+' is what toggles either way -- `-' is
+`negative-argument' globally, so labelling it [-] promised a key that
+does nothing.  Which way the toggle will go is in the help text."
+  (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
+            ((symbol-function 'gp-user-uuid) (lambda () "ada"))
+            ((symbol-function 'gp-comment-resolvable-p) (lambda (_) nil))
+            ((symbol-function 'gp-comment-own-p) (lambda (&rest _) nil))
+            ((symbol-function 'gp-comment-deletable-p) (lambda (&rest _) nil)))
+    (dolist (mine '(("+1") nil))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--insert-comment
+           `((id . 7) (content (raw . "hi")) (user (uuid . "bea"))
+             (reaction-counts . (("+1" . 1))) (reaction-mine . ,mine))
+           '((id . 42)) 0 nil))
+        (let ((txt (substring-no-properties (buffer-string))))
+          (should (string-match-p "👍 \\[\\+\\]" txt))
+          (should-not (string-match-p "👍 \\[-\\]" txt)))
+        ;; but the help text still says which way a press will go
+        (let* ((b (seq-find (lambda (o)
+                              (equal (buffer-substring-no-properties
+                                      (overlay-start o) (overlay-end o))
+                                     "👍 [+]"))
+                            (gp-test--buttons)))
+               (help (and b (overlay-get b 'help-echo))))
+          (should (string-match-p (if mine "Remove" "Add") help)))))))
+
+(ert-deftest gp-test-action-row-indent-matches-with-and-without-reactions ()
+  "The action row sits at the same indent either way.
+The reactions line used to have its indent inserted by the caller, which
+left that whitespace on the action row when a comment had no reactions --
+so removing your last reaction visibly shifted the row."
+  (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
+            ((symbol-function 'gp-user-uuid) (lambda () "ada"))
+            ((symbol-function 'gp-comment-resolvable-p) (lambda (_) nil))
+            ((symbol-function 'gp-comment-own-p) (lambda (&rest _) nil))
+            ((symbol-function 'gp-comment-deletable-p) (lambda (&rest _) nil)))
+    (cl-labels
+        ((action-indent (comment)
+           (with-temp-buffer
+             (gp-detail-mode)
+             (let ((inhibit-read-only t))
+               (gp--insert-comment comment '((id . 42)) 0 nil))
+             (let ((line (seq-find (lambda (l) (string-match-p "reply \\[R\\]" l))
+                                   (split-string (substring-no-properties
+                                                  (buffer-string))
+                                                 "\n"))))
+               (should line)
+               (- (length line) (length (string-trim-left line)))))))
+      (let ((with (action-indent '((id . 7) (content (raw . "hi"))
+                                   (user (uuid . "bea"))
+                                   (reaction-counts . (("+1" . 1))))))
+            (without (action-indent '((id . 7) (content (raw . "hi"))
+                                      (user (uuid . "bea"))))))
+        (should (= with without))))))
+
+(ert-deftest gp-test-reaction-render-never-fetches ()
+  "Drawing reactions must not hit the network.
+It did once: the renderer called `gp-comment-reactions' per comment, and
+a fetch mid-redisplay re-entered the renderer and drew each comment
+several times over (a single comment showed four action rows).  Counts
+ride along on the comment instead."
+  (let ((fetches 0))
+    (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
+              ((symbol-function 'gp-user-uuid) (lambda () "ada"))
+              ((symbol-function 'gp-comment-reactions)
+               (lambda (&rest _) (cl-incf fetches) nil)))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--insert-reactions
+           '((id . 42))
+           '((id . 7) (reaction-counts . (("+1" . 3))))))
+        (should (string-match-p "👍 (3)" (substring-no-properties (buffer-string))))))
+    (should (= fetches 0))))
+
+(ert-deftest gp-test-reaction-help-echo-is-lazy-and-names-reactors ()
+  "The tooltip fetches only when shown, and then names who reacted.
+Also decides `mine' from those rows: the comment payload carries counts
+but not reactors, so a button cannot know whose reaction it is."
+  (let ((fetches 0))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada"))
+              ((symbol-function 'gp-pr-full-name) (lambda (_) "acme/web"))
+              ((symbol-function 'gp-comment-reactions)
+               (lambda (&rest _)
+                 (cl-incf fetches)
+                 '(((content . "+1") (user (uuid . "ada") (display_name . "Ada")))
+                   ((content . "+1") (user (uuid . "bea") (display_name . "Bea")))))))
+      (let ((fn (gp--reaction-help-echo '((id . 42)) '((id . 7)) "+1" 2 nil)))
+        ;; building it fetches nothing
+        (should (= fetches 0))
+        (let ((tip (funcall fn)))
+          (should (= fetches 1))
+          (should (string-match-p "Ada, Bea" tip))
+          ;; "ada" is the current user, so it knows the click removes
+          (should (string-match-p "remove yours" tip)))))))
+
+(ert-deftest gp-test-toggle-reaction-adds-then-removes ()
+  "The same entry point adds when absent and removes when present,
+which is what makes a rendered reaction a toggle."
+  (let* ((pr '((id . 42) (destination (repository (full_name . "acme/web")))))
+         (comment '((id . 7)))
+         (held nil)
+         (calls nil))
+    (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
+              ((symbol-function 'gp-user-uuid) (lambda () "ada"))
+              ((symbol-function 'gp-comment-reactions)
+               (lambda (_fn _c) (when held '(((content . "+1") (user (uuid . "ada")))))))
+              ((symbol-function 'gp-set-comment-reaction)
+               (lambda (_fn _c content on) (push (cons content on) calls) (setq held on) t))
+              ((symbol-function 'gp-invalidate-pr-caches) #'ignore)
+              ((symbol-function 'gp-detail-refresh) #'ignore))
+      (gp-ui-toggle-reaction pr comment "+1")      ;; none held -> add
+      (gp-ui-toggle-reaction pr comment "+1"))     ;; now held -> remove
+    (should (equal (reverse calls) '(("+1" . t) ("+1" . nil))))))
+
 (ert-deftest gp-test-label-face-uses-the-platform-color ()
   "Each distinct colour gets its own face, interned once and reused.
 Text colour flips with background luminance so a dark label stays

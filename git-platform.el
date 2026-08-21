@@ -331,6 +331,47 @@ rather than let it fail on click.")
 (gp-defop comment-own-p (comment uuid)
   "Return non-nil if COMMENT was written by UUID.")
 
+(gp-defop inline-target-problem (full-name id path line)
+  "Return a human explanation if PATH:LINE cannot take an inline comment.
+Nil means go ahead.  Platforms differ sharply here: GitHub accepts an
+inline comment only on a line inside the PR's diff and otherwise
+answers a bare 422 once the comment is already written, whereas
+Bitbucket takes a comment on any line of any file.  Checking up front
+lets the caller refuse with something actionable and keep the user's
+text.")
+
+(gp-defop reactions-supported-p ()
+  "Return non-nil if this platform has reactions on comments at all.
+Like `labels-supported-p', this is about the platform's concept, not
+whether a given comment happens to carry any -- the UI hides every
+reaction affordance when nil rather than offering an action that can
+only fail.
+
+Nil for Bitbucket Cloud: its web UI has a single binary Like, but the
+public v2.0 REST API exposes no route for it (the spec mentions no
+reaction, and `/comments/{id}/likes' 404s while `/resolve' 405s), and
+emoji reactions are still only a feature request (BCLOUD-21346).  True
+for GitHub.")
+
+(gp-defop reaction-choices ()
+  "Return the reaction contents this platform accepts, most-liked first.
+A list of strings.  GitHub returns its eight (\"+1\", \"heart\", …); a
+platform with a single binary Like would return just one element, which
+is why the read/write ops below speak in these opaque tokens rather than
+assuming a fixed emoji set.")
+
+(gp-defop comment-reactions (full-name comment)
+  "Return COMMENT's reactions in FULL-NAME as a list of alists.
+Each entry carries at least `content' and a `user' whose id matches
+`gp-user-uuid', so callers can both count reactions and tell which are
+their own.  Platforms without reactions return nil.")
+
+(gp-defop set-comment-reaction (full-name comment content on)
+  "Add (ON non-nil) or remove COMMENT's CONTENT reaction in FULL-NAME.
+CONTENT is one of `gp-reaction-choices'.  Adding one the user already
+has is a no-op rather than an error, so callers can toggle blindly.
+Returns non-nil when the reaction set changed.")
+
 (gp-defop labels-supported-p ()
   "Return non-nil if this platform has PR labels at all.
 Distinct from a PR merely having none: the UI hides every label

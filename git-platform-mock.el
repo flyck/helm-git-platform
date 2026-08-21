@@ -124,6 +124,14 @@ CREATE TABLE IF NOT EXISTS comments (
   created_on  TEXT, updated_on TEXT
 )")
   (sqlite-execute db "
+CREATE TABLE IF NOT EXISTS reactions (
+  comment_id INTEGER NOT NULL,
+  user_uuid  TEXT NOT NULL,
+  user_name  TEXT,
+  content    TEXT NOT NULL,
+  PRIMARY KEY (comment_id, user_uuid, content)
+)")
+  (sqlite-execute db "
 CREATE TABLE IF NOT EXISTS participants (
   pr_id     INTEGER NOT NULL,
   user_uuid TEXT NOT NULL,
@@ -445,6 +453,40 @@ discard an approval."
                   (list git-platform-mock-user-name comment-id))
   (gp-mock--touch-pr id)
   `((user (display_name . ,git-platform-mock-user-name))))
+
+;; Reactions: the mock mirrors GitHub's model (many per user, one row
+;; each) so the UI can be demoed without a network.
+(cl-defmethod gp--inline-target-problem ((_ git-platform-mock) _fn _id _path _line) nil)
+(cl-defmethod gp--reactions-supported-p ((_ git-platform-mock)) t)
+(cl-defmethod gp--reaction-choices ((_ git-platform-mock))
+  '("+1" "-1" "laugh" "confused" "heart" "hooray" "rocket" "eyes"))
+
+(cl-defmethod gp--comment-reactions ((_ git-platform-mock) full-name comment)
+  (ignore full-name)
+  (mapcar (lambda (row)
+            (pcase-let ((`(,content ,uuid ,name) row))
+              `((content . ,content)
+                (user (uuid . ,uuid) (display_name . ,name)))))
+          (sqlite-select (gp-mock--db)
+                         "SELECT content, user_uuid, user_name FROM reactions
+                           WHERE comment_id = ? ORDER BY rowid"
+                         (list (alist-get 'id comment)))))
+
+(cl-defmethod gp--set-comment-reaction ((_ git-platform-mock) full-name comment content on)
+  (ignore full-name)
+  (let ((cid (alist-get 'id comment)))
+    (if on
+        ;; INSERT OR IGNORE keeps the add idempotent, like GitHub's 200
+        (sqlite-execute (gp-mock--db)
+                        "INSERT OR IGNORE INTO reactions
+                           (comment_id, user_uuid, user_name, content)
+                         VALUES (?, ?, ?, ?)"
+                        (list cid gp-mock--me git-platform-mock-user-name content))
+      (sqlite-execute (gp-mock--db)
+                      "DELETE FROM reactions
+                        WHERE comment_id = ? AND user_uuid = ? AND content = ?"
+                      (list cid gp-mock--me content))))
+  t)
 
 (cl-defmethod gp--reopen-comment ((_ git-platform-mock) full-name id comment-id)
   (ignore full-name)

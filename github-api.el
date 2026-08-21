@@ -190,6 +190,25 @@ BODY is the UTF-8 decoded response body."
       (when (string-match "<\\([^>]+\\)>; *rel=\"next\"" line)
         (match-string 1 line)))))
 
+(defconst github--log-redact-keys '(token access_token password secret key)
+  "Request-body keys whose values are replaced before logging.")
+
+(defun github--redact-for-log (data)
+  "Render DATA for the log, replacing any credential-shaped value.
+A request body is normally innocuous (a comment body, a path, a line),
+but it is not worth risking a token reaching a buffer the user pastes
+into an issue report."
+  (let ((printed
+         (cond
+          ((and (consp data) (consp (car data)))
+           (mapcar (lambda (cell)
+                     (if (memq (car-safe cell) github--log-redact-keys)
+                         (cons (car cell) "<redacted>")
+                       cell))
+                   data))
+          (t data))))
+    (format "%S" printed)))
+
 (defun github-api-request (method path &optional params data extra-headers)
   "Perform a synchronous GitHub API request and return parsed JSON.
 
@@ -228,6 +247,11 @@ mock) to run the whole client offline."
                   "%s %s -> %d (%.0fms)" method path
                   status (* 1000 (- (float-time) start))))
         (when (or (< status 200) (>= status 300))
+          ;; The request payload is the diagnostic on a write failure -- a 422
+          ;; names the field it rejected, which only means something next to
+          ;; the value that was sent.
+          (when data
+            (gp-log-error "  sent: %s" (github--redact-for-log data)))
           (gp-log-error "  body: %s" (string-trim body))
           (error "GitHub API %s %s -> HTTP %d: %s"
                  method url status
@@ -871,6 +895,79 @@ off.  Requires Issues: write.  Returns non-nil on success."
                       nil `((labels . ,(vconcat labels))))
   t)
 
+;;;; Reactions ----------------------------------------------------------------
+
+(defconst github-reaction-contents
+  '("+1" "-1" "laugh" "confused" "heart" "hooray" "rocket" "eyes")
+  "The reaction `content' values GitHub accepts, in its own display order.
+Anything else is rejected by the API with 422.")
+
+(defun github--reaction-base (full-name comment)
+  "Return the reactions endpoint path for COMMENT in FULL-NAME.
+An inline review comment and a general (issue) comment live under
+different collections -- `pulls/comments/{id}' vs
+`issues/comments/{id}' -- and the ids come from separate sequences, so
+the wrong base would 404 or, worse, hit an unrelated comment.  COMMENT
+is a reshaped comment alist; the `inline' key is what distinguishes
+the two (see `github--reshape-review-comment')."
+  (format "/repos/%s/%s/comments/%s/reactions"
+          full-name
+          (if (alist-get 'inline comment) "pulls" "issues")
+          (alist-get 'id comment)))
+
+(defun github--reshape-reaction (r)
+  "Reshape a REST reaction R into the shared shape.
+GitHub identifies the reactor by `login', but every other comment
+accessor in this package exposes the identity as `uuid' (see
+`github--reshape-issue-comment'), and `gp-user-uuid' returns a login on
+this backend.  Without this mapping a caller asking \"is this reaction
+mine?\" reads a nil `uuid' and always decides no -- which silently turns
+a toggle into add-only."
+  `((id . ,(alist-get 'id r))
+    (content . ,(alist-get 'content r))
+    (user (login . ,(let-alist r .user.login))
+          (uuid . ,(let-alist r .user.login))
+          (display_name . ,(let-alist r .user.login)))))
+
+(defun github-comment-reactions (full-name comment)
+  "Return the reactions on COMMENT in FULL-NAME as a list of alists.
+Each entry has `id', `content' and a `user' whose `uuid' matches what
+`gp-user-uuid' reports, so callers can both count reactions and tell
+which are their own.  The reaction's own id is needed to remove it
+again, which is why this returns the full list rather than just counts."
+  (mapcar #'github--reshape-reaction
+          (github-api-paged (github--reaction-base full-name comment))))
+
+(defun github-add-comment-reaction (full-name comment content)
+  "React to COMMENT in FULL-NAME with CONTENT (see `github-reaction-contents').
+Returns the created reaction.  POSTing a reaction the user already has
+is idempotent -- GitHub answers 200 with the existing one instead of
+creating a duplicate -- so callers need not check first.  Requires
+Pull requests: write (review comments) or Issues: write (general ones)."
+  (unless (member content github-reaction-contents)
+    (error "Not a GitHub reaction: %s" content))
+  (github-api-request "POST" (github--reaction-base full-name comment)
+                      nil `((content . ,content))))
+
+(defun github-remove-comment-reaction (full-name comment content &optional login)
+  "Remove LOGIN's CONTENT reaction from COMMENT in FULL-NAME.
+LOGIN defaults to the authenticated user.  Deleting needs the
+reaction's own id, not the content, so this looks the reaction up
+first; returns non-nil when one was found and deleted, nil when there
+was nothing to remove."
+  (let* ((login (or login (github-user-login)))
+         (mine (seq-find (lambda (r)
+                           (and (equal (alist-get 'content r) content)
+                                ;; reshaped rows carry both; match either
+                                (member login (list (let-alist r .user.login)
+                                                    (let-alist r .user.uuid)))))
+                         (github-comment-reactions full-name comment))))
+    (when mine
+      (github-api-request
+       "DELETE" (format "%s/%s" (github--reaction-base full-name comment)
+                        (alist-get 'id mine)))
+      t)))
+
 ;;;; Comments -----------------------------------------------------------------
 
 (defun github--issue-comments (full-name number)
@@ -907,6 +1004,61 @@ without one; resolution just won't be reflected."
             (dolist (c (let-alist thread .comments.nodes))
               (puthash (alist-get 'databaseId c) t github--resolved-thread-comment-ids))))))))
 
+(defvar github--viewer-reactions (make-hash-table :test 'eql)
+  "Comment id -> list of reaction contents the viewer has reacted with.
+Populated by `github--refresh-viewer-reactions'.  REST ships per-emoji
+counts with each comment but never says whether *you* are among the
+reactors, so the renderer would otherwise have to fetch per comment --
+which is exactly the mid-render network call that made the detail view
+draw each comment several times over.")
+
+(defun github--refresh-viewer-reactions (full-name number)
+  "Cache which reactions the viewer holds on PR NUMBER's comments.
+One GraphQL query covers every comment of both kinds, using
+`viewerHasReacted' -- the flag REST does not expose.  Errors are
+swallowed (GraphQL needs a token) so reaction counts still render
+without one; only the \"is it mine\" hint is lost."
+  (ignore-errors
+    (let* ((owner (car (split-string full-name "/")))
+           (repo (cadr (split-string full-name "/")))
+           (data (github-graphql-request
+                  "query($owner:String!,$repo:String!,$number:Int!){
+                     repository(owner:$owner,name:$repo){
+                       pullRequest(number:$number){
+                         comments(first:100){nodes{
+                           databaseId
+                           reactionGroups{content viewerHasReacted}}}
+                         reviewThreads(first:100){nodes{
+                           comments(first:100){nodes{
+                             databaseId
+                             reactionGroups{content viewerHasReacted}}}}}}}}"
+                  `((owner . ,owner) (repo . ,repo) (number . ,number)))))
+      (let-alist data
+        (cl-labels
+            ((record (c)
+               (let ((id (alist-get 'databaseId c))
+                     (mine '()))
+                 (dolist (g (alist-get 'reactionGroups c))
+                   (when (eq (alist-get 'viewerHasReacted g) t)
+                     (push (github--reaction-token (alist-get 'content g)) mine)))
+                 (when id (puthash id (nreverse mine) github--viewer-reactions)))))
+          (dolist (c .repository.pullRequest.comments.nodes) (record c))
+          (dolist (thread .repository.pullRequest.reviewThreads.nodes)
+            (dolist (c (let-alist thread .comments.nodes)) (record c))))))))
+
+(defconst github--graphql-reaction-tokens
+  '(("THUMBS_UP" . "+1") ("THUMBS_DOWN" . "-1") ("LAUGH" . "laugh")
+    ("CONFUSED" . "confused") ("HEART" . "heart") ("HOORAY" . "hooray")
+    ("ROCKET" . "rocket") ("EYES" . "eyes"))
+  "GraphQL `ReactionContent' enum -> the REST content token.
+GraphQL spells the thumbs `THUMBS_UP'/`THUMBS_DOWN' while REST uses
+`+1'/`-1'; everything downstream speaks REST tokens.")
+
+(defun github--reaction-token (graphql-content)
+  "Return the REST token for GRAPHQL-CONTENT (a `ReactionContent' value)."
+  (or (cdr (assoc graphql-content github--graphql-reaction-tokens))
+      (downcase (or graphql-content ""))))
+
 (defun github-pull-request-comments (full-name number &optional max-items)
   "Return the merged (issue + review) comments for PR NUMBER in FULL-NAME.
 Each is reshaped into a Bitbucket-like alist so the shared
@@ -916,6 +1068,7 @@ login), `resolution' (present when GraphQL reports the comment's
 review thread resolved -- see `github--refresh-resolved-threads'),
 and, for inline comments, `inline.path'/`inline.to'."
   (github--refresh-resolved-threads full-name number)
+  (github--refresh-viewer-reactions full-name number)
   (let* ((issue (mapcar #'github--reshape-issue-comment (github--issue-comments full-name number)))
          (review (mapcar #'github--reshape-review-comment (github--review-comments full-name number)))
          (all (append issue review)))
@@ -939,9 +1092,26 @@ in gp-ui.el, and `gp--detail-load-pipelines', which hit this exact bug)."
         (gp-log-error "github comments fetch: %s" (error-message-string e))
         (funcall callback nil nil))))))
 
+(defun github--reaction-counts (c)
+  "Extract ((CONTENT . COUNT) …) from comment C's inline `reactions' object.
+GitHub already ships per-emoji counts with every comment, so the common
+case -- drawing the summary -- needs no extra request.  Only the reactor
+NAMES require the reactions endpoint, which is why that fetch is lazy."
+  (when-let* ((r (alist-get 'reactions c)))
+    ;; The thumbs keys need escaping as symbols (`\+1' / `\-1'); their
+    ;; `symbol-name' is the plain "+1" / "-1" the rest of the code uses.
+    (delq nil
+          (mapcar (lambda (k)
+                    (let ((n (alist-get k r)))
+                      (when (and (numberp n) (> n 0))
+                        (cons (symbol-name k) n))))
+                  '(\+1 \-1 laugh confused heart hooray rocket eyes)))))
+
 (defun github--reshape-issue-comment (c)
   "Reshape a REST issue comment C into the shared comment alist shape."
-  `((id . ,(alist-get 'id c))
+  `((reaction-counts . ,(github--reaction-counts c))
+    (reaction-mine . ,(gethash (alist-get 'id c) github--viewer-reactions))
+    (id . ,(alist-get 'id c))
     (content (raw . ,(alist-get 'body c)))
     (user (display_name . ,(let-alist c .user.login))
           (uuid . ,(let-alist c .user.login))
@@ -953,7 +1123,9 @@ in gp-ui.el, and `gp--detail-load-pipelines', which hit this exact bug)."
 
 (defun github--reshape-review-comment (c)
   "Reshape a REST review (inline) comment C into the shared alist shape."
-  `((id . ,(alist-get 'id c))
+  `((reaction-counts . ,(github--reaction-counts c))
+    (reaction-mine . ,(gethash (alist-get 'id c) github--viewer-reactions))
+    (id . ,(alist-get 'id c))
     (content (raw . ,(alist-get 'body c)))
     (user (display_name . ,(let-alist c .user.login))
           (uuid . ,(let-alist c .user.login))
@@ -984,6 +1156,58 @@ them at all."
 (defun github-comment-own-p (comment login)
   "Return non-nil if COMMENT was written by LOGIN."
   (equal (let-alist comment .user.uuid) login))
+
+(defun github--diff-commentable-lines (diff)
+  "Return ((PATH . ((START . END) …)) …): the new-side hunk ranges in DIFF.
+GitHub only accepts an inline review comment on a line that appears in
+the pull request's diff, so these ranges are exactly where a comment
+can land.  Only the new side (`+++ b/…' and the `+N,M' half of each
+`@@' header) is considered, matching the `side' the package posts on."
+  (let (out path)
+    (dolist (line (split-string (or diff "") "\n"))
+      (cond
+       ((string-prefix-p "+++ b/" line)
+        (setq path (substring line 6))
+        ;; /dev/null on a deletion -- nothing commentable there
+        (when (equal path "/dev/null") (setq path nil)))
+       ((and path (string-prefix-p "@@" line))
+        (when (string-match "\\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)?" line)
+          (let* ((start (string-to-number (match-string 1 line)))
+                 (count (if (match-string 2 line)
+                            (string-to-number (match-string 2 line))
+                          1))
+                 (cell (assoc path out)))
+            ;; a zero-length range means the hunk only removes lines
+            (when (> count 0)
+              (if cell
+                  (setcdr cell (cons (cons start (+ start count -1)) (cdr cell)))
+                (push (cons path (list (cons start (+ start count -1)))) out))))))))
+    (mapcar (lambda (cell) (cons (car cell) (nreverse (cdr cell)))) (nreverse out))))
+
+(defun github-inline-target-problem (full-name number path line)
+  "Return a human explanation if PATH:LINE cannot take an inline comment.
+Nil means the target is fine.  GitHub answers a bad target with a bare
+422 (`pull_request_review_thread.path/line could not be resolved')
+*after* the comment has been written, so checking first turns that into
+a message that says which lines are actually available.  Bitbucket has
+no such restriction, which is why this lives in the GitHub layer."
+  (let* ((ranges (github--diff-commentable-lines
+                  (github-pull-request-diff full-name number)))
+         (for-file (cdr (assoc path ranges))))
+    (cond
+     ((null ranges) nil)               ;; couldn't read the diff -- let the API judge
+     ((null for-file)
+      (format "%s is not among the files changed by PR #%s (changed: %s)"
+              path number
+              (if ranges (mapconcat #'car ranges ", ") "none")))
+     ((not (seq-some (lambda (r) (and (>= line (car r)) (<= line (cdr r)))) for-file))
+      (format "line %d of %s is not in PR #%s's diff (commentable lines: %s)"
+              line path number
+              (mapconcat (lambda (r)
+                           (if (= (car r) (cdr r))
+                               (number-to-string (car r))
+                             (format "%d-%d" (car r) (cdr r))))
+                         for-file ", "))))))
 
 (defun github-create-comment (full-name number text &optional inline parent-id)
   "Create a comment on PR NUMBER in FULL-NAME with raw TEXT.

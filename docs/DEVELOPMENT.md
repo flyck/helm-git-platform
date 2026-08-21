@@ -182,6 +182,9 @@ lowercase keypress while reading can't mutate anything:
 | `K` | Delete the comment at point (see below) |
 | `V` | Add / remove reviewers on this PR |
 | `E` | Edit this PR's description (opens a compose buffer; empty clears it) |
+| `C` | Add a general (non-inline) comment on the PR |
+| `+` | Toggle your 👍 on the comment at point (GitHub; hidden on Bitbucket) |
+| `!` | Pick any reaction for the comment at point (GitHub) |
 
 `K` offers itself on your own comments always. Deleting *other* people's
 comments needs elevated repository permissions that the APIs don't advertise,

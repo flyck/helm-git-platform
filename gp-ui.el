@@ -449,10 +449,30 @@ thread."
                        (gp--render-markdown (or .content.raw "")))))
             (insert (funcall pad (replace-regexp-in-string "^" "  " body)) "\n"))
           (when pr
+            ;; the reactions line indents itself: emitting the indent here
+            ;; left stray whitespace on the action row when a comment had no
+            ;; reactions to draw
+            (gp--insert-reactions pr comment (concat ind "  "))
             (insert ind "  ")
             (gp--insert-action-button
              "reply [R]" "Reply to this comment"
              (lambda () (gp-ui-reply-comment pr comment)))
+            (when (gp-reactions-supported-p)
+              (insert " ")
+              (let ((liked (and (member "+1" (alist-get 'reaction-mine comment)) t)))
+                (gp--insert-action-button
+                 ;; The label names the KEY, which is `+' in both directions
+                 ;; (`-' is `negative-argument' globally, so binding it here
+                 ;; would fight Emacs).  `+' toggles; the help text is what
+                 ;; says which way it will go.
+                 "👍 [+]"
+                 (if liked "Remove your 👍 from this comment"
+                   "Add your 👍 to this comment")
+                 (lambda () (gp-ui-toggle-reaction pr comment "+1"))))
+              (insert " ")
+              (gp--insert-action-button
+               "react [!]" "Pick a reaction for this comment"
+               (lambda () (gp-ui-react-to-comment pr comment))))
             (insert " ")
             (gp--insert-action-button
              (if marked "unmark [m]" "mark [m]")
@@ -494,6 +514,149 @@ thread."
           (insert "\n"))
           (when marked
             (add-face-text-property start (point) 'gp-comment-marked-face t)))))))
+
+(defconst gp-reaction-emoji-alist
+  '(("+1" . "👍") ("-1" . "👎") ("laugh" . "😄") ("confused" . "😕")
+    ("heart" . "❤️") ("hooray" . "🎉") ("rocket" . "🚀") ("eyes" . "👀"))
+  "Display emoji for each platform reaction token.
+The tokens are the platform's own (GitHub sends \"+1\", not
+\"thumbs_up\"); anything unmapped falls back to showing the token, so a
+platform adding a ninth reaction degrades to readable text rather than
+breaking.")
+
+(defun gp-reaction-emoji (content)
+  "Return the display emoji for reaction CONTENT, or CONTENT itself."
+  (or (cdr (assoc content gp-reaction-emoji-alist)) content))
+
+;; help-at-pt.el is loaded on demand in `gp-detail-mode'; declare its vars so
+;; a cold byte-compile doesn't treat them as free.
+(defvar help-at-pt-display-when-idle)
+(defvar help-at-pt-timer-delay)
+
+(defcustom gp-detail-help-at-point t
+  "When non-nil, echo a button's `help-echo' when point lands on it.
+Reaction buttons name their reactors this way, so the information is
+reachable without a mouse.  This arms Emacs' global `help-at-pt' timer
+\(`help-at-pt-display-when-idle'), which affects every buffer, not only
+this package's -- set nil to leave that global alone."
+  :type 'boolean :group 'bitbucket)
+
+(defcustom gp-reaction-names-max 5
+  "How many reactor names to name in a reaction's tooltip.
+Beyond this the rest are summarised as \"+N more\", so a widely-liked
+comment does not produce an echo-area line too long to read."
+  :type 'integer :group 'bitbucket)
+
+(defun gp--reaction-summary (reactions uuid)
+  "Summarise REACTIONS as ((CONTENT COUNT MINE-P NAMES) …), platform order kept.
+UUID identifies the current user so its own reactions can be marked, and
+NAMES lists who reacted (in arrival order) for the tooltip.  Grouping
+happens here rather than in each backend: the APIs return one row per
+(user, reaction), which is what makes the count, the \"did I react\" test
+and the name list all possible from a single fetch."
+  (let (out)
+    (dolist (r reactions)
+      (let* ((content (alist-get 'content r))
+             (mine (equal (let-alist r .user.uuid) uuid))
+             (who (or (let-alist r .user.display_name)
+                      (let-alist r .user.uuid)
+                      "someone"))
+             (cell (assoc content out)))
+        (if cell
+            (setcdr cell (list (1+ (nth 1 cell))
+                               (or (nth 2 cell) mine)
+                               (append (nth 3 cell) (list who))))
+          (push (list content 1 mine (list who)) out))))
+    (nreverse out)))
+
+(defun gp--reaction-tooltip (content count names mine)
+  "Describe a reaction for the echo area: who reacted, and what a click does.
+NAMES is abbreviated at `gp-reaction-names-max' so a popular comment
+does not produce an unreadable line."
+  (let* ((shown (seq-take names gp-reaction-names-max))
+         (extra (- (length names) (length shown))))
+    (format "%s %s by %s%s -- click to %s yours"
+            count content
+            (mapconcat #'identity shown ", ")
+            (if (> extra 0) (format " +%d more" extra) "")
+            (if mine "remove" "add"))))
+
+(defun gp--reaction-names (pr comment content)
+  "Return the display names of whoever reacted CONTENT to COMMENT of PR.
+Fetched on demand -- when the tooltip is actually shown -- because the
+counts come free with the comment while the names cost a request per
+comment.  Doing that eagerly during a render meant a network call per
+comment mid-redisplay, which re-entered the renderer and drew the
+comment several times over."
+  (let ((uuid (gp-user-uuid)))
+    (mapcar (lambda (cell) (car (nth 3 cell)))
+            (seq-filter (lambda (cell) (equal (car cell) content))
+                        (gp--reaction-summary
+                         (seq-filter
+                          (lambda (r) (equal (alist-get 'content r) content))
+                          (ignore-errors
+                            (gp-comment-reactions (gp-pr-full-name pr) comment)))
+                         uuid)))))
+
+(defun gp--reaction-help-echo (pr comment content count mine)
+  "Build a lazy `help-echo' for a reaction button.
+A function rather than a string, so the reactor names are fetched only
+when the tooltip is actually displayed."
+  (lambda (&rest _)
+    (let* ((rows (ignore-errors
+                   (seq-filter (lambda (r) (equal (alist-get 'content r) content))
+                               (gp-comment-reactions (gp-pr-full-name pr) comment))))
+           (uuid (ignore-errors (gp-user-uuid)))
+           (names (mapcar (lambda (r) (or (let-alist r .user.display_name)
+                                          (let-alist r .user.uuid)))
+                          rows))
+           ;; whether it is mine is only knowable from these rows -- the
+           ;; comment payload carries counts, not who reacted -- so decide it
+           ;; here rather than trusting the caller's guess
+           (mine (or mine
+                     (and uuid (seq-some (lambda (r) (equal (let-alist r .user.uuid) uuid))
+                                         rows)
+                          t))))
+      (if names
+          (gp--reaction-tooltip content count names mine)
+        (format "%d %s -- click to %s yours"
+                count content (if mine "remove" "add"))))))
+
+(defun gp--insert-reactions (pr comment &optional indent)
+  "Insert COMMENT's reaction summary for PR, if the platform has any.
+INDENT is prefixed only when something is actually drawn, so a comment
+with no reactions leaves no stray whitespace behind.
+Each reaction is a button that toggles the current user's own -- so a
+click adds yours, and a second click takes it away.  Nothing is inserted
+on a platform without reactions, or on a comment nobody has reacted to
+yet (`+' / `!' are how you add the first one).
+
+Counts come from the comment itself (`reaction-counts', filled in by the
+backend), never from a fetch: rendering must not touch the network."
+  (when (gp-reactions-supported-p)
+    (let ((counts (alist-get 'reaction-counts comment))
+          (mine-set (alist-get 'reaction-mine comment)))
+      (when counts
+        (when indent (insert indent))
+        (dolist (cell counts)
+          (let* ((content (car cell))
+                 (count (cdr cell))
+                 ;; REST ships counts but never says whether *you* reacted;
+                 ;; the backend fills `reaction-mine' from one GraphQL
+                 ;; prefetch (`viewerHasReacted') so this stays fetch-free.
+                 (mine (and (member content mine-set) t)))
+            (gp--insert-action-button
+             ;; The count always shows, in brackets, so a reaction never
+             ;; looks like a single anonymous mark.  Whether it is yours is
+             ;; deliberately NOT marked on the pill: a glyph here reads as
+             ;; "resolved"/"done" rather than "me".  The quick action's
+             ;; [+]/[-] label carries that, and the tooltip names the
+             ;; reactors.
+             (format "%s (%d)" (gp-reaction-emoji content) count)
+             (gp--reaction-help-echo pr comment content count mine)
+             (lambda () (gp-ui-toggle-reaction pr comment content)))
+            (insert " ")))
+        (insert "\n")))))
 
 (defun gp--insert-link (url &optional label)
   "Insert URL as a clickable button (showing LABEL, default URL)."
@@ -929,8 +1092,15 @@ that is when you need a way to add the first one."
     (gp--insert-commits)
     (gp--insert-pipelines gp--detail-pipelines)
     (magit-insert-section (gp-comments)
-      (magit-insert-heading
-        (format "Comments (%d)" (length comments)))
+      (insert (propertize (format "Comments (%d)" (length comments))
+                          'face 'magit-section-heading))
+      (when (gp-pr-open-p pr)
+        (insert "   ")
+        (gp--insert-action-button
+         "✎ comment [C]" "Add a general comment on this pull request"
+         (lambda () (gp-ui-add-general-comment pr))))
+      (insert "\n")
+      (magit-insert-heading)
       (if comments
           (let ((by-id (gp--comments-by-id comments)))
             (pcase-dolist (`(,c . ,depth) (gp--comment-threads comments))
@@ -965,6 +1135,9 @@ that is when you need a way to add the first one."
   "X"   #'gp-detail-resolve
   "e"   #'gp-detail-edit
   "E"   #'gp-detail-edit-description  ;; edit the PR's own description
+  "C"   #'gp-detail-add-general-comment ;; new general (non-inline) comment
+  "+"   #'gp-detail-like-comment        ;; quick 👍 toggle on the comment at point
+  "!"   #'gp-detail-react-to-comment    ;; pick any reaction (where supported)
   "f"   #'gp-detail-goto-comment
   "d"   #'gp-detail-show-diff
   "K"   #'gp-detail-delete        ;; delete a comment (see `gp-comment-delete-others')
@@ -992,6 +1165,25 @@ that is when you need a way to add the first one."
   "Edit the description of the PR shown in this buffer."
   (interactive)
   (gp-ui-edit-description gp--pr))
+
+(defun gp-detail-add-general-comment ()
+  "Add a general (non-inline) comment on the PR shown in this buffer."
+  (interactive)
+  (gp-ui-add-general-comment gp--pr))
+
+(defun gp-detail-like-comment ()
+  "Toggle your 👍 on the comment at point."
+  (interactive)
+  (unless (gp-reactions-supported-p)
+    (user-error "This platform has no reactions on comments"))
+  (gp-ui-toggle-reaction gp--pr (gp-detail--comment-at-point) "+1"))
+
+(defun gp-detail-react-to-comment ()
+  "Pick a reaction for the comment at point."
+  (interactive)
+  (unless (gp-reactions-supported-p)
+    (user-error "This platform has no reactions on comments"))
+  (gp-ui-react-to-comment gp--pr (gp-detail--comment-at-point)))
 
 (defun gp-detail-show-diff ()
   "Show the current PR's branch diff in Magit."
@@ -1095,6 +1287,16 @@ grants it for the active backend."
   ;; magit-section-mode turns on `truncate-lines'; soft-wrap instead so
   ;; long comment bodies stay fully readable without horizontal scroll.
   (setq-local truncate-lines nil)
+  ;; `help-echo' fires for the mouse only; `help-at-pt' echoes it when POINT
+  ;; lands on a button too, which is how a reaction's reactor names become
+  ;; visible without reaching for the mouse.  Both are global and only take
+  ;; effect once the timer is (re)armed, so `setq-local' would silently do
+  ;; nothing -- see `gp-detail-help-at-point'.
+  (when gp-detail-help-at-point
+    (require 'help-at-pt)
+    (setq help-at-pt-display-when-idle '(help-echo)
+          help-at-pt-timer-delay 0.3)
+    (when (fboundp 'help-at-pt-set-timer) (help-at-pt-set-timer)))
   (setq-local word-wrap t)
   (add-hook 'kill-buffer-hook #'gp--detail-cancel-pipeline-timer nil t)
   ;; Polling stops when the buffer leaves the screen, so resume on return.
@@ -1149,6 +1351,24 @@ grants it for the active backend."
                          (when (buffer-live-p (get-buffer (gp--detail-buffer-name pr)))
                            (with-current-buffer (gp--detail-buffer-name pr)
                              (gp-detail-refresh))))))))
+
+(defun gp-ui-add-general-comment (pr)
+  "Open a compose buffer for a new general (non-inline) comment on PR.
+No path or line is involved, so this is the one comment kind that
+cannot fail the way an inline one can when the target line is outside
+the PR's diff (see `gp-github-check-inline-target')."
+  (require 'gp-compose)
+  (let ((buf (gp--detail-buffer-name pr)))
+    (gp-compose
+     (list :full-name (gp-pr-full-name pr)
+           :id (alist-get 'id pr)
+           :what "general comment"
+           :on-success
+           (lambda (_c)
+             (gp-invalidate-pr-caches pr)
+             (when (buffer-live-p (get-buffer buf))
+               (with-current-buffer buf (gp-detail-refresh)))
+             (message "Comment posted on PR #%s" (alist-get 'id pr)))))))
 
 (defun gp-ui-send-comment-to-terminal (pr comment)
   "Send COMMENT on PR to the configured AI terminal session."
@@ -1245,6 +1465,37 @@ with no per-item state to display or lock."
            (lambda (_c)
              (when (buffer-live-p (get-buffer buf))
                (with-current-buffer buf (gp-detail-refresh))))))))
+
+(defun gp-ui-toggle-reaction (pr comment content)
+  "Toggle the current user's CONTENT reaction on COMMENT of PR.
+Reads the comment's reactions first to decide the direction, so the
+same entry point serves both adding and removing -- which is what lets
+a rendered reaction button be a toggle."
+  (let* ((full-name (gp-pr-full-name pr))
+         (uuid (gp-user-uuid))
+         (mine (seq-find (lambda (r)
+                           (and (equal (alist-get 'content r) content)
+                                (equal (let-alist r .user.uuid) uuid)))
+                         (ignore-errors (gp-comment-reactions full-name comment))))
+         (buf (current-buffer)))
+    (gp-set-comment-reaction full-name comment content (not mine))
+    (message "%s %s" (gp-reaction-emoji content) (if mine "removed" "added"))
+    (gp-invalidate-pr-caches pr)
+    (when (buffer-live-p buf)
+      (with-current-buffer buf (gp-detail-refresh)))))
+
+(defun gp-ui-react-to-comment (pr comment)
+  "Pick a reaction for COMMENT of PR and toggle it.
+Offers the platform's own set (`gp-reaction-choices'), each shown as
+emoji plus its token so the completing-read is searchable by either."
+  (let* ((choices (gp-reaction-choices))
+         (table (mapcar (lambda (c)
+                          (cons (format "%s  %s" (gp-reaction-emoji c) c) c))
+                        choices)))
+    (unless choices
+      (user-error "This platform has no reactions on comments"))
+    (let ((pick (completing-read "React with: " table nil t)))
+      (gp-ui-toggle-reaction pr comment (or (cdr (assoc pick table)) pick)))))
 
 (defun gp-ui-delete-comment (pr comment)
   "Delete COMMENT on PR after confirmation, then refresh.

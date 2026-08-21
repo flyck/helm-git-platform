@@ -68,6 +68,20 @@
 ;; empty list from `gp--pr-labels' alone) is what lets the UI drop the label
 ;; affordances entirely instead of showing a slot that can never fill.
 (cl-defmethod gp--labels-supported-p ((_ git-platform-bitbucket)) nil)
+;; The web UI has a single binary Like, but the public v2.0 API exposes no
+;; route for it and emoji reactions are only a feature request
+;; (BCLOUD-21346, "Gathering Interest" since 2021).  Bitbucket *Server/DC*
+;; does have a documented comment-likes API -- a different product; a
+;; Server backend could implement these four with a one-element
+;; `reaction-choices'.
+;; Bitbucket accepts a comment on any line of any file, so there is nothing
+;; to pre-check.
+(cl-defmethod gp--inline-target-problem ((_ git-platform-bitbucket) _fn _id _path _line) nil)
+(cl-defmethod gp--reactions-supported-p ((_ git-platform-bitbucket)) nil)
+(cl-defmethod gp--reaction-choices ((_ git-platform-bitbucket)) nil)
+(cl-defmethod gp--comment-reactions ((_ git-platform-bitbucket) _full-name _comment) nil)
+(cl-defmethod gp--set-comment-reaction ((_ git-platform-bitbucket) _full-name _comment _content _on)
+  (user-error "Bitbucket Cloud's API has no reactions on comments"))
 (cl-defmethod gp--pr-labels ((_ git-platform-bitbucket) _pr) nil)
 (cl-defmethod gp--repo-labels ((_ git-platform-bitbucket) _full-name) nil)
 (cl-defmethod gp--set-pull-request-labels ((_ git-platform-bitbucket) _full-name _id _labels)

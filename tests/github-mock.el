@@ -84,6 +84,22 @@ pool but not yet on the PR.")
     (created_at . "2026-01-01T00:05:00Z")
     (html_url . "https://github.com/acme/web/pull/42#discussion_r9002")))
 
+(defvar github-mock--reactions nil
+  "Reaction rows the mock is holding: (ID PATH CONTENT LOGIN).
+Stateful so an add/remove round-trip can be driven through the real
+`github-add-comment-reaction' / `github-remove-comment-reaction'.")
+
+(defvar github-mock--next-reaction-id 5000)
+
+(defun github-mock--reaction-list (path)
+  "Return the reactions the mock holds for PATH, GitHub's shape."
+  (mapcar (lambda (r)
+            (pcase-let ((`(,id ,_p ,content ,login) r))
+              `((id . ,id) (content . ,content)
+                (user . ((login . ,login))))))
+          (seq-filter (lambda (r) (equal (nth 1 r) path))
+                      (reverse github-mock--reactions))))
+
 (defun github-mock-request (method path &optional params data extra-headers)
   "Mock implementation of `github-api-request'."
   (push (list method path params data) github-mock-calls)
@@ -94,6 +110,25 @@ pool but not yet on the PR.")
             return (if (functionp resp) (funcall resp method path params data) resp))
    (cond
     ((string-suffix-p "/user" path) github-mock--user)
+    ;; reactions: POST adds (idempotent), DELETE removes by reaction id
+    ((and (equal method "POST") (string-match-p "/reactions\\'" path))
+     (let* ((content (alist-get 'content data))
+            (login (alist-get 'login github-mock--user))
+            (existing (seq-find (lambda (r)
+                                  (and (equal (nth 1 r) path)
+                                       (equal (nth 2 r) content)
+                                       (equal (nth 3 r) login)))
+                                github-mock--reactions)))
+       (or (and existing `((id . ,(car existing)) (content . ,content)
+                           (user . ((login . ,login)))))
+           (let ((id (cl-incf github-mock--next-reaction-id)))
+             (push (list id path content login) github-mock--reactions)
+             `((id . ,id) (content . ,content) (user . ((login . ,login))))))))
+    ((and (equal method "DELETE") (string-match-p "/reactions/[0-9]+\\'" path))
+     (let ((id (string-to-number (car (last (split-string path "/"))))))
+       (setq github-mock--reactions
+             (seq-remove (lambda (r) (equal (car r) id)) github-mock--reactions))
+       t))
     ((and (equal method "POST") (string-match-p "/pulls/[0-9]+/reviews\\'" path))
      `((id . 7001) (user . ,github-mock--user) (state . ,(alist-get 'event data))))
     ((string-match-p "/pulls/[0-9]+/reviews\\'" path) [])
@@ -115,6 +150,7 @@ pool but not yet on the PR.")
   (push (list "GET" path params nil) github-mock-calls)
   (ignore max-items)
   (cond
+   ((string-match-p "/reactions\\'" path) (github-mock--reaction-list path))
    ((string-match-p "\\`/search/issues\\'" path) (list github-mock--search-hit))
    ((string-match-p "/pulls/[0-9]+/reviews\\'" path) nil)
    ((string-match-p "/issues/[0-9]+/comments\\'" path) (list github-mock--issue-comment))
@@ -145,6 +181,10 @@ Seeds a token, clears caches and the call log."
          (github--login-cache nil)
          (github-mock-calls nil)
          (github-mock-graphql-calls nil)
+         ;; reaction state is per-test: a leftover row would make the next
+         ;; test's "did I already react" answer depend on run order
+         (github-mock--reactions nil)
+         (github-mock--next-reaction-id 5000)
          (github--resolved-thread-comment-ids (make-hash-table :test 'eql))
          (github--thread-id-cache (make-hash-table :test 'equal))
          ;; `github-repo-labels' caches through the shared `gp-cache-*' table;

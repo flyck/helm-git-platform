@@ -154,6 +154,7 @@ setup (the write actions simply 403).
 | **OS notifications** — desktop alert when long-running work finishes | on by default | `(setq gp-notify nil)` |
 | **Review quorum** — PRs other reviewers already settled move out of the pending list | 2 approvals / 2 rejections | `(setq gp-helm-min-approvals 0)` / `gp-helm-min-rejections` |
 | **New PRs start as drafts** — the create mask's "Create as draft" box starts ticked | on by default | `(setq gp-create-draft nil)`, or untick the box per PR |
+| **Comment reactions** — 👍 and the rest on PR comments (`+` / `!`) | GitHub only, on by default | nothing to turn off; hidden entirely on Bitbucket, whose API has none |
 | **Shell-rc env import** (macOS convenience) | `(require 'bitbucket-env)` + `(bitbucket-env-load)` | omit it (default) |
 | **Send a PR comment to an AI terminal session** (iTerm2 or Ghostty) | `(setq gp-helm-terminal-backend 'iterm2)` or `'ghostty` | omit it (default) |
 

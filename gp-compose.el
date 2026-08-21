@@ -250,6 +250,20 @@ Lines that are blank, already end in two spaces, or sit inside a
     (when (and gp-compose-hard-line-breaks
                (not (plist-get target :no-hard-breaks)))
       (setq text (gp-compose--apply-hard-breaks text)))
+    ;; For a NEW inline comment, check the target is one the platform will
+    ;; accept before posting.  GitHub answers an out-of-diff path/line with a
+    ;; bare 422 only after the request goes out, which loses nothing but tells
+    ;; the user nothing either; failing here keeps this buffer -- and the text
+    ;; just written -- intact.  A reply carries a parent, which needs no such
+    ;; check.
+    (when-let* ((inline (and (not (plist-get target :parent))
+                             (plist-get target :inline))))
+      (when-let* ((problem (ignore-errors
+                             (gp-inline-target-problem
+                              (plist-get target :full-name)
+                              (plist-get target :id)
+                              (car inline) (cdr inline)))))
+        (user-error "%s" problem)))
     (let ((created (gp-compose--do-submit target text)))
       (let ((on-success (plist-get target :on-success)))
         (when on-success (funcall on-success created)))

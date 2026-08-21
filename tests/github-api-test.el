@@ -284,5 +284,252 @@ be noise at best and an unintended title edit at worst."
       (github-set-pull-request-description "acme/web" 42 nil)
       (should (equal (alist-get 'body (nth 3 (car github-mock-calls))) "")))))
 
+;;;; Error logging --------------------------------------------------------------
+
+(ert-deftest github-test-redact-for-log-hides-credentials ()
+  "A credential-shaped key is replaced; ordinary fields are kept.
+The request body is normally innocuous, but the log buffer is something
+users paste into issue reports."
+  (let ((out (github--redact-for-log
+              '((body . "a comment") (path . "gp-helm.el") (line . 12)
+                (token . "ghp_supersecret")))))
+    (should (string-match-p "gp-helm" out))
+    (should (string-match-p "<redacted>" out))
+    (should-not (string-match-p "ghp_supersecret" out))))
+
+(ert-deftest github-test-failed-write-logs-the-request-payload ()
+  "A failing write logs what it SENT, not just the response body.
+A 422 names the field it rejected (`…thread.line'), which only means
+something next to the value actually sent -- without this the log
+cannot explain an out-of-diff inline comment, which is exactly the
+case that prompted it.  Drives the real `github-api-request' with a
+stubbed 422 transport."
+  (let ((logged '()))
+    (cl-letf (((symbol-function 'gp-log-error)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) logged)))
+              ;; a canned 422, shaped like GitHub's
+              ((symbol-function 'github--split-response)
+               (lambda (&rest _)
+                 (list 422 nil "{\"message\":\"Validation Failed\"}")))
+              ((symbol-function 'url-retrieve-synchronously)
+               (lambda (&rest _) (generate-new-buffer " *stub*")))
+              ((symbol-function 'github-api-token-value) (lambda () "t")))
+      (should-error
+       (github-api-request "POST" "/repos/acme/web/pulls/7/comments" nil
+                           '((body . "note") (path . "gp-helm.el") (line . 500)))))
+    (let ((all (mapconcat #'identity logged " ")))
+      ;; the payload is there, with the values that explain the rejection
+      (should (string-match-p "sent:" all))
+      (should (string-match-p "gp-helm\\.el" all))
+      (should (string-match-p "500" all))
+      ;; and the response body is still logged too
+      (should (string-match-p "Validation Failed" all)))))
+
+;;;; Inline comment targets ----------------------------------------------------
+
+(defconst github-test--diff
+  (concat "diff --git a/gp-helm.el b/gp-helm.el\n"
+          "--- a/gp-helm.el\n"
+          "+++ b/gp-helm.el\n"
+          "@@ -142,15 +142,60 @@ some context\n"
+          "+added\n"
+          "@@ -787,12 +832,12 @@ more context\n"
+          "+added\n"
+          "diff --git a/tests/x-test.el b/tests/x-test.el\n"
+          "--- a/tests/x-test.el\n"
+          "+++ b/tests/x-test.el\n"
+          "@@ -1,0 +1,4 @@\n"
+          "+added\n")
+  "A diff with two hunks in one file and one in another.")
+
+(ert-deftest github-test-diff-commentable-lines-parses-new-side-ranges ()
+  "Hunk headers yield the new-side line ranges, per file."
+  (should (equal (github--diff-commentable-lines github-test--diff)
+                 '(("gp-helm.el" (142 . 201) (832 . 843))
+                   ("tests/x-test.el" (1 . 4))))))
+
+(ert-deftest github-test-diff-commentable-lines-ignores-deleted-files ()
+  "A file deleted by the diff has no commentable new side."
+  (should-not
+   (assoc "gone.el"
+          (github--diff-commentable-lines
+           (concat "diff --git a/gone.el b/gone.el\n"
+                   "--- a/gone.el\n"
+                   "+++ /dev/null\n"
+                   "@@ -1,3 +0,0 @@\n"
+                   "-was here\n")))))
+
+(ert-deftest github-test-inline-target-problem-accepts-a-line-in-a-hunk ()
+  "A line inside a hunk is fine, and reports no problem."
+  (cl-letf (((symbol-function 'github-pull-request-diff)
+             (lambda (&rest _) github-test--diff)))
+    (should-not (github-inline-target-problem "acme/web" 7 "gp-helm.el" 150))
+    ;; boundaries count as inside
+    (should-not (github-inline-target-problem "acme/web" 7 "gp-helm.el" 142))
+    (should-not (github-inline-target-problem "acme/web" 7 "gp-helm.el" 201))))
+
+(ert-deftest github-test-inline-target-problem-names-the-available-lines ()
+  "A line outside every hunk is refused, and the message says which lines
+would work -- the whole point of checking before posting rather than
+letting GitHub answer a bare 422."
+  (cl-letf (((symbol-function 'github-pull-request-diff)
+             (lambda (&rest _) github-test--diff)))
+    (let ((msg (github-inline-target-problem "acme/web" 7 "gp-helm.el" 500)))
+      (should msg)
+      (should (string-match-p "line 500" msg))
+      (should (string-match-p "142-201" msg))
+      (should (string-match-p "832-843" msg)))))
+
+(ert-deftest github-test-inline-target-problem-names-the-changed-files ()
+  "A file the PR does not touch is refused, listing the ones it does."
+  (cl-letf (((symbol-function 'github-pull-request-diff)
+             (lambda (&rest _) github-test--diff)))
+    (let ((msg (github-inline-target-problem "acme/web" 7 "untouched.el" 10)))
+      (should msg)
+      (should (string-match-p "untouched\\.el" msg))
+      (should (string-match-p "gp-helm\\.el" msg)))))
+
+(ert-deftest github-test-inline-target-problem-defers-when-diff-unreadable ()
+  "An unreadable diff must not block a comment: let the API decide.
+Refusing locally on a failed fetch would turn a transient error into a
+hard block on commenting at all."
+  (cl-letf (((symbol-function 'github-pull-request-diff) (lambda (&rest _) nil)))
+    (should-not (github-inline-target-problem "acme/web" 7 "anything.el" 1))))
+
+;;;; Reactions ----------------------------------------------------------------
+
+(ert-deftest github-test-reaction-base-differs-per-comment-kind ()
+  "An inline review comment and a general comment need different bases.
+Their ids come from separate sequences, so the wrong collection would
+404 or -- worse -- hit an unrelated comment that happens to share the
+number."
+  (should (equal (github--reaction-base "acme/web" '((id . 7) (inline (path . "a.el"))))
+                 "/repos/acme/web/pulls/comments/7/reactions"))
+  (should (equal (github--reaction-base "acme/web" '((id . 7)))
+                 "/repos/acme/web/issues/comments/7/reactions")))
+
+(ert-deftest github-test-add-reaction-posts-content ()
+  "Adding a reaction POSTs just the content token."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (github-add-comment-reaction "acme/web" '((id . 7)) "+1")
+      (let ((call (car github-mock-calls)))
+        (should (equal (nth 0 call) "POST"))
+        (should (string-suffix-p "/issues/comments/7/reactions" (nth 1 call)))
+        (should (equal (alist-get 'content (nth 3 call)) "+1"))))))
+
+(ert-deftest github-test-add-reaction-rejects-unknown-content ()
+  "A token GitHub does not accept fails locally, not with a remote 422."
+  (github-mock-with-service
+    (should-error (github-add-comment-reaction "acme/web" '((id . 7)) "thumbs_up"))))
+
+(ert-deftest github-test-add-reaction-is-idempotent ()
+  "Adding the same reaction twice leaves exactly one.
+GitHub answers 200 (rather than creating a duplicate) when the user
+already holds that reaction, so callers can toggle blindly."
+  (github-mock-with-service
+    (github-add-comment-reaction "acme/web" '((id . 7)) "heart")
+    (github-add-comment-reaction "acme/web" '((id . 7)) "heart")
+    (should (= (length (github-comment-reactions "acme/web" '((id . 7)))) 1))))
+
+(ert-deftest github-test-user-can-hold-several-distinct-reactions ()
+  "Unlike a binary Like, GitHub allows many reactions per user per comment."
+  (github-mock-with-service
+    (dolist (c '("+1" "heart" "rocket"))
+      (github-add-comment-reaction "acme/web" '((id . 7)) c))
+    (should (equal (sort (mapcar (lambda (r) (alist-get 'content r))
+                                (github-comment-reactions "acme/web" '((id . 7))))
+                        #'string<)
+                   '("+1" "heart" "rocket")))))
+
+(ert-deftest github-test-reaction-counts-ride-along-on-comments ()
+  "Comments carry per-emoji counts, so drawing them needs no request.
+GitHub ships a `reactions' object with every comment; only the reactor
+names need the reactions endpoint."
+  (should (equal (github--reaction-counts
+                  '((reactions (total_count . 3) (\+1 . 2) (\-1 . 0)
+                               (heart . 1) (rocket . 0))))
+                 '(("+1" . 2) ("heart" . 1))))
+  ;; no reactions at all -> nothing, so the renderer inserts nothing
+  (should-not (github--reaction-counts '((reactions (total_count . 0) (\+1 . 0)))))
+  (should-not (github--reaction-counts '((id . 1)))))
+
+(ert-deftest github-test-reshaped-comments-carry-reaction-counts ()
+  "Both comment kinds expose the counts under the shared key."
+  (should (equal (alist-get 'reaction-counts
+                            (github--reshape-issue-comment
+                             '((id . 1) (body . "x") (reactions (\+1 . 2)))))
+                 '(("+1" . 2))))
+  (should (equal (alist-get 'reaction-counts
+                            (github--reshape-review-comment
+                             '((id . 2) (body . "y") (reactions (heart . 1)))))
+                 '(("heart" . 1)))))
+
+(ert-deftest github-test-graphql-reaction-tokens-map-to-rest ()
+  "GraphQL's enum spells the thumbs differently from REST.
+`THUMBS_UP' must become `+1', or the viewer's own reaction would never
+match the counts keyed by REST tokens."
+  (should (equal (github--reaction-token "THUMBS_UP") "+1"))
+  (should (equal (github--reaction-token "THUMBS_DOWN") "-1"))
+  (should (equal (github--reaction-token "HEART") "heart"))
+  ;; an enum value we don't know about still degrades to something usable
+  (should (equal (github--reaction-token "SPARKLES") "sparkles")))
+
+(ert-deftest github-test-reshaped-comments-carry-viewer-reactions ()
+  "A comment says which reactions are the viewer's own.
+REST ships counts but no `viewerHasReacted', so this comes from the
+GraphQL prefetch cache -- without it the UI cannot show that a click
+would REMOVE your reaction rather than add one."
+  (let ((github--viewer-reactions (make-hash-table :test 'eql)))
+    (puthash 1 '("+1" "heart") github--viewer-reactions)
+    (should (equal (alist-get 'reaction-mine
+                              (github--reshape-issue-comment
+                               '((id . 1) (body . "x") (reactions (\+1 . 2)))))
+                   '("+1" "heart")))
+    ;; a comment nobody reacted to as the viewer gets nil, not a stale hit
+    (should-not (alist-get 'reaction-mine
+                           (github--reshape-issue-comment
+                            '((id . 99) (body . "y")))))))
+
+(ert-deftest github-test-reactions-expose-user-as-uuid ()
+  "A reaction's reactor must be readable as `uuid', not only `login'.
+`gp-user-uuid' returns a login on this backend and every other comment
+accessor exposes identity as `uuid'; a reaction that only carried
+`login' made \"is this mine?\" read nil and silently turned the toggle
+into add-only."
+  (github-mock-with-service
+    (github-add-comment-reaction "acme/web" '((id . 7)) "+1")
+    (let ((r (car (github-comment-reactions "acme/web" '((id . 7))))))
+      (should (equal (let-alist r .user.uuid) (github-user-login)))
+      ;; login is kept too, for anything reading GitHub's own field name
+      (should (equal (let-alist r .user.login) (github-user-login))))))
+
+(ert-deftest github-test-remove-reaction-deletes-by-reaction-id ()
+  "Removal needs the reaction's own id, so it is looked up first.
+The DELETE route is keyed on the reaction id, not the content -- a
+DELETE aimed at the content would 404."
+  (github-mock-with-service
+    (github-add-comment-reaction "acme/web" '((id . 7)) "+1")
+    (let ((github-mock-calls nil))
+      (should (github-remove-comment-reaction "acme/web" '((id . 7)) "+1"))
+      (let ((del (seq-find (lambda (c) (equal (nth 0 c) "DELETE")) github-mock-calls)))
+        (should del)
+        (should (string-match-p "/reactions/[0-9]+\\'" (nth 1 del)))))
+    (should (null (github-comment-reactions "acme/web" '((id . 7)))))))
+
+(ert-deftest github-test-remove-reaction-absent-is-nil-not-an-error ()
+  "Removing one the user never added reports nil rather than signalling."
+  (github-mock-with-service
+    (should-not (github-remove-comment-reaction "acme/web" '((id . 7)) "eyes"))))
+
+(ert-deftest github-test-remove-reaction-only-removes-your-own ()
+  "Someone else's identical reaction is left alone."
+  (github-mock-with-service
+    ;; a row owned by another login, seeded directly
+    (setq github-mock--reactions
+          (list (list 4242 "/repos/acme/web/issues/comments/7/reactions" "+1" "bea")))
+    (should-not (github-remove-comment-reaction "acme/web" '((id . 7)) "+1"))
+    (should (= (length (github-comment-reactions "acme/web" '((id . 7)))) 1))))
+
 (provide 'github-api-test)
 ;;; github-api-test.el ends here

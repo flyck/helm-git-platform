@@ -227,5 +227,39 @@
         (should (equal (plist-get (car capped) :hash)
                        (plist-get (car commits) :hash)))))))
 
+(ert-deftest gp-mock-test-comment-reactions-round-trip ()
+  "Reactions add, count, dedupe and remove through the protocol ops.
+Exercises the whole path -- `gp-set-comment-reaction' /
+`gp-comment-reactions' on a real (sqlite) backend -- rather than each
+backend's internals, so the protocol's contract is what is pinned."
+  (gp-mock-test--with
+    (should (gp-reactions-supported-p))
+    (should (member "+1" (gp-reaction-choices)))
+    (let* ((fn "acme/webshop")
+           (comment (car (gp-pull-request-comments fn 101))))
+      (should comment)
+      ;; nothing to begin with
+      (should (null (gp-comment-reactions fn comment)))
+      ;; add one, and it comes back marked as the current user's
+      (gp-set-comment-reaction fn comment "+1" t)
+      (let ((rs (gp-comment-reactions fn comment)))
+        (should (= (length rs) 1))
+        (should (equal (alist-get 'content (car rs)) "+1"))
+        (should (equal (let-alist (car rs) .user.uuid) (gp-user-uuid))))
+      ;; adding the same one twice must not duplicate it (GitHub's 200)
+      (gp-set-comment-reaction fn comment "+1" t)
+      (should (= (length (gp-comment-reactions fn comment)) 1))
+      ;; a second, distinct reaction coexists -- not a binary like
+      (gp-set-comment-reaction fn comment "rocket" t)
+      (should (equal (sort (mapcar (lambda (r) (alist-get 'content r))
+                                   (gp-comment-reactions fn comment))
+                           #'string<)
+                     '("+1" "rocket")))
+      ;; removing takes away only the named one
+      (gp-set-comment-reaction fn comment "+1" nil)
+      (should (equal (mapcar (lambda (r) (alist-get 'content r))
+                             (gp-comment-reactions fn comment))
+                     '("rocket"))))))
+
 (provide 'git-platform-mock-test)
 ;;; git-platform-mock-test.el ends here

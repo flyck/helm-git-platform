@@ -280,5 +280,67 @@ line two"))))
         (should-error (gp-compose-submit) :type 'user-error)))
     (should-not called)))
 
+;;;; Inline target pre-check ---------------------------------------------------
+
+(ert-deftest gp-test-compose-refuses-an-unpostable-inline-target ()
+  "A bad inline target aborts BEFORE posting, keeping the buffer.
+GitHub answers an out-of-diff path/line with a bare 422 after the
+request goes out; the text the user just wrote is what is at stake, so
+the check has to happen here and must not kill the buffer."
+  (let ((posted nil))
+    (with-temp-buffer
+      (insert "a careful review note")
+      (setq gp-compose--target
+            (list :full-name "acme/web" :id 7
+                  :inline (cons "gp-helm.el" 500)
+                  :submit-function (lambda (&rest _) (setq posted t) '((id . 1))))
+            gp-compose--return-window nil)
+      (cl-letf (((symbol-function 'gp-inline-target-problem)
+                 (lambda (&rest _) "line 500 of gp-helm.el is not in PR #7's diff")))
+        (should-error (gp-compose-submit) :type 'user-error))
+      ;; nothing was sent, and the text is still here to retry with
+      (should-not posted)
+      (should (equal (string-trim (buffer-string)) "a careful review note")))))
+
+(ert-deftest gp-test-compose-posts-when-the-inline-target-is-fine ()
+  "No problem reported means the comment goes out as before."
+  (let ((posted nil))
+    (with-temp-buffer
+      (insert "looks good")
+      (setq gp-compose--target
+            (list :full-name "acme/web" :id 7
+                  :inline (cons "gp-helm.el" 150)
+                  :submit-function (lambda (&rest _) (setq posted t) '((id . 1))))
+            gp-compose--return-window nil)
+      (cl-letf (((symbol-function 'gp-inline-target-problem) (lambda (&rest _) nil)))
+        (gp-compose-submit))
+      (should posted))))
+
+(ert-deftest gp-test-compose-skips-the-check-for-replies-and-general ()
+  "A reply carries a parent and a general comment has no target at all,
+so neither needs the diff lookup -- and must not pay for one."
+  (let ((checked 0) (posted 0))
+    (cl-letf (((symbol-function 'gp-inline-target-problem)
+               (lambda (&rest _) (cl-incf checked) nil)))
+      ;; a reply: has :inline for context, but also :parent
+      (with-temp-buffer
+        (insert "replying")
+        (setq gp-compose--target
+              (list :full-name "acme/web" :id 7 :parent 99
+                    :inline (cons "gp-helm.el" 500)
+                    :submit-function (lambda (&rest _) (cl-incf posted) '((id . 1))))
+              gp-compose--return-window nil)
+        (gp-compose-submit))
+      ;; a general comment: no :inline
+      (with-temp-buffer
+        (insert "general note")
+        (setq gp-compose--target
+              (list :full-name "acme/web" :id 7
+                    :submit-function (lambda (&rest _) (cl-incf posted) '((id . 1))))
+              gp-compose--return-window nil)
+        (gp-compose-submit)))
+    (should (= posted 2))
+    (should (= checked 0))))
+
 (provide 'gp-compose-test)
 ;;; gp-compose-test.el ends here
