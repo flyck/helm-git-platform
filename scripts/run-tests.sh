@@ -3,7 +3,7 @@
 # Uses the user's installed packages (magit-section, transient) via
 # package-initialize, but loads no user config (-Q-ish, isolated).
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 emacs --batch -Q \
   --eval "(progn (require 'package) (package-initialize))" \

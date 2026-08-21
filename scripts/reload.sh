@@ -2,14 +2,15 @@
 # Reload the helm-git-platform package into the *running* Emacs server, so
 # changes can be tried without restarting Emacs.
 #
-#   ./reload.sh            # reload all *.el into the live session
-#   ./reload.sh helm       # open M-x gp-helm in the live session
-#   ./reload.sh watch      # toggle gp-watch-mode
-#   ./reload.sh eval 'ELISP'   # eval arbitrary elisp in the live session
+#   ./scripts/reload.sh            # reload all *.el into the live session
+#   ./scripts/reload.sh helm       # open M-x gp-helm in the live session
+#   ./scripts/reload.sh watch      # toggle gp-watch-mode
+#   ./scripts/reload.sh eval 'ELISP'   # eval arbitrary elisp in the live session
 #
 # Requires a running `M-x server-start` (or `(server-start)` in init) Emacs.
 set -euo pipefail
-DIR="$(cd "$(dirname "$0")" && pwd)"
+# The package lives one level up, now that this script sits in scripts/.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 ec() { emacsclient --eval "$1"; }
 

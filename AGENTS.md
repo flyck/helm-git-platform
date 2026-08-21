@@ -8,21 +8,24 @@ architecture, and the API-spec drift check. **Read it first.**
 
 The short version:
 
-- **Default to the live loop.** Edit → `./run-tests.sh` → `./reload.sh` →
-  optionally `./reload.sh eval '...'` to confirm in the running Emacs. Don't
+- **Default to the live loop.** Edit → `./scripts/run-tests.sh` → `./scripts/reload.sh` →
+  optionally `./scripts/reload.sh eval '...'` to confirm in the running Emacs. Don't
   ask the user to restart Emacs.
 - **Reloading is not installing.** The user runs an *installed copy* at
   `~/.emacs.d/elpa/helm-git-platform` (its own git checkout of this same
   remote, with byte-compiled `.elc` files). Reloading `.el` from this working
   tree only patches the running session — it does **not** update the installed
   copy, so the change is lost on the next Emacs restart. When the user wants
-  the latest version "installed" / "in my `~/.emacs.d`", the correct tool is
-  `package-vc-upgrade` — it fetches the remote, resets the checkout, and
-  byte-recompiles in one step, e.g. via the live session:
+  the latest version "installed" / "in my `~/.emacs.d`", run **`./scripts/install.sh`**
+  — it gates on a clean tree and a pushed, in-sync upstream, runs the suite,
+  then does the upgrade and reload and verifies what actually landed. Under the
+  hood the correct tool is `package-vc-upgrade` — it fetches the remote, resets
+  the checkout, and byte-recompiles in one step, e.g. via the live session:
   `emacsclient -e '(package-vc-upgrade (cadr (assq (quote helm-git-platform)
   package-alist)))'`. Note it only pulls what has been **pushed** to the
   remote — commit and push first if the change you want reflected is still
-  local-only. Do **not** hand-edit or `rsync` files into `~/.emacs.d/elpa/...`
+  local-only (`scripts/install.sh` refuses rather than installing a stale revision).
+  Do **not** hand-edit or `rsync` files into `~/.emacs.d/elpa/...`
   directly; that fights the package manager and leaves it out of sync with its
   own git state. A manual `git fetch`/`git reset --hard` in that directory
   works too but is easy to get wrong (e.g. clobbering the untracked
@@ -31,7 +34,7 @@ The short version:
 - **A reload does not refresh `defcustom` values.** `defcustom`/`defvar` skip
   an already-bound symbol, so re-loading a file picks up new *functions* but
   keeps the *old defaults* -- a changed `defcustom` default silently does not
-  take effect. `reload.sh` only unbinds keymaps (`*-map`). When a change alters
+  take effect. `scripts/reload.sh` only unbinds keymaps (`*-map`). When a change alters
   a default, `makunbound` that symbol before loading, e.g.
   `emacsclient -e '(progn (makunbound (quote gp-pipeline-spinner-frames)) (load "..."))'`,
   and verify the new value rather than assuming the reload took.

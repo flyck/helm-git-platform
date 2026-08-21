@@ -16,9 +16,9 @@
 # What this still does NOT cover: CI runs Emacs 28.2 / 29.4 / 30.1, and
 # some compiler diagnostics exist only on older versions (e.g. Emacs 30's
 # "value from call to `equal' is unused").  Pass a specific binary to
-# check one: EMACS=/path/to/emacs-30 ./run-ci-locally.sh
+# check one: EMACS=/path/to/emacs-30 ./scripts/run-ci-locally.sh
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 EMACS_BIN="${EMACS:-emacs}"
 echo "==> $("$EMACS_BIN" --version | head -1)"

@@ -9,26 +9,35 @@ With a running Emacs server (`(server-start)` in your init), changes can be
 tried live without a restart:
 
 ```sh
-./run-tests.sh        # full ERT suite, fully offline (mocked Bitbucket)
-./reload.sh           # hot-reload all *.el into the live Emacs
+./scripts/run-tests.sh   # full ERT suite, fully offline (mocked Bitbucket)
+./scripts/reload.sh      # hot-reload all *.el into the live Emacs
+./scripts/install.sh     # promote pushed HEAD into ~/.emacs.d (survives restart)
 ```
 
-`reload.sh` talks to the live Emacs via `emacsclient`:
+`scripts/reload.sh` talks to the live Emacs via `emacsclient`:
 
 | Command | Effect |
 |---|---|
-| `./reload.sh` | force-load every `*.el`, re-`require` the umbrella, re-import env vars |
-| `./reload.sh helm` | reload, then open `M-x gp-helm` in the live session |
-| `./reload.sh watch` | reload, then toggle `gp-watch-mode` |
-| `./reload.sh eval 'ELISP'` | eval arbitrary elisp in the live session (for probing) |
+| `./scripts/reload.sh` | force-load every `*.el`, re-`require` the umbrella, re-import env vars |
+| `./scripts/reload.sh helm` | reload, then open `M-x gp-helm` in the live session |
+| `./scripts/reload.sh watch` | reload, then toggle `gp-watch-mode` |
+| `./scripts/reload.sh eval 'ELISP'` | eval arbitrary elisp in the live session (for probing) |
+
+`scripts/install.sh` is the *promotion* step that comes after that loop. A reload only
+patches the running session, so the change dies with it; `./scripts/install.sh` moves the
+long-lived install at `~/.emacs.d/elpa/helm-git-platform` forward via
+`package-vc-upgrade`, then reloads so both copies agree. It gates on a clean tree,
+an in-sync upstream (`package-vc-upgrade` only sees **pushed** commits) and a green
+suite, then verifies the installed revision really matches local `HEAD` rather than
+assuming it. `--skip-tests` bypasses the ERT gate for a quick re-install.
 
 One gotcha it handles: `defvar`/`defvar-keymap` do **not** reassign an
 already-bound variable, so a naive reload keeps stale keymaps and defcustom
-defaults. `reload.sh` unbinds the package's `*-map` vars before loading so
+defaults. `scripts/reload.sh` unbinds the package's `*-map` vars before loading so
 keymap and default edits actually take effect — don't bypass it.
 
 If `emacsclient` can't connect, fall back to `emacs --batch -Q` with
-`package-initialize` and `-L .` (see `run-tests.sh`).
+`package-initialize` and `-L .` (see `scripts/run-tests.sh`).
 
 ## Debugging via the log buffer
 
@@ -37,7 +46,7 @@ status, timing), errors with response bodies, and key actions. Read the log
 before speculating:
 
 ```sh
-./reload.sh eval '(with-current-buffer "*gp-log*"
+./scripts/reload.sh eval '(with-current-buffer "*gp-log*"
   (buffer-substring (max (point-min) (- (point-max) 4000)) (point-max)))'
 ```
 

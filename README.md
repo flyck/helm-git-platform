@@ -267,7 +267,7 @@ section folded with `gp-detail-commits-collapsed`.
 ## Tests
 
 ```sh
-./run-tests.sh        # ERT suite, fully offline (Bitbucket is mocked)
+./scripts/run-tests.sh   # ERT suite, fully offline (Bitbucket is mocked)
 ```
 
 ## More
