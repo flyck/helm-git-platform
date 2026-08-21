@@ -131,6 +131,12 @@ avoid.")
   "Delete COMMENT-ID on PR FULL-NAME/ID.")
 (gp-defop set-pull-request-draft (full-name id draft &optional title)
   "Set PR FULL-NAME/ID draft flag to DRAFT.")
+(gp-defop set-pull-request-description (full-name id description &optional title)
+  "Set PR FULL-NAME/ID's description/body to DESCRIPTION.
+TITLE is an optimisation for backends whose update is a whole-object
+PUT (Bitbucket), which must resend the title to avoid blanking it;
+pass it when the caller already has it to save a fetch.  Backends
+where the update is a partial PATCH (GitHub) ignore it.")
 (gp-defop approve-pr (full-name id &optional unapprove reason)
   "Approve PR FULL-NAME/ID (UNAPPROVE non-nil retracts it).
 REASON is a message shown alongside the retraction, used only when

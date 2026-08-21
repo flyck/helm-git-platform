@@ -367,16 +367,23 @@ naive `eq' implementation would hit across two separate renders."
             (should (string-match-p "Description" text))
             (should (string-match-p "Adds the toggle" text))))))))
 
-(ert-deftest gp-test-render-detail-omits-empty-description ()
-  "No description means no empty section heading."
+(ert-deftest gp-test-render-detail-shows-empty-description-state-when-editable ()
+  "An open PR with no description gets the section anyway, as an empty state.
+This reverses the older \"no description means no heading\" rule: back
+then the heading was inert text and an empty one was pure noise, but it
+now carries the `✎ edit [E]' button, and a PR with no body is exactly
+when you need a way to write the first one.  Without it `E' is invisible
+precisely where it is most useful."
   (let ((pr (append '((description . "")) (car (gp-test--mock-prs)))))
     (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
           (gp--render-detail pr nil))
-        (should-not (string-match-p "^Description"
-                                    (substring-no-properties (buffer-string))))))))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "Description" text))
+          (should (string-match-p "no description yet" text))
+          (should (string-match-p "edit \\[E\\]" text)))))))
 
 (ert-deftest gp-test-render-detail-shows-comments ()
   (let ((pr (car (gp-test--mock-prs)))
@@ -404,7 +411,10 @@ naive `eq' implementation would hit across two separate renders."
         (gp-detail-mode)
         (let ((inhibit-read-only t))
           (gp--render-detail pr comments))
-        (let ((text (substring-no-properties (buffer-string))))
+        (let ((text (substring-no-properties (buffer-string)))
+              ;; `[e]' is the per-comment edit button; without this the
+              ;; match folds case and also hits the description's `[E]'.
+              (case-fold-search nil))
           (should-not (string-match-p "delete \\[K\\]" text))
           (should-not (string-match-p "edit \\[e\\]" text)))))))
 
@@ -421,7 +431,8 @@ allows on someone else's text."
         (gp-detail-mode)
         (let ((inhibit-read-only t))
           (gp--render-detail pr comments))
-        (let ((text (substring-no-properties (buffer-string))))
+        (let ((text (substring-no-properties (buffer-string)))
+              (case-fold-search nil))   ;; see above: `[e]' is not `[E]'
           (should (string-match-p "delete \\[K\\]" text))
           (should-not (string-match-p "edit \\[e\\]" text)))))))
 
@@ -941,6 +952,119 @@ can be added -- same reasoning as the reviewers line."
         (let ((text (substring-no-properties (buffer-string))))
           (should (string-match-p "bug" text))
           (should-not (string-match-p "edit" text)))))))
+
+;;;; Description section ------------------------------------------------------
+
+(ert-deftest gp-test-description-heading-offers-edit-on-open-pr ()
+  "The description heading carries a REAL edit button, like reviewers/labels.
+Matching the label text is not enough: `insert-button' keeps its
+properties in an overlay, which does not survive `buffer-string', so
+building the heading as a string first yields plain text that merely
+looks like a button.  Assert the button object, its face, and that
+activating it actually calls the edit command -- and that the heading
+text still gets `magit-section-heading'."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (pr (append '((body . "Some body text")) github-mock--pr-1))
+          (called nil))
+      (cl-letf (((symbol-function 'gp-ui-edit-description)
+                 (lambda (_pr) (setq called t))))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--insert-description pr))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "Description" text))
+            (should (string-match-p "Some body text" text)))
+          ;; the heading itself keeps magit's heading face
+          (should (eq (get-text-property (point-min) 'face) 'magit-section-heading))
+          ;; and there is a genuine, clickable button carrying the link face
+          (let ((b (next-button (point-min))))
+            (should b)
+            (should (equal (button-label b) "✎ edit [E]"))
+            (should (eq (button-get b 'face) 'gp-link-face))
+            (button-activate b)
+            (should called)))))))
+
+(ert-deftest gp-test-description-empty-state-offers-edit-on-open-pr ()
+  "The empty state carries the edit button, so `E' is discoverable there."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (pr (append '((body . "")) github-mock--pr-1)))
+      (should (gp-pr-open-p pr))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--insert-description pr))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "Description" text))
+          (should (string-match-p "no description yet" text)))
+        ;; a real button, not just matching text (see the test above)
+        (let ((b (next-button (point-min))))
+          (should b)
+          (should (equal (button-label b) "✎ edit [E]")))))))
+
+(ert-deftest gp-test-description-has-no-edit-button-on-closed-pr ()
+  "A merged/closed PR shows its description read-only: the forges only
+allow mutating an open PR, so offering the button would just produce an
+API error."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (pr (append '((state . "closed") (body . "Some body text"))
+                      github-mock--pr-1)))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--insert-description pr))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "Some body text" text))
+          (should-not (string-match-p "edit" text)))
+        (should-not (next-button (point-min)))))))
+
+(ert-deftest gp-test-description-absent-entirely-on-closed-pr-with-none ()
+  "A CLOSED PR with no description still renders nothing at all.
+The empty state exists to offer the edit button; where editing is
+impossible it would be a slot that can never fill."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (pr (append '((state . "closed") (body . "")) github-mock--pr-1)))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--insert-description pr))
+        (should (equal (buffer-string) ""))))))
+
+(ert-deftest gp-test-edit-description-refreshes-the-detail-buffer ()
+  "Saving a description redraws the DETAIL buffer, not the compose one.
+`:on-success' runs while the compose buffer is current, where `gp--pr'
+is nil and a bare `gp-detail-refresh' silently does nothing -- the edit
+reaches the server but the view keeps showing the old text."
+  (let* ((pr (append '((description . "old body")) (car (gp-test--mock-prs))))
+         (detail-buf (gp--detail-buffer-name pr))
+         (refreshed-in nil)
+         (sent nil))
+    (unwind-protect
+        (progn
+          ;; a stand-in for the real detail buffer, so `buffer-live-p' holds
+          (get-buffer-create detail-buf)
+          (cl-letf (((symbol-function 'gp-set-pull-request-description)
+                     (lambda (_fn _id text &optional _title)
+                       (setq sent text)
+                       (append `((description . ,text)) pr)))
+                    ((symbol-function 'gp-detail-refresh)
+                     (lambda () (setq refreshed-in (buffer-name))))
+                    ((symbol-function 'gp-invalidate-pr-caches) #'ignore))
+            (let ((compose (gp-ui-edit-description pr)))
+              (unwind-protect
+                  (with-current-buffer compose
+                    (erase-buffer)
+                    (insert "new body")
+                    (gp-compose-submit))
+                (when (buffer-live-p compose) (kill-buffer compose)))))
+          (should (equal sent "new body"))
+          ;; the redraw must have happened inside the detail buffer
+          (should (equal refreshed-in detail-buf)))
+      (when (get-buffer detail-buf) (kill-buffer detail-buf)))))
 
 (ert-deftest gp-test-label-face-uses-the-platform-color ()
   "Each distinct colour gets its own face, interned once and reused.

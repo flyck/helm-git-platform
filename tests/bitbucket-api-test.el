@@ -271,6 +271,28 @@
       (should (eq (alist-get 'draft to-draft) t))
       (should (eq (alist-get 'draft to-ready) :json-false)))))
 
+(ert-deftest bitbucket-test-set-description ()
+  "Setting the description PUTs it alongside the title.
+The title must ride along: the endpoint is a whole-object PUT, so
+omitting it would blank the PR's title (same trap as `set-draft')."
+  (bitbucket-mock-with-service
+    (bitbucket-set-pull-request-description "ws/slug" 7 "New body" "My PR")
+    (let* ((calls (cl-remove-if-not
+                   (lambda (c) (and (equal (car c) "PUT")
+                                    (string-suffix-p "/pullrequests/7" (nth 1 c))))
+                   bitbucket-mock-calls))
+           (data (nth 3 (car calls))))
+      (should (= (length calls) 1))
+      (should (equal (alist-get 'title data) "My PR"))
+      (should (equal (alist-get 'description data) "New body")))))
+
+(ert-deftest bitbucket-test-set-description-clears-with-empty-string ()
+  "Clearing sends \"\", not nil -- nil would encode as JSON null."
+  (bitbucket-mock-with-service
+    (bitbucket-set-pull-request-description "ws/slug" 7 nil "My PR")
+    (let ((data (nth 3 (car bitbucket-mock-calls))))
+      (should (equal (alist-get 'description data) "")))))
+
 (ert-deftest bitbucket-test-split-diff-by-file ()
   (let* ((diff (concat
                 "diff --git a/src/a.ts b/src/a.ts\n"

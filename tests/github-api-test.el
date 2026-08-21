@@ -262,5 +262,27 @@ removes -- no delta requests."
       (should (github-set-pull-request-labels "acme/web" 42 '()))
       (should (equal (alist-get 'labels (nth 3 (car github-mock-calls))) [])))))
 
+(ert-deftest github-test-set-description-patches-only-the-body ()
+  "Editing the body is a plain PATCH -- no title, so nothing else changes.
+The Bitbucket backend has to resend the title because its update is a
+whole-object PUT; GitHub's is partial, so passing a title here would
+be noise at best and an unintended title edit at worst."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (github-set-pull-request-description "acme/web" 42 "New body" "Some Title")
+      (let ((call (car github-mock-calls)))
+        (should (equal (nth 0 call) "PATCH"))
+        (should (string-suffix-p "/repos/acme/web/pulls/42" (nth 1 call)))
+        (should (equal (alist-get 'body (nth 3 call)) "New body"))
+        ;; the title argument is accepted for signature parity and dropped
+        (should-not (assq 'title (nth 3 call)))))))
+
+(ert-deftest github-test-set-description-clears-with-empty-string ()
+  "Clearing sends \"\" rather than nil, which would encode as JSON null."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (github-set-pull-request-description "acme/web" 42 nil)
+      (should (equal (alist-get 'body (nth 3 (car github-mock-calls))) "")))))
+
 (provide 'github-api-test)
 ;;; github-api-test.el ends here

@@ -664,6 +664,16 @@ See `gp-pr-reviewers-async'."
       ("CHANGES_REQUESTED" 'changes)
       (_ nil))))
 
+(defun github-set-pull-request-description (full-name number description &optional _title)
+  "Set PR NUMBER in FULL-NAME's body to DESCRIPTION.
+Unlike the draft flag, this is plain REST: a PATCH with just `body'
+leaves the title and everything else untouched, so TITLE is accepted
+for signature parity with the Bitbucket backend and ignored.
+Requires Pull-requests:Write.  Returns the updated PR."
+  (github-api-request
+   "PATCH" (format "/repos/%s/pulls/%s" full-name number)
+   nil `((body . ,(or description "")))))
+
 (defun github-set-pull-request-draft (full-name number draft &optional _title)
   "Set PR NUMBER in FULL-NAME's draft flag to DRAFT.
 GitHub's REST API has no way to toggle draft state at all -- both

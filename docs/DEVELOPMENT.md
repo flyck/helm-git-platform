@@ -181,6 +181,7 @@ lowercase keypress while reading can't mutate anything:
 | `X` | Resolve / reopen the comment at point |
 | `K` | Delete the comment at point (see below) |
 | `V` | Add / remove reviewers on this PR |
+| `E` | Edit this PR's description (opens a compose buffer; empty clears it) |
 
 `K` offers itself on your own comments always. Deleting *other* people's
 comments needs elevated repository permissions that the APIs don't advertise,

@@ -175,6 +175,13 @@ linger (and doesn't carry stale content into the next compose)."
 
 ;;;; Submit / cancel ---------------------------------------------------------
 
+(defun gp-compose--noun (target)
+  "Return what TARGET composes -- \"comment\" unless it says otherwise.
+Lets the buffer's prompts and messages read correctly when the same
+editor is reused for something that is not a comment (a PR
+description, say) via TARGET's `:what'."
+  (or (plist-get target :what) "comment"))
+
 (defun gp-compose--do-submit (target text)
   "Send TEXT to the PR described by TARGET, returning the created comment.
 Honours TARGET's :submit-function, defaulting to
@@ -229,8 +236,19 @@ Lines that are blank, already end in two spaces, or sit inside a
         (target gp-compose--target)
         (winconf gp-compose--return-window))
     (when (string-empty-p text)
-      (user-error "Comment is empty"))
-    (when gp-compose-hard-line-breaks
+      ;; Clearing a description is a legitimate edit; an empty comment is
+      ;; always a slip.  Refuse the latter, confirm the former.
+      (if (plist-get target :allow-empty)
+          (unless (yes-or-no-p
+                   (format "%s is empty -- clear it? "
+                           (capitalize (gp-compose--noun target))))
+            (user-error "Aborted"))
+        (user-error "%s is empty" (capitalize (gp-compose--noun target)))))
+    ;; A target can opt out: hard-break munging suits chat-like comments,
+    ;; but rewriting the newlines of a long-lived document (a PR
+    ;; description) on every save slowly mangles tables and lists.
+    (when (and gp-compose-hard-line-breaks
+               (not (plist-get target :no-hard-breaks)))
       (setq text (gp-compose--apply-hard-breaks text)))
     (let ((created (gp-compose--do-submit target text)))
       (let ((on-success (plist-get target :on-success)))
@@ -238,25 +256,31 @@ Lines that are blank, already end in two spaces, or sit inside a
       (kill-buffer (current-buffer))
       (gp-compose--kill-preview-buffer)
       (when winconf (set-window-configuration winconf))
-      (message "Comment posted")
+      ;; a target with an :on-success of its own has already reported
+      (unless (plist-get target :on-success)
+        (message "%s posted" (capitalize (gp-compose--noun target))))
       created)))
 
 (defun gp-compose-cancel ()
   "Discard the composed comment and close the buffer."
   (interactive)
-  (let ((winconf gp-compose--return-window))
+  (let ((winconf gp-compose--return-window)
+        (noun (gp-compose--noun gp-compose--target)))
     (kill-buffer (current-buffer))
     (gp-compose--kill-preview-buffer)
     (when winconf (set-window-configuration winconf))
-    (message "Comment discarded")))
+    (message "%s discarded" (capitalize noun))))
 
 ;;;; Entry point -------------------------------------------------------------
 
 (defun gp-compose--describe-target (target)
   "Return a short human description of TARGET for the buffer header."
   (let ((inline (plist-get target :inline))
-        (parent (plist-get target :parent)))
-    (cond (parent (format "Reply on PR #%s" (plist-get target :id)))
+        (parent (plist-get target :parent))
+        (what (plist-get target :what)))
+    (cond (what (format "%s of PR #%s"
+                        (capitalize what) (plist-get target :id)))
+          (parent (format "Reply on PR #%s" (plist-get target :id)))
           (inline (format "Inline comment on %s:%s"
                           (car inline) (cdr inline)))
           (t (format "Comment on PR #%s" (plist-get target :id))))))
@@ -265,9 +289,15 @@ Lines that are blank, already end in two spaces, or sit inside a
 (defun gp-compose (target)
   "Open a compose buffer for a comment described by TARGET (a plist).
 TARGET keys: :full-name :id [:inline (PATH . LINE)] [:parent ID]
-[:submit-function FN] [:on-success FN].  See
-`gp-compose--target'."
-  (let ((buf (generate-new-buffer (gp--buffer-name "comment")))
+[:submit-function FN] [:on-success FN] [:initial-text TEXT]
+[:what NOUN] [:no-hard-breaks BOOL] [:allow-empty BOOL].  See
+`gp-compose--target'.
+
+The last four let the same editor serve something that is not a
+comment: `:what' names it in the header, prompts and messages;
+`:no-hard-breaks' keeps newlines verbatim; `:allow-empty' makes
+submitting nothing a confirmable clear rather than an error."
+  (let ((buf (generate-new-buffer (gp--buffer-name (gp-compose--noun target))))
         (winconf (current-window-configuration)))
     (with-current-buffer buf
       (gp-compose--base-mode)

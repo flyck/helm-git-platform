@@ -569,13 +569,37 @@ or `gp-invalidate-pr-caches' + a manual rerender\), same as today."
 Rendered through `gp--render-markdown' so it gets the same emoji,
 mention and link handling as comment bodies.  Backends disagree on
 the field name (Bitbucket `description', GitHub `body'), so the value
-comes from `gp-pr-description' rather than the alist directly."
-  (let ((desc (ignore-errors (gp-pr-description pr))))
-    (when desc
+comes from `gp-pr-description' rather than the alist directly.
+
+On an open PR the heading carries an edit button, the same way the
+reviewers and labels lines do, and the section appears even with no
+description yet -- that empty state is exactly when you need a way to
+write the first one, and it is where `E' would otherwise be invisible.
+A closed PR with no description still renders nothing at all: there is
+nothing to read and, since the forges only allow mutating an open PR,
+nothing to do either."
+  (let* ((desc (ignore-errors (gp-pr-description pr)))
+         (editable (gp-pr-open-p pr)))
+    (when (or desc editable)
       (magit-insert-section (gp-description nil gp-detail-description-collapsed)
-        (magit-insert-heading "Description")
+        ;; The button has to be inserted into THIS buffer: `insert-button'
+        ;; puts its properties in an overlay, and an overlay does not
+        ;; survive `buffer-string', so building the heading as a string
+        ;; first would silently yield plain text that merely looks like a
+        ;; button.  Insert the pieces, then close the heading with a bare
+        ;; `magit-insert-heading' (which just marks where the body starts).
+        (insert (propertize "Description" 'face 'magit-section-heading))
+        (when editable
+          (insert "   ")
+          (gp--insert-action-button
+           "✎ edit [E]" "Edit this PR's description"
+           (lambda () (gp-ui-edit-description pr))))
+        (insert "\n")
+        (magit-insert-heading)
         (let ((start (point)))
-          (insert (gp--render-markdown desc))
+          (insert (if desc
+                      (gp--render-markdown desc)
+                    (propertize "(no description yet)\n" 'face 'shadow)))
           (unless (bolp) (insert "\n"))
           ;; indent the body so it reads as belonging to the heading
           (indent-rigidly start (point) 2))
@@ -940,6 +964,7 @@ that is when you need a way to add the first one."
   "t"   #'gp-detail-send-to-terminal
   "X"   #'gp-detail-resolve
   "e"   #'gp-detail-edit
+  "E"   #'gp-detail-edit-description  ;; edit the PR's own description
   "f"   #'gp-detail-goto-comment
   "d"   #'gp-detail-show-diff
   "K"   #'gp-detail-delete        ;; delete a comment (see `gp-comment-delete-others')
@@ -962,6 +987,11 @@ that is when you need a way to add the first one."
   "Add or remove reviewers on the PR shown in this buffer."
   (interactive)
   (gp-ui-edit-reviewers gp--pr))
+
+(defun gp-detail-edit-description ()
+  "Edit the description of the PR shown in this buffer."
+  (interactive)
+  (gp-ui-edit-description gp--pr))
 
 (defun gp-detail-show-diff ()
   "Show the current PR's branch diff in Magit."
@@ -1256,6 +1286,41 @@ those is a privilege, and a misfire is not undoable."
     (if (and sec (object-of-class-p sec 'gp-comment-section))
         (gp-ui-goto-comment-file gp--pr (oref sec value))
       (user-error "Point is not on a comment"))))
+
+(defun gp-ui-edit-description (pr)
+  "Edit PR's description in a compose buffer, saving it back on submit.
+Reuses `gp-compose' (Markdown, emoji completion, C-c C-p preview) with
+the current description as the starting text, so this is the same
+editor comments get.  Hard-break munging is disabled: a description is
+a document rather than a chat message, and rewriting its newlines on
+every save would slowly mangle tables and lists."
+  (let* ((full-name (gp-pr-full-name pr))
+         (id (alist-get 'id pr))
+         (title (alist-get 'title pr))
+         (current (or (ignore-errors (gp-pr-description pr)) ""))
+         ;; `:on-success' runs in the *compose* buffer, where `gp--pr' is
+         ;; nil and `gp-detail-refresh' would no-op.  Capture the detail
+         ;; buffer by name now and redraw inside it, as `gp-ui-edit-comment'
+         ;; does.
+         (buf (gp--detail-buffer-name pr)))
+    (gp-compose
+     (list :full-name full-name
+           :id id
+           :initial-text current
+           :what "description"
+           ;; `gp-compose-submit' applies hard breaks before handing the
+           ;; text over, so the opt-out has to travel with the target.
+           :no-hard-breaks t
+           :allow-empty t          ;; clearing a description is a real edit
+           :submit-function
+           (lambda (fn pid text &rest _)
+             (gp-set-pull-request-description fn pid text title))
+           :on-success
+           (lambda (_updated)
+             (gp-invalidate-pr-caches pr)
+             (when (buffer-live-p (get-buffer buf))
+               (with-current-buffer buf (gp-detail-refresh)))
+             (message "PR #%s description updated" id))))))
 
 (defun gp-ui-set-draft (pr draft)
   "Set PR's draft flag to DRAFT, then refresh the detail buffer."

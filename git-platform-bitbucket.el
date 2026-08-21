@@ -80,6 +80,8 @@
   (bitbucket-repo-default-reviewers full-name))
 (cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-bitbucket) full-name)
   (bitbucket-repo-suggested-reviewers full-name))
+(cl-defmethod gp--set-pull-request-description ((_ git-platform-bitbucket) full-name id description &optional title)
+  (bitbucket-set-pull-request-description full-name id description title))
 (cl-defmethod gp--set-pull-request-reviewers ((_ git-platform-bitbucket)
                                               full-name id reviewer-ids
                                               &optional _current-ids)

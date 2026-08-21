@@ -491,6 +491,13 @@ discard an approval."
                     (list title id)))
   (gp--pull-request (git-platform-backend) full-name id))
 
+(cl-defmethod gp--set-pull-request-description ((_ git-platform-mock) full-name id
+                                                description &optional _title)
+  (sqlite-execute (gp-mock--db)
+                  "UPDATE prs SET description = ?, updated_on = ? WHERE id = ?"
+                  (list (or description "") (gp-mock--iso) id))
+  (gp--pull-request (git-platform-backend) full-name id))
+
 ;;;; Protocol: diff and stats -----------------------------------------------------
 
 (defun gp-mock--diff (full-name id)

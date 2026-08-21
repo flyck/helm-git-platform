@@ -195,5 +195,90 @@ freezing the editor's wrap points into the published comment."
         (should (equal (buffer-string) line))
         (should-not (string-match-p "\n" (buffer-string)))))))
 
+;;;; Reusing the editor for something that isn't a comment ------------------
+
+(ert-deftest gp-test-compose-noun-defaults-to-comment ()
+  "`:what' renames what the buffer thinks it is editing."
+  (should (equal (gp-compose--noun '(:id 1)) "comment"))
+  (should (equal (gp-compose--noun '(:id 1 :what "description")) "description")))
+
+(ert-deftest gp-test-compose-describe-target-uses-what ()
+  "A `:what' target gets its own header, not \"Comment on …\"."
+  (should (equal (gp-compose--describe-target '(:id 7 :what "description"))
+                 "Description of PR #7"))
+  ;; unchanged for the comment cases
+  (should (equal (gp-compose--describe-target '(:id 7)) "Comment on PR #7"))
+  (should (equal (gp-compose--describe-target '(:id 7 :parent 3))
+                 "Reply on PR #7")))
+
+(ert-deftest gp-test-compose-no-hard-breaks-target-keeps-newlines ()
+  "`:no-hard-breaks' suppresses the hard-break rewrite on submit.
+A PR description is a document: appending \"  \" to its every line on
+each save would slowly mangle tables and lists.  This guards the
+opt-out travelling on the target, since `gp-compose-submit' applies
+the rewrite before the `:submit-function' ever sees the text."
+  (let (sent)
+    (with-temp-buffer
+      (insert "line one
+line two")
+      (setq gp-compose--target
+            (list :full-name "ws/repo" :id 7 :what "description"
+                  :no-hard-breaks t
+                  :submit-function (lambda (_fn _id text &rest _)
+                                     (setq sent text) '((id . 1))))
+            gp-compose--return-window nil)
+      (gp-compose-submit))
+    (should (equal sent "line one
+line two"))
+    (should-not (string-match-p "  
+" sent))))
+
+(ert-deftest gp-test-compose-hard-breaks-still-apply-without-the-opt-out ()
+  "The default (comment) path is unchanged by the opt-out's existence."
+  (let (sent)
+    (with-temp-buffer
+      (insert "line one
+line two")
+      (setq gp-compose--target
+            (list :full-name "ws/repo" :id 7
+                  :submit-function (lambda (_fn _id text &rest _)
+                                     (setq sent text) '((id . 1))))
+            gp-compose--return-window nil)
+      (gp-compose-submit))
+    (should (equal sent "line one  
+line two"))))
+
+(ert-deftest gp-test-compose-empty-is-an-error-but-clearable-with-allow-empty ()
+  "Empty text aborts a comment, but can clear an `:allow-empty' target."
+  ;; a comment: refused outright, no confirmation offered
+  (with-temp-buffer
+    (setq gp-compose--target '(:full-name "ws/repo" :id 7)
+          gp-compose--return-window nil)
+    (should-error (gp-compose-submit) :type 'user-error))
+  ;; a description: confirmed, then sent as an empty string
+  (let (sent called)
+    (with-temp-buffer
+      (setq gp-compose--target
+            (list :full-name "ws/repo" :id 7 :what "description"
+                  :allow-empty t
+                  :submit-function (lambda (_fn _id text &rest _)
+                                     (setq sent text called t) '((id . 1))))
+            gp-compose--return-window nil)
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (gp-compose-submit)))
+    (should called)
+    (should (equal sent "")))
+  ;; declining the confirmation sends nothing at all
+  (let (called)
+    (with-temp-buffer
+      (setq gp-compose--target
+            (list :full-name "ws/repo" :id 7 :what "description"
+                  :allow-empty t
+                  :submit-function (lambda (&rest _) (setq called t) nil))
+            gp-compose--return-window nil)
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+        (should-error (gp-compose-submit) :type 'user-error)))
+    (should-not called)))
+
 (provide 'gp-compose-test)
 ;;; gp-compose-test.el ends here

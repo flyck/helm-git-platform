@@ -63,6 +63,8 @@
   (github-edit-comment full-name id comment-id text))
 (cl-defmethod gp--delete-comment ((_ git-platform-github) full-name id comment-id)
   (github-delete-comment full-name id comment-id))
+(cl-defmethod gp--set-pull-request-description ((_ git-platform-github) full-name id description &optional title)
+  (github-set-pull-request-description full-name id description title))
 (cl-defmethod gp--set-pull-request-draft ((_ git-platform-github) full-name id draft &optional title)
   (github-set-pull-request-draft full-name id draft title))
 (cl-defmethod gp--approve-pr ((_ git-platform-github) full-name id &optional unapprove reason)

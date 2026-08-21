@@ -691,6 +691,17 @@ not given).  Requires Pull-requests:Write.  Returns the updated PR."
      "PUT" (format "/repositories/%s/pullrequests/%s" full-name id)
      nil `((title . ,title) (draft . ,(if draft t :json-false))))))
 
+(defun bitbucket-set-pull-request-description (full-name id description &optional title)
+  "Set the description of PR ID in FULL-NAME to DESCRIPTION.
+PUT replaces the PR, so TITLE is sent to preserve it (fetched when
+not given), for the same reason `bitbucket-set-pull-request-draft'
+does.  Bitbucket only allows mutating OPEN pull requests.  Requires
+Pull-requests:Write.  Returns the updated PR."
+  (let ((title (or title (alist-get 'title (bitbucket-pull-request full-name id)))))
+    (bitbucket-api-request
+     "PUT" (format "/repositories/%s/pullrequests/%s" full-name id)
+     nil `((title . ,title) (description . ,(or description ""))))))
+
 (defun bitbucket-set-pull-request-reviewers (full-name id reviewer-uuids)
   "Set PR ID in FULL-NAME's reviewers to exactly REVIEWER-UUIDS.
 The endpoint is a whole-object PUT: the `reviewers' array it receives
