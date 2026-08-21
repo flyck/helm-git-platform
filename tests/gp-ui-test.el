@@ -197,6 +197,72 @@ would break RET on a commit."
   (cl-letf (((symbol-function 'magit-current-section) (lambda () nil)))
     (should-error (gp-detail-show-commit) :type 'user-error)))
 
+(defmacro gp-test--with-changed-files (files &rest body)
+  "Render FILES as the changed-files section in a detail buffer, run BODY."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (gp-detail-mode)
+     (setq gp--detail-stats (list :file-list ,files))
+     (let ((inhibit-read-only t))
+       (magit-insert-section (gp-root)
+         (gp--insert-changed-files)))
+     ,@body))
+
+(defconst gp-test--file-list
+  '((:path "scripts/wscat.sh" :added 12 :removed 3 :status "modified")
+    (:path "docs/graphql.md" :added 40 :removed 0 :status "added"))
+  "Two changed-file plists, as `gp--detail-stats' carries them.")
+
+(defun gp-test--goto-file-line (name)
+  "Move point to the start of the line rendering file NAME."
+  (goto-char (point-min))
+  (should (search-forward name nil t))
+  (beginning-of-line))
+
+(ert-deftest gp-test-file-path-anywhere-on-the-line ()
+  "The path resolves from any column of the file's line, not just the name.
+Only the name is buttonised, so requiring point to sit on the button
+made RET miss from the indentation and the +N/-N stat columns."
+  (gp-test--with-changed-files gp-test--file-list
+    (gp-test--goto-file-line "scripts/wscat.sh")
+    (let ((eol (line-end-position)))
+      ;; every column of the line, indentation and stats included
+      (while (<= (point) eol)
+        (should (equal (gp--file-path-at-line) "scripts/wscat.sh"))
+        (forward-char 1)))))
+
+(ert-deftest gp-test-file-path-stays-on-its-own-line ()
+  "Each file line resolves to its own path; other lines resolve to nil."
+  (gp-test--with-changed-files gp-test--file-list
+    (gp-test--goto-file-line "docs/graphql.md")
+    (should (equal (gp--file-path-at-line) "docs/graphql.md"))
+    ;; the heading line carries no file button
+    (goto-char (point-min))
+    (should-not (gp--file-path-at-line))
+    ;; nor does the blank line closing the section (point-max is on it)
+    (goto-char (point-max))
+    (beginning-of-line)
+    (should-not (gp--file-path-at-line))))
+
+(ert-deftest gp-test-detail-ret-opens-file-from-the-stat-columns ()
+  "RET past the file name still opens the file instead of folding the section."
+  (gp-test--with-changed-files gp-test--file-list
+    (let (opened)
+      (cl-letf (((symbol-function 'gp-ui-open-file)
+                 (lambda (_pr path) (setq opened path)))
+                ((symbol-function 'magit-section-toggle)
+                 (lambda (&rest _) (interactive) (setq opened 'toggled))))
+        (gp-test--goto-file-line "scripts/wscat.sh")
+        (end-of-line)                   ;; well past the buttonised name
+        (gp-detail-ret)
+        (should (equal opened "scripts/wscat.sh"))))))
+
+(ert-deftest gp-test-detail-visit-file-errors-off-a-file-line ()
+  "Away from any file line it reports rather than opening something."
+  (gp-test--with-changed-files gp-test--file-list
+    (goto-char (point-min))             ;; the "Changed files (2)" heading
+    (should-error (gp-detail-visit-file) :type 'user-error)))
+
 (ert-deftest gp-test-detail-show-commit-is-bound-to-a-lowercase-key ()
   "Read-only actions stay lowercase; capitals are reserved for writes."
   (should (eq (lookup-key gp-detail-mode-map "v") #'gp-detail-show-commit))
