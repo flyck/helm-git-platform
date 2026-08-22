@@ -1081,6 +1081,221 @@ order it happened to see locally."
                        (overlay-start o) (overlay-end o)))
           (gp-test--buttons)))
 
+;;;; Merge affordance -----------------------------------------------------------
+
+(ert-deftest gp-test-merge-button-shown-when-mergeable ()
+  "A clean open PR offers the merge button and no warning."
+  (let ((pr (car (gp-test--mock-prs))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--detail-mergeability '(t . "clean"))
+        (let ((inhibit-read-only t)) (gp--render-detail pr nil))
+        (let ((txt (substring-no-properties (buffer-string))))
+          (should (string-match-p "Merge \\[M\\]" txt))
+          (should-not (string-match-p "Cannot merge" txt)))))))
+
+(ert-deftest gp-test-merge-blocked-and-warned-on-conflict ()
+  "A conflicted PR replaces the button with the reason, and warns above.
+The state is the useful part: leaving a live button to fail on click
+tells the user nothing about why."
+  (let ((pr (car (gp-test--mock-prs))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--detail-mergeability '(nil . "dirty"))
+        (let ((inhibit-read-only t)) (gp--render-detail pr nil))
+        (let ((txt (substring-no-properties (buffer-string))))
+          (should (string-match-p "Cannot merge: conflicts with" txt))
+          (should (string-match-p "dirty" txt))
+          ;; the action simply goes away; the warning above is the one place
+          ;; the reason is stated
+          (should-not (string-match-p "Merge \\[M\\]" txt)))))))
+
+(ert-deftest gp-test-merge-not-blocked-when-mergeability-unknown ()
+  "`unknown' and nil must not warn or hide the button.
+GitHub answers `unknown' until it has judged, and Bitbucket cannot
+answer at all -- treating either as a conflict would block merging a
+perfectly clean PR and show a warning about a problem that may not
+exist."
+  (let ((pr (car (gp-test--mock-prs))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (dolist (m '((unknown . "unknown") nil))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (setq gp--detail-mergeability m)
+          (let ((inhibit-read-only t)) (gp--render-detail pr nil))
+          (let ((txt (substring-no-properties (buffer-string))))
+            (should (string-match-p "Merge \\[M\\]" txt))
+            (should-not (string-match-p "Cannot merge" txt))))))))
+
+(ert-deftest gp-test-merge-affordance-absent-on-closed-pr ()
+  "A merged/declined PR offers no merge action at all."
+  (let ((pr (append '((state . "MERGED")) (car (gp-test--mock-prs)))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--detail-mergeability '(t . "clean"))
+        (let ((inhibit-read-only t)) (gp--render-detail pr nil))
+        (should-not (string-match-p "Merge \\[M\\]"
+                                    (substring-no-properties (buffer-string))))))))
+
+(ert-deftest gp-test-outcome-banner-states-the-result ()
+  "A closed PR announces MERGED or DECLINED; an open one says nothing.
+An open PR's state is the whole detail view, so a banner there would be
+noise -- the outcome only becomes the headline once it is decided."
+  (cl-labels ((banner (pr)
+                (with-temp-buffer
+                  (gp-detail-mode)
+                  (let ((inhibit-read-only t)) (gp--insert-outcome-banner pr))
+                  (substring-no-properties (buffer-string)))))
+    (let ((base (car (gp-test--mock-prs))))
+      ;; open -> nothing at all
+      (should (equal (banner base) ""))
+      ;; merged -> MERGED
+      (let ((merged (append '((state . "MERGED")) base)))
+        (should (string-match-p "MERGED" (banner merged)))
+        (should-not (string-match-p "DECLINED" (banner merged))))
+      ;; declined -> DECLINED
+      (let ((declined (append '((state . "DECLINED")) base)))
+        (should (string-match-p "DECLINED" (banner declined)))))))
+
+(ert-deftest gp-test-outcome-banner-shows-a-decline-reason-when-there-is-one ()
+  "A declined PR shows its reason where the backend keeps one.
+Bitbucket carries a free-text `reason'; GitHub has none, and must simply
+show no reason rather than an empty line."
+  (cl-labels ((banner (pr)
+                (with-temp-buffer
+                  (gp-detail-mode)
+                  (let ((inhibit-read-only t)) (gp--insert-outcome-banner pr))
+                  (substring-no-properties (buffer-string)))))
+    (let ((base (car (gp-test--mock-prs))))
+      (let ((with-reason (append '((state . "DECLINED")
+                                   (reason . "superseded by #12"))
+                                 base)))
+        (should (string-match-p "superseded by #12" (banner with-reason))))
+      ;; no reason -> just the banner, no stray blank line claiming one
+      (let ((without (append '((state . "DECLINED")) base)))
+        (should (string-match-p "DECLINED" (banner without)))
+        (should-not (string-match-p "superseded" (banner without))))
+      ;; a merged PR never shows a reason even if the field is present
+      (let ((merged (append '((state . "MERGED") (reason . "ignored")) base)))
+        (should-not (string-match-p "ignored" (banner merged)))))))
+
+(ert-deftest gp-test-merge-pipelines-omit-other-commits-runs ()
+  "Only the merge commit's own run is shown, not the branch's history.
+`:recent' is every other run on the destination branch -- everything
+else that landed on main -- which has nothing to do with this PR."
+  (let ((pr (append '((state . "MERGED")) (car (gp-test--mock-prs))))
+        (shown nil))
+    (cl-letf (((symbol-function 'gp--insert-pipelines)
+               (lambda (data) (setq shown data))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--detail-merge-pipelines
+              '(:current ((mine . nil)) :recent ((other . nil) (another . nil))))
+        (let ((inhibit-read-only t)) (gp--insert-merge-pipelines pr))))
+    (should (equal (plist-get shown :current) '((mine . nil))))
+    (should-not (plist-get shown :recent))))
+
+(ert-deftest gp-test-merge-pipelines-shown-only-on-a-merged-pr ()
+  "The destination-branch run appears on a merged PR and nowhere else.
+After a merge the interesting build is the one on the merge commit --
+that is what deploys -- and it lives on the destination branch, so the
+PR-branch fetch never sees it."
+  ;; ((PIPELINE . STEPS) …).  Bitbucket nests the state, so it is
+  ;; `.state.name' / `.state.result.name', not plain strings.
+  (let ((data (list :current
+                    (list (cons '((uuid . "{p1}") (build_number . 1)
+                                  (state (name . "COMPLETED")
+                                         (result (name . "SUCCESSFUL"))))
+                                nil))
+                    :recent nil)))
+    ;; merged -> shown, naming the destination branch
+    (let ((pr (append '((state . "MERGED")) (car (gp-test--mock-prs)))))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (setq gp--detail-merge-pipelines data)
+          (let ((inhibit-read-only t)) (gp--insert-merge-pipelines pr))
+          (should (string-match-p "After merge"
+                                  (substring-no-properties (buffer-string)))))))
+    ;; still open -> nothing, even with data cached
+    (let ((pr (car (gp-test--mock-prs))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--detail-merge-pipelines data)
+        (let ((inhibit-read-only t)) (gp--insert-merge-pipelines pr))
+        (should (equal (buffer-string) ""))))))
+
+(ert-deftest gp-test-conflict-warning-offers-the-terminal-handoff ()
+  "The warning carries a button to hand the conflict to the AI session."
+  (let ((pr (car (gp-test--mock-prs)))
+        (called nil))
+    (cl-letf (((symbol-function 'gp-ui-send-conflict-to-terminal)
+               (lambda (_pr) (setq called t))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--detail-mergeability '(nil . "dirty"))
+        (let ((inhibit-read-only t)) (gp--insert-merge-conflict-warning pr))
+        (let ((b (seq-find (lambda (o) (overlay-get o 'button))
+                           (overlays-in (point-min) (point-max)))))
+          (should b)
+          (should (equal (buffer-substring-no-properties
+                          (overlay-start b) (overlay-end b))
+                         "resolve in terminal [t]"))
+          (funcall (overlay-get b 'action) b)
+          (should called))))))
+
+(ert-deftest gp-test-t-is-context-aware-on-the-conflict-warning ()
+  "`t' hands over the conflict on the warning, a comment elsewhere.
+A single global binding used to assume a comment at point, so pressing
+`t' on the warning failed with \"Point is not on a comment\"."
+  (let ((pr (car (gp-test--mock-prs)))
+        (sent nil))
+    (cl-letf (((symbol-function 'gp-ui-send-conflict-to-terminal)
+               (lambda (_pr) (setq sent 'conflict)))
+              ((symbol-function 'gp-ui-send-comment-to-terminal)
+               (lambda (&rest _) (setq sent 'comment)))
+              ((symbol-function 'gp-detail--comment-at-point)
+               (lambda () '((id . 1)))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--pr pr
+              gp--detail-mergeability '(nil . "dirty"))
+        (let ((inhibit-read-only t))
+          (gp--insert-merge-conflict-warning pr)
+          (insert "elsewhere\n"))
+        ;; inside the warning -> the conflict
+        (goto-char (point-min))
+        (gp-detail-send-to-terminal)
+        (should (eq sent 'conflict))
+        ;; past it -> the ordinary comment handoff
+        (setq sent nil)
+        (goto-char (point-max))
+        (forward-line -1)
+        (gp-detail-send-to-terminal)
+        (should (eq sent 'comment))))))
+
+(ert-deftest gp-test-conflict-warning-names-how-far-behind ()
+  "The behind count is shown when known, and omitted when not.
+A zero would claim the branch is up to date when the truth is that the
+backend cannot say (Bitbucket has no ahead/behind counts)."
+  (let ((pr (car (gp-test--mock-prs))))
+    (cl-labels ((warning-text (divergence)
+                  (with-temp-buffer
+                    (gp-detail-mode)
+                    (setq gp--detail-mergeability '(nil . "dirty")
+                          gp--detail-divergence divergence)
+                    (let ((inhibit-read-only t))
+                      (gp--insert-merge-conflict-warning pr))
+                    (substring-no-properties (buffer-string)))))
+      (should (string-match-p "17 commits behind" (warning-text '(3 . 17))))
+      (should (string-match-p "1 commit behind" (warning-text '(1 . 1))))
+      ;; unknown, or genuinely level -> no claim either way
+      (should-not (string-match-p "behind" (warning-text nil)))
+      (should-not (string-match-p "behind" (warning-text '(3 . 0)))))))
+
 ;;;; General comments -----------------------------------------------------------
 
 (ert-deftest gp-test-comments-heading-offers-a-general-comment-button ()

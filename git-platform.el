@@ -131,6 +131,38 @@ avoid.")
   "Delete COMMENT-ID on PR FULL-NAME/ID.")
 (gp-defop set-pull-request-draft (full-name id draft &optional title)
   "Set PR FULL-NAME/ID draft flag to DRAFT.")
+(gp-defop pull-request-merge-strategies (full-name id)
+  "Return (STRATEGIES . DEFAULT) permitted for PR FULL-NAME/ID, or nil.
+STRATEGIES is a list of opaque backend tokens; DEFAULT is the one the
+forge would apply on its own.  Both come from the forge rather than a
+local guess: Bitbucket permits a per-destination-branch subset of six
+strategies (with its own default), GitHub a per-repository subset of
+three.  Nil means the question could not be answered, in which case
+callers should merge without naming a strategy and let the forge decide.")
+
+(gp-defop pull-request-mergeability (full-name id)
+  "Return (MERGEABLE . STATE) for PR FULL-NAME/ID, or nil.
+MERGEABLE is t when the forge says it will merge cleanly, nil when it
+reports conflicts, and `unknown' when it has not decided yet.  STATE is
+a backend word for display.  Nil overall means the backend cannot answer
+-- Bitbucket Cloud's PR payload has no mergeability field -- in which
+case callers must not block the merge on it.")
+
+(gp-defop pull-request-divergence (full-name base head)
+  "Return (AHEAD . BEHIND) commit counts of HEAD against BASE, or nil.
+BEHIND is how far behind BASE the branch is.  Nil means the backend
+cannot say -- Bitbucket Cloud exposes diffs but no ahead/behind counts --
+so callers must simply omit the information rather than show a zero.")
+
+(gp-defop merge-pull-request (full-name id &optional strategy message close-source-branch)
+  "Merge PR FULL-NAME/ID and return the backend's result.
+STRATEGY is one of `gp-pull-request-merge-strategies' (nil lets the forge
+apply its default).  MESSAGE overrides the merge commit message.
+CLOSE-SOURCE-BRANCH asks the forge to delete the source branch; where a
+backend has no per-merge control (GitHub decides by repository setting)
+it is ignored.  Either way the forge owns the remote branch -- callers
+must never delete it themselves.")
+
 (gp-defop set-pull-request-description (full-name id description &optional title)
   "Set PR FULL-NAME/ID's description/body to DESCRIPTION.
 TITLE is an optimisation for backends whose update is a whole-object
@@ -252,6 +284,16 @@ clear `user-error' instead of silently no-oping.")
   "Return PR's source (head) commit hash, or nil.")
 (gp-defop pr-destination-branch (pr)
   "Return PR's destination (base) branch name.")
+(gp-defop pr-web-url (pr)
+  "Return the browser URL for PR, or nil.
+Bitbucket nests it at `links.html.href'; GitHub has a flat `html_url'.
+Reading either directly works on one forge only -- on the other it is
+nil and \"open in browser\" fails with nothing to show.")
+
+(gp-defop comment-web-url (comment)
+  "Return the browser URL for COMMENT, or nil.
+Same per-forge split as `pr-web-url'.")
+
 (gp-defop pr-draft-p (pr)
   "Return non-nil if PR is a draft.")
 (gp-defop pr-authored-by-p (pr uuid)
@@ -265,6 +307,25 @@ clear `user-error' instead of silently no-oping.")
 Bitbucket's PR `state' is uppercase (\"OPEN\"); GitHub's is lowercase
 (\"open\") -- this exists so callers never compare `state' as a raw
 string against a platform-specific literal.")
+(gp-defop pr-closed-reason (pr)
+  "Return the reason a PR was declined/closed, or nil.
+Bitbucket carries a free-text `reason' on a declined PR.  GitHub has no
+such field -- a closed PR's explanation lives in a comment -- so its
+backend returns nil and callers simply show no reason.")
+
+(gp-defop pr-merged-at (pr)
+  "Return when PR was merged, as an ISO-8601 string, or nil.
+GitHub states it outright (`merged_at').  Bitbucket has no such field,
+so its backend falls back to `updated_on' -- the last activity, which
+for a merged PR is normally the merge itself but can be later if someone
+comments afterwards.  Good enough to group by day, not to trust to the
+second.")
+
+(gp-defop pr-merge-commit (pr)
+  "Return the commit a merged PR landed as on its destination branch, or nil.
+The build worth watching after a merge runs on this commit, not on the
+PR branch's last one -- that is the run that deploys.")
+
 (gp-defop pr-merged-p (pr)
   "Return non-nil if PR was merged.
 Bitbucket reports this as `state' = \"MERGED\"; GitHub as a separate

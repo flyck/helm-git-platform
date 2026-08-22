@@ -22,20 +22,6 @@ and the README has to explain the split in a table.  Decide what the
 package should actually do -- declare them, or `use-package' extras the
 recipe can pull -- instead of documenting a manual step.
 
-## Merge button
-
-Merge a PR from the detail view.  The catch is the strategy:
-
-- GitHub lets you pick per PR (merge / squash / rebase), and a repo can
-  disable some of them -- so offer the choice, but only among the ones the
-  repo actually allows.
-- Bitbucket also allows a per-PR choice in principle, but our projects
-  enforce a workspace-wide fast-forward-only policy, so there is nothing
-  to ask about -- prompting would be noise.
-
-So the strategy is a backend question, not a UI one: ask the backend what
-it offers and only prompt when there is more than one answer.
-
 ## Close a PR, with an optional reason
 
 Close/decline a PR from the detail view without merging it.  As with the
@@ -49,6 +35,34 @@ merge button, the shape differs per forge:
 
 So the reason is optional and backend-dependent: ask what reasons the
 backend accepts and skip the prompt entirely when it has none.
+
+## Bitbucket conflict detection needs different credentials
+
+Conflicts are detected on GitHub (`mergeable_state' "dirty") but not on
+Bitbucket: its PR payload has no such field, and the
+`GET .../pullrequests/{id}/conflicts' endpoint 302s to
+`.../file-conflicts/{spec}', which rejects Atlassian API-token auth with
+403 ("This resource does not support authentication using the provided
+token") where ordinary PR reads answer 200 on the same credentials.
+Would need an app password / OAuth to be usable.
+
+## Exclude generated files from the changed-lines counter
+
+Lockfiles swamp the `+N -M' counts and the changed-files list -- a
+one-line change reads as +4000 when `Pipfile.lock' moved.  Add a pattern
+list of paths to leave out of the counter (still listed, just not counted,
+or hidden entirely -- decide which reads better), defaulting to
+`Pipfile.lock' and the obvious siblings (`poetry.lock',
+`package-lock.json', `yarn.lock', `go.sum', `Cargo.lock').
+
+## Fold "recent runs" into the commits list
+
+The "Recent runs on this branch (N)" block is noise: it repeats the same
+commit summary four times with a status each, and nothing is actionable
+there.  Drop it and instead put each run's status and pipeline number
+beside its commit in the Commits section -- one line per commit, carrying
+the build result.  Keep the merge-commit run (see the merged-PR section),
+which is a different question.
 
 ## Pipeline steps are not properly integrated with GitHub
 

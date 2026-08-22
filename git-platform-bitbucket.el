@@ -94,6 +94,21 @@
   (bitbucket-repo-default-reviewers full-name))
 (cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-bitbucket) full-name)
   (bitbucket-repo-suggested-reviewers full-name))
+(cl-defmethod gp--pull-request-merge-strategies ((_ git-platform-bitbucket) full-name id)
+  (bitbucket-pull-request-merge-strategies full-name id))
+;; Bitbucket Cloud's PR payload carries no mergeability field.  There is a
+;; `.../pullrequests/{id}/conflicts' endpoint, but it 302s to
+;; `.../file-conflicts/{spec}', which rejects Atlassian API-token auth with
+;; 403 ("This resource does not support authentication using the provided
+;; token") while ordinary PR reads succeed on the same credentials -- so it
+;; is unreachable with the credentials this package uses.  Returning nil
+;; means "cannot answer", which callers must not treat as a conflict.
+(cl-defmethod gp--pull-request-mergeability ((_ git-platform-bitbucket) _full-name _id) nil)
+;; Bitbucket Cloud has diff/diffstat but no ahead/behind commit counts.
+(cl-defmethod gp--pull-request-divergence ((_ git-platform-bitbucket) _fn _base _head) nil)
+(cl-defmethod gp--merge-pull-request ((_ git-platform-bitbucket) full-name id
+                                      &optional strategy message close-source-branch)
+  (bitbucket-merge-pull-request full-name id strategy message close-source-branch))
 (cl-defmethod gp--set-pull-request-description ((_ git-platform-bitbucket) full-name id description &optional title)
   (bitbucket-set-pull-request-description full-name id description title))
 (cl-defmethod gp--set-pull-request-reviewers ((_ git-platform-bitbucket)
@@ -161,6 +176,10 @@
   (let-alist pr .source.commit.hash))
 (cl-defmethod gp--pr-destination-branch ((_ git-platform-bitbucket) pr)
   (let-alist pr .destination.branch.name))
+(cl-defmethod gp--pr-web-url ((_ git-platform-bitbucket) pr)
+  (let-alist pr .links.html.href))
+(cl-defmethod gp--comment-web-url ((_ git-platform-bitbucket) comment)
+  (let-alist comment .links.html.href))
 (cl-defmethod gp--pr-draft-p ((_ git-platform-bitbucket) pr)
   (bitbucket-pr-draft-p pr))
 (cl-defmethod gp--pr-authored-by-p ((_ git-platform-bitbucket) pr uuid)
@@ -171,6 +190,14 @@
   (let-alist pr .author.links.avatar.href))
 (cl-defmethod gp--pr-open-p ((_ git-platform-bitbucket) pr)
   (and (member (alist-get 'state pr) '("OPEN" nil)) t))
+(cl-defmethod gp--pr-closed-reason ((_ git-platform-bitbucket) pr)
+  (let ((r (alist-get 'reason pr)))
+    (unless (or (null r) (string-empty-p (string-trim r))) r)))
+(cl-defmethod gp--pr-merged-at ((_ git-platform-bitbucket) pr)
+  ;; no `merged_at'; `updated_on' is the closest thing Bitbucket offers
+  (alist-get 'updated_on pr))
+(cl-defmethod gp--pr-merge-commit ((_ git-platform-bitbucket) pr)
+  (let-alist pr .merge_commit.hash))
 (cl-defmethod gp--pr-merged-p ((_ git-platform-bitbucket) pr)
   (equal (alist-get 'state pr) "MERGED"))
 (cl-defmethod gp--pr-repo-slug ((_ git-platform-bitbucket) pr)

@@ -691,6 +691,45 @@ not given).  Requires Pull-requests:Write.  Returns the updated PR."
      "PUT" (format "/repositories/%s/pullrequests/%s" full-name id)
      nil `((title . ,title) (draft . ,(if draft t :json-false))))))
 
+(defconst bitbucket-merge-strategies
+  '("merge_commit" "squash" "fast_forward"
+    "squash_fast_forward" "rebase_fast_forward" "rebase_merge")
+  "Every merge strategy Bitbucket Cloud's merge endpoint accepts.
+A repository permits a subset of these per destination branch; ask the
+PR rather than assuming (see `bitbucket-pull-request-merge-strategies').")
+
+(defun bitbucket-pull-request-merge-strategies (full-name id)
+  "Return (STRATEGIES . DEFAULT) permitted for PR ID in FULL-NAME.
+Both live on the destination branch, and neither is returned unless
+asked for explicitly -- the default PR payload carries only the branch
+`name', so this re-fetches with a `fields' selector.  Returns nil when
+the fields are unavailable, so callers fall back rather than guess."
+  (let* ((r (ignore-errors
+              (bitbucket-api-request
+               "GET" (format "/repositories/%s/pullrequests/%s" full-name id)
+               '(("fields" . "+destination.branch.merge_strategies,+destination.branch.default_merge_strategy")))))
+         (strategies (let-alist r .destination.branch.merge_strategies))
+         (default (let-alist r .destination.branch.default_merge_strategy)))
+    (when strategies
+      (cons (append strategies nil) default))))
+
+(defun bitbucket-merge-pull-request (full-name id &optional strategy message close-source-branch)
+  "Merge PR ID in FULL-NAME, returning the updated pull request.
+STRATEGY is one of `bitbucket-merge-strategies' (nil lets Bitbucket
+apply the destination branch's own default).  MESSAGE overrides the
+merge commit message.  CLOSE-SOURCE-BRANCH asks Bitbucket to delete the
+source branch afterwards -- it does that itself, so callers must not
+also delete the remote branch.  Requires Pull-requests:Write."
+  (when (and strategy (not (member strategy bitbucket-merge-strategies)))
+    (error "Not a Bitbucket merge strategy: %s" strategy))
+  (bitbucket-api-request
+   "POST" (format "/repositories/%s/pullrequests/%s/merge" full-name id)
+   nil
+   (append '((type . "pullrequest"))
+           (when strategy `((merge_strategy . ,strategy)))
+           (when (and message (not (string-empty-p message))) `((message . ,message)))
+           (when close-source-branch '((close_source_branch . t))))))
+
 (defun bitbucket-set-pull-request-description (full-name id description &optional title)
   "Set the description of PR ID in FULL-NAME to DESCRIPTION.
 PUT replaces the PR, so TITLE is sent to preserve it (fetched when

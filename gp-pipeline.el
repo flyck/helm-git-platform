@@ -501,9 +501,18 @@ The fan-outs (steps per current run, commit message per recent run)
 run concurrently and a shared counter fires CALLBACK once the last
 one lands.  CALLBACK gets nil if the branch fetch itself failed --
 the caller treats that like the synchronous nil (keeps stale data)."
-  (let ((full-name (gp-pr-full-name pr))
-        (branch (gp-pr-source-branch pr))
-        (commit (gp-pr-source-commit pr)))
+  (gp-pipeline-fetch-for-branch-async
+   (gp-pr-full-name pr) (gp-pr-source-branch pr) (gp-pr-source-commit pr) callback))
+
+(defun gp-pipeline-fetch-for-branch-async (full-name branch commit callback)
+  "Fetch BRANCH's pipeline data in FULL-NAME; CALLBACK gets the plist.
+COMMIT is the commit whose runs count as `:current'.  Split out of
+`gp-pipeline-fetch-for-pr-async' so a merged PR can ask the same
+question about its DESTINATION branch and merge commit -- the run that
+actually deploys."
+  (let ((full-name full-name)
+        (branch branch)
+        (commit commit))
     (gp-pipelines-for-branch-async
      full-name branch gp-pipeline-max nil
      (lambda (all)

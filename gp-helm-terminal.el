@@ -233,6 +233,48 @@ terminal session instead of aborting the handoff."
        (_ (user-error "Unknown terminal action: %S" (plist-get plan :action)))))
     (_ (user-error "Unsupported terminal backend: %S" gp-helm-terminal-backend))))
 
+(defcustom gp-helm-terminal-conflict-prompt
+  "please resolve the merge conflicts with %s by rebasing this branch onto it, keeping both sides' intent where they overlap"
+  "Prompt sent to the terminal session to resolve a PR's merge conflicts.
+A single %s, if present, is replaced by the destination branch name.
+Sent with the same repo/PR context every terminal handoff carries."
+  :type 'string :group 'bitbucket)
+
+(defun gp-helm-terminal-send-text (pr text)
+  "Send TEXT to PR's terminal session, opening or reusing it as needed.
+The comment handoffs build their own prompt and then come through here;
+this is the entry point for anything that is not a comment."
+  (condition-case err
+      (let* ((dir (gp-local-ensure-checkout pr))
+             (plan (gp-helm-terminal--plan (gp-helm-terminal--safe-list-sessions) dir)))
+        (gp-log 'info "terminal handoff (text): repo=%s pr=%s dir=%s action=%s"
+                (gp-pr-full-name pr) (alist-get 'id pr) dir (plist-get plan :action))
+        (gp-helm-terminal--execute plan text)
+        (message "%s terminal session for %s"
+                 (if (eq (plist-get plan :action) 'reuse) "Updated" "Opened")
+                 (gp-pr-full-name pr)))
+    (error
+     (gp-log-error "terminal handoff failed: %s" (error-message-string err))
+     (user-error "Terminal handoff failed: %s" (error-message-string err)))))
+
+(defun gp-helm-terminal-send-conflict (pr)
+  "Ask PR's terminal session to resolve its merge conflicts.
+Uses `gp-helm-terminal-conflict-prompt', with the repo and PR named the
+same way the comment handoffs do so the session has its bearings."
+  (let* ((dest (or (ignore-errors (gp-pr-destination-branch pr)) "the target branch"))
+         (ask (if (string-match-p "%s" gp-helm-terminal-conflict-prompt)
+                  (format gp-helm-terminal-conflict-prompt dest)
+                gp-helm-terminal-conflict-prompt)))
+    (gp-helm-terminal-send-text
+     pr
+     (string-join
+      (list ask
+            ""
+            (format "Repo: %s" (gp-pr-full-name pr))
+            (format "PR: #%s %s" (alist-get 'id pr) (or (alist-get 'title pr) ""))
+            (format "Target branch: %s" dest))
+      "\n"))))
+
 (defun gp-helm-terminal-send-comment (pr comment)
   "Send COMMENT from PR to the configured terminal backend."
   (gp-helm-terminal-send-comments pr (list comment)))

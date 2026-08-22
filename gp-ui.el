@@ -22,9 +22,12 @@
 (require 'gp-log)
 (require 'gp-pipeline)
 
+(declare-function gp-checkout--git "gp-checkout")
+(declare-function gp-checkout-current-branch "gp-checkout")
 (declare-function gp-helm "gp-helm")
 (declare-function gp-helm-terminal-send-comment "gp-helm-terminal")
 (declare-function gp-helm-terminal-send-comments "gp-helm-terminal")
+(declare-function gp-helm-terminal-send-conflict "gp-helm-terminal")
 (declare-function gp-compose "gp-compose")
 (declare-function gp-reviewers-edit "gp-reviewers")
 (declare-function gp-overlay-pr "gp-overlay")
@@ -186,6 +189,19 @@ nil so callers can `concat' it unconditionally."
   "Plist of (:commits :files :added :removed) for the detail buffer, or nil.")
 (defvar-local gp--detail-diff nil
   "Alist of (PATH . DIFF-CHUNK) for the detail buffer, or nil.")
+(defvar-local gp--detail-mergeability nil
+  "Cons (MERGEABLE . STATE) for the detail buffer's PR, or nil.
+Fetched by the async load, never during a render: asking the forge costs
+a request, and a fetch mid-redisplay re-enters the renderer.")
+(defvar-local gp--detail-divergence nil
+  "Cons (AHEAD . BEHIND) commit counts for the detail buffer's PR, or nil.
+Fetched with the mergeability, never during a render.  Nil where the
+backend cannot say (Bitbucket), in which case nothing is shown -- a zero
+would claim the branch is up to date when the truth is unknown.")
+(defvar-local gp--detail-merge-pipelines nil
+  "Pipeline data plist for a merged PR's merge commit, or nil.
+The build that matters after a merge runs on the destination branch, not
+on the PR branch -- that is the one carrying the deployment.")
 (defvar-local gp--detail-pipelines nil
   "Pipeline data plist (:current :recent) for the detail buffer, or nil.")
 (defvar-local gp--detail-pipeline-timer nil
@@ -441,7 +457,7 @@ thread."
              "Open this file at the commented line in the local checkout"
              (lambda () (gp-ui-goto-comment-file pr comment)))
             (insert "\n"))
-          (when-let* ((url (let-alist comment .links.html.href)))
+          (when-let* ((url (gp-comment-web-url comment)))
             (insert ind "  ")
             (gp--insert-link url "↗ view in browser [w]")
             (insert "\n"))
@@ -768,6 +784,90 @@ nothing to do either."
           (indent-rigidly start (point) 2))
         (insert "\n")))))
 
+(defface gp-outcome-merged-face
+  '((t :inherit success :weight bold :height 1.2))
+  "Face for the MERGED banner on a closed pull request."
+  :group 'bitbucket)
+
+(defface gp-outcome-declined-face
+  '((t :inherit error :weight bold :height 1.2))
+  "Face for the DECLINED banner on a closed pull request."
+  :group 'bitbucket)
+
+(defun gp--insert-outcome-banner (pr)
+  "Insert a prominent outcome banner for a PR that is no longer open.
+An open PR gets nothing: its state is the whole detail view.  A closed
+one gets a single loud line, since that outcome is the first thing worth
+knowing -- and for a decline, the reason where the backend has one
+\(Bitbucket keeps a free-text `reason'; GitHub does not)."
+  (unless (ignore-errors (gp-pr-open-p pr))
+    (let ((merged (ignore-errors (gp-pr-merged-p pr))))
+      (insert (propertize (if merged "  MERGED  " "  DECLINED  ")
+                          'face (if merged
+                                    'gp-outcome-merged-face
+                                  'gp-outcome-declined-face)))
+      (when-let* ((at (ignore-errors (gp-pr-merged-at pr))))
+        (insert (propertize (format "  %s" (gp--relative-time at)) 'face 'shadow)))
+      (insert "\n")
+      (unless merged
+        (when-let* ((reason (ignore-errors (gp-pr-closed-reason pr))))
+          (insert (propertize (format "  %s\n" (string-trim reason)) 'face 'shadow))))
+      (insert "\n"))))
+
+(defun gp--insert-merge-conflict-warning (pr)
+  "Insert a conflict warning for PR when the forge reports one.
+Reads `gp--detail-mergeability' rather than asking the forge, so this
+costs nothing during a render.  Nothing is drawn when the answer is
+`unknown' (GitHub has not judged yet) or nil (Bitbucket cannot say) --
+only a stated conflict is worth a warning, since a false one would send
+you looking for a problem that is not there."
+  (when (and gp--detail-mergeability
+             (null (car gp--detail-mergeability)))
+    (let ((dest (or (ignore-errors (gp-pr-destination-branch pr)) "the target branch"))
+          (start (point)))
+      (insert (propertize
+               (format "⚠ Cannot merge: conflicts with %s" dest)
+               'face 'gp-pipeline-failed-face))
+      (insert (propertize
+               (format "  (%s%s)\n" (or (cdr gp--detail-mergeability) "conflicting")
+                       ;; how far behind is the actionable part: it says how
+                       ;; much target-branch history the rebase has to cross
+                       (if (and gp--detail-divergence
+                                (> (cdr gp--detail-divergence) 0))
+                           (format ", %d commit%s behind" (cdr gp--detail-divergence)
+                                   (if (= (cdr gp--detail-divergence) 1) "" "s"))
+                         ""))
+               'face 'shadow))
+      (insert "  ")
+      (gp--insert-action-button
+       "resolve in terminal [t]"
+       "Ask the AI terminal session to rebase onto the target and resolve"
+       (lambda () (gp-ui-send-conflict-to-terminal pr)))
+      (insert (propertize "   or merge the target in locally, resolve, and push.\n"
+                          'face 'shadow))
+      (insert "\n")
+      ;; tag the whole block so `t' knows it is on the conflict warning
+      ;; rather than a comment (see `gp-detail-send-to-terminal')
+      (put-text-property start (point) 'gp-conflict-warning t))))
+
+(defun gp--insert-merge-pipelines (pr)
+  "Insert the destination-branch pipeline of a merged PR, if any.
+After a merge the interesting run is the one on the merge commit -- that
+is what deploys -- so it is shown here rather than making you leave the
+editor to find it.  Reuses `gp--insert-pipelines', so the same step
+actions apply (logs on `l', manual gates on `T')."
+  (when (and gp--detail-merge-pipelines (gp-pr-merged-p pr))
+    (let ((dest (or (ignore-errors (gp-pr-destination-branch pr)) "destination")))
+      (insert (propertize (format "After merge (on %s)\n" dest)
+                          'face 'magit-section-heading))
+      ;; Only the merge commit's own run belongs here.  `:recent' is the
+      ;; destination branch's other commits -- everything else that landed on
+      ;; main -- which has nothing to do with this PR.
+      (gp--insert-pipelines
+       (list :current (plist-get gp--detail-merge-pipelines :current)
+             :recent nil))
+      (insert "\n"))))
+
 (defun gp--insert-changed-files ()
   "Insert a collapsable changed-files section for the detail buffer's PR.
 Each file is a single line inside the section so `p' and `n' can skip the whole
@@ -1031,7 +1131,7 @@ that is when you need a way to add the first one."
        "🔍 Show diff in Magit [d]" "Checkout the branch and show its diff in Magit"
        (lambda () (gp-ui-show-diff-in-magit pr)))
       (insert "   ")
-      (gp--insert-link .links.html.href "🔗 View in browser [w]")
+      (gp--insert-link (gp-pr-web-url pr) "🔗 View in browser [w]")
       (when gp--detail-marked-comment-ids
         (insert "   ")
         (gp--insert-action-button
@@ -1052,6 +1152,21 @@ that is when you need a way to add the first one."
              'draft "📝 Convert to draft [D]" "Convert this PR back to a draft"
              (lambda () (gp--detail-run-action
                          buf 'draft (lambda () (gp-ui-set-draft pr t))))))))
+      ;; merge, on any open PR that can actually merge.  A conflict simply
+      ;; removes the action: the warning under the description already says
+      ;; why, and repeating it here was noise.  Mergeability comes from
+      ;; `gp--detail-mergeability' (filled by the async load) -- this must
+      ;; never fetch during a render.
+      (when (and (gp-pr-open-p pr)
+                 (not (and gp--detail-mergeability
+                           (null (car gp--detail-mergeability)))))
+        (insert "   ")
+        (let ((buf (current-buffer)))
+          (gp--insert-action-button/spinner
+           'merge "🔀 Merge [M]"
+           "Merge this pull request (C-u for the merge strategy)"
+           (lambda () (gp--detail-run-action
+                       buf 'merge (lambda () (gp-ui-merge-pr pr)))))))
       ;; review actions, only on others' open PRs you can review
       (when (and (gp-pr-open-p pr)
                  (not (gp-pr-authored-by-p pr (gp-user-uuid))))
@@ -1087,7 +1202,10 @@ that is when you need a way to add the first one."
              (lambda () (gp--detail-run-action
                          buf 'changes (lambda () (gp-ui-set-review pr 'changes nil))))))))
       (insert "\n\n"))
+    (gp--insert-outcome-banner pr)
     (gp--insert-description pr)
+    (gp--insert-merge-conflict-warning pr)
+    (gp--insert-merge-pipelines pr)
     (gp--insert-changed-files)
     (gp--insert-commits)
     (gp--insert-pipelines gp--detail-pipelines)
@@ -1136,6 +1254,7 @@ that is when you need a way to add the first one."
   "e"   #'gp-detail-edit
   "E"   #'gp-detail-edit-description  ;; edit the PR's own description
   "C"   #'gp-detail-add-general-comment ;; new general (non-inline) comment
+  "M"   #'gp-detail-merge               ;; merge (C-u picks the strategy)
   "+"   #'gp-detail-like-comment        ;; quick 👍 toggle on the comment at point
   "!"   #'gp-detail-react-to-comment    ;; pick any reaction (where supported)
   "f"   #'gp-detail-goto-comment
@@ -1165,6 +1284,12 @@ that is when you need a way to add the first one."
   "Edit the description of the PR shown in this buffer."
   (interactive)
   (gp-ui-edit-description gp--pr))
+
+(defun gp-detail-merge (&optional arg)
+  "Merge the PR shown in this buffer.
+With \\[universal-argument] ARG, choose the merge strategy."
+  (interactive "P")
+  (gp-ui-merge-pr gp--pr arg))
 
 (defun gp-detail-add-general-comment ()
   "Add a general (non-inline) comment on the PR shown in this buffer."
@@ -1214,14 +1339,19 @@ grants it for the active backend."
   (gp-ui-reply-comment gp--pr (gp-detail--comment-at-point)))
 
 (defun gp-detail-send-to-terminal ()
-  "Send marked comments, or the comment at point, to the terminal session."
+  "Hand the thing at point to the terminal session.
+On the merge-conflict warning that is the conflict; otherwise the marked
+comments, or the comment at point.  Marked comments still win over a
+bare position, since marking them is the explicit act."
   (interactive)
-  (if-let* ((comments (gp--detail-marked-comments)))
-      (progn
-        (gp-ui-send-comments-to-terminal gp--pr comments)
-        (setq gp--detail-marked-comment-ids nil)
-        (gp--detail-rerender (current-buffer)))
-    (gp-ui-send-comment-to-terminal gp--pr (gp-detail--comment-at-point))))
+  (cond
+   ((get-text-property (point) 'gp-conflict-warning)
+    (gp-ui-send-conflict-to-terminal gp--pr))
+   ((gp--detail-marked-comments)
+    (gp-ui-send-comments-to-terminal gp--pr (gp--detail-marked-comments))
+    (setq gp--detail-marked-comment-ids nil)
+    (gp--detail-rerender (current-buffer)))
+   (t (gp-ui-send-comment-to-terminal gp--pr (gp-detail--comment-at-point)))))
 
 (defun gp-detail-toggle-mark ()
   "Toggle whether the comment at point is marked for batch handoff."
@@ -1255,7 +1385,7 @@ grants it for the active backend."
   (interactive)
   (let ((sec (magit-current-section)))
     (if (and sec (object-of-class-p sec 'gp-comment-section))
-        (let ((url (let-alist (oref sec value) .links.html.href)))
+        (let ((url (gp-pr-web-url (oref sec value))))
           (if url
               (browse-url url)
             (user-error "No URL for this comment")))
@@ -1369,6 +1499,11 @@ the PR's diff (see `gp-github-check-inline-target')."
              (when (buffer-live-p (get-buffer buf))
                (with-current-buffer buf (gp-detail-refresh)))
              (message "Comment posted on PR #%s" (alist-get 'id pr)))))))
+
+(defun gp-ui-send-conflict-to-terminal (pr)
+  "Ask PR's terminal session to resolve its merge conflicts."
+  (require 'gp-helm-terminal)
+  (gp-helm-terminal-send-conflict pr))
 
 (defun gp-ui-send-comment-to-terminal (pr comment)
   "Send COMMENT on PR to the configured AI terminal session."
@@ -1572,6 +1707,110 @@ every save would slowly mangle tables and lists."
              (when (buffer-live-p (get-buffer buf))
                (with-current-buffer buf (gp-detail-refresh)))
              (message "PR #%s description updated" id))))))
+
+(defcustom gp-merge-delete-local-branch t
+  "When non-nil, delete the merged source branch from the local checkout.
+Only ever the LOCAL branch: the forge owns the remote one (it deletes it
+itself when asked, and racing that would either fail or delete a branch
+the merge still needs), so this never pushes a deletion."
+  :type 'boolean :group 'bitbucket)
+
+(defcustom gp-merge-close-source-branch t
+  "When non-nil, ask the forge to delete the source branch on merge.
+Bitbucket takes this per merge.  GitHub has no per-merge control -- it
+follows the repository's own `delete_branch_on_merge' -- so there the
+value has no effect."
+  :type 'boolean :group 'bitbucket)
+
+(defun gp--merge-strategy-choice (full-name id arg)
+  "Return (STRATEGY . SOURCE) to merge PR FULL-NAME/ID with.
+With ARG non-nil, prompt among the strategies the forge permits;
+otherwise take its default.  SOURCE is a word naming where the strategy
+came from, so the confirmation can say whether it was chosen or
+inherited.  A backend that cannot answer yields (nil . \"the forge's
+default\"), which merges without naming a strategy at all."
+  (let* ((info (ignore-errors (gp-pull-request-merge-strategies full-name id)))
+         (strategies (car info))
+         (default (cdr info)))
+    (cond
+     ((null strategies) (cons nil "the forge's default"))
+     (arg (cons (completing-read
+                 (format "Merge strategy (default %s): " (or default "?"))
+                 strategies nil t nil nil default)
+                "your choice"))
+     (default (cons default "the repository default"))
+     (t (cons (car strategies) "the only permitted strategy")))))
+
+(defun gp--merge-delete-local-branch (pr branch)
+  "Delete BRANCH from PR's local checkout, if there is one.
+Never touches the remote: the forge deletes that itself.  Switches off
+BRANCH first when it is checked out, since git refuses to delete the
+current branch.  Every failure is reported, not signalled -- the merge
+has already happened by this point, so aborting here would misreport a
+completed merge as a failure."
+  (let ((dir (ignore-errors (gp-local-find-checkout (gp-pr-full-name pr)))))
+    (cond
+     ((not (and dir branch)) nil)
+     ((not (file-directory-p dir)) nil)
+     (t
+      (when (equal (gp-checkout-current-branch dir) branch)
+        ;; park on the destination branch so the delete is allowed
+        (let ((dest (or (ignore-errors (gp-pr-destination-branch pr)) "main")))
+          (gp-checkout--git dir "checkout" dest)))
+      (let ((res (gp-checkout--git dir "branch" "-D" branch)))
+        (if (= (car res) 0)
+            (format "local branch %s deleted" branch)
+          ;; already gone, or still checked out somewhere -- say so, don't fail
+          (format "local branch %s kept (%s)" branch
+                  (car (split-string (cdr res) "\n")))))))))
+
+(defun gp-ui-merge-pr (pr &optional arg)
+  "Merge PR after confirmation, then tidy up the local branch.
+With ARG (\\[universal-argument]), pick the merge strategy from the ones
+the forge permits; otherwise its default is used and named in the
+prompt.  A PR whose latest build failed needs a second confirmation.
+
+Only the LOCAL source branch is deleted afterwards (subject to
+`gp-merge-delete-local-branch'); the remote one belongs to the forge,
+which removes it itself when `gp-merge-close-source-branch' asked it to."
+  (let* ((full-name (gp-pr-full-name pr))
+         (id (alist-get 'id pr))
+         (branch (ignore-errors (gp-pr-source-branch pr)))
+         (choice (gp--merge-strategy-choice full-name id arg))
+         (strategy (car choice))
+         (source (cdr choice))
+         (states (ignore-errors (gp-commit-build-states
+                                 full-name (ignore-errors (gp-pr-source-commit pr))))))
+    (unless (gp-pr-open-p pr)
+      (user-error "PR #%s is not open" id))
+    ;; Conflicts are a hard stop: the forge would reject the merge anyway,
+    ;; and nothing local can resolve them.  `unknown' (GitHub computes
+    ;; mergeability lazily and answers null until it has) and nil (Bitbucket
+    ;; has no such field) must NOT block -- refusing on those would make the
+    ;; action unusable on a PR the forge simply had not judged yet.
+    (let ((m (ignore-errors (gp-pull-request-mergeability full-name id))))
+      (when (and m (null (car m)))
+        (user-error "PR #%s has conflicts with %s (%s) -- resolve them first"
+                    id (or (ignore-errors (gp-pr-destination-branch pr)) "the target")
+                    (or (cdr m) "conflicting"))))
+    ;; a red PR is mergeable, but not by accident
+    (when (member "FAILED" states)
+      (unless (yes-or-no-p
+               (format "PR #%s's last build FAILED -- merge anyway? " id))
+        (user-error "Aborted")))
+    (unless (yes-or-no-p
+             (format "Merge PR #%s with %s (%s)? " id
+                     (or strategy "the forge's default") source))
+      (user-error "Aborted"))
+    (message "Merging PR #%s…" id)
+    (gp-merge-pull-request full-name id strategy nil gp-merge-close-source-branch)
+    (let ((tidied (when gp-merge-delete-local-branch
+                    (gp--merge-delete-local-branch pr branch))))
+      (gp-invalidate-pr-caches pr)
+      (gp-detail-refresh)
+      (message "Merged PR #%s with %s (%s)%s" id
+               (or strategy "the forge's default") source
+               (if tidied (format "; %s" tidied) "")))))
 
 (defun gp-ui-set-draft (pr draft)
   "Set PR's draft flag to DRAFT, then refresh the detail buffer."
@@ -2041,6 +2280,8 @@ fresh data bind `gp-cache-ttl' to 0 around the call."
                             (gp--detail-load-stats-diff buf pr ttl)
                             (gp--detail-load-reviewers buf pr)
                             (gp--detail-load-commits buf pr)
+                            (gp--detail-load-mergeability buf pr)
+                            (gp--detail-load-merge-pipelines buf pr)
                             (if gp-detail-show-pipelines
                                 (gp--detail-load-pipelines buf pr)
                               (gp-log 'info "pipelines skipped: gp-detail-show-pipelines is nil"))))))))
@@ -2050,6 +2291,58 @@ fresh data bind `gp-cache-ttl' to 0 around the call."
         (gp-pull-request-comments-async
          full-name id
          (lambda (ok value) (finish-one ok value 'comments)))))))
+
+(defun gp--detail-load-merge-pipelines (buf pr)
+  "Fetch the destination-branch pipeline of a merged PR into BUF.
+Only for a merged PR, and only when the backend can name the merge
+commit: that run is the one that deploys, and it lives on the
+destination branch, so the PR-branch fetch never sees it."
+  (when (and (ignore-errors (gp-pr-merged-p pr))
+             gp-detail-show-pipelines)
+    (let ((full-name (gp-pr-full-name pr))
+          (dest (ignore-errors (gp-pr-destination-branch pr)))
+          (merge-commit (ignore-errors (gp-pr-merge-commit pr))))
+      (when (and dest merge-commit)
+        (run-at-time
+         0.3 nil
+         (lambda ()
+           (when (buffer-live-p buf)
+             (condition-case e
+                 (gp-pipeline-fetch-for-branch-async
+                  full-name dest merge-commit
+                  (lambda (data)
+                    (when (and data (buffer-live-p buf))
+                      (with-current-buffer buf
+                        (when (gp--detail-buffer-shows-p buf pr)
+                          (setq gp--detail-merge-pipelines data)
+                          (gp--detail-rerender buf))))))
+               (error (gp-log-error "merge pipelines: %s" (error-message-string e)))))))))))
+
+(defun gp--detail-load-mergeability (buf pr)
+  "Fetch PR's mergeability and fold it into BUF, redrawing if it changed.
+Deferred like the other heavy data: the answer costs a request, so it
+must not be asked for during a render.  A backend that cannot answer
+\(Bitbucket) leaves the value nil, which the renderer treats as \"no
+warning\" rather than \"conflicted\"."
+  (let ((full-name (gp-pr-full-name pr))
+        (id (alist-get 'id pr)))
+    (run-with-idle-timer
+     0 nil
+     (lambda ()
+       (let ((m (ignore-errors (gp-pull-request-mergeability full-name id)))
+             (d (ignore-errors
+                  (gp-pull-request-divergence
+                   full-name
+                   (ignore-errors (gp-pr-destination-branch pr))
+                   (ignore-errors (gp-pr-source-branch pr))))))
+         (when (and (or m d) (buffer-live-p buf))
+           (with-current-buffer buf
+             (when (and (gp--detail-buffer-shows-p buf pr)
+                        (not (and (equal m gp--detail-mergeability)
+                                  (equal d gp--detail-divergence))))
+               (setq gp--detail-mergeability m
+                     gp--detail-divergence d)
+               (gp--detail-rerender buf)))))))))
 
 (defun gp--detail-load-stats-diff (buf pr ttl)
   "Fetch PR's stats and diff asynchronously and fold them into BUF.
@@ -2269,7 +2562,7 @@ deferred stats/diff fetch ignore the cache, so `g' always re-fetches."
 (defun gp-browse-pr ()
   "Open the PR at point in a web browser."
   (interactive)
-  (let ((url (let-alist (gp-current-pr) .links.html.href)))
+  (let ((url (gp-pr-web-url (gp-current-pr))))
     (if url (browse-url url) (user-error "No URL for this PR"))))
 
 (defun gp-open-local ()

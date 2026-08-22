@@ -98,6 +98,9 @@ Dispatches on PATH to a fixture.  Records the call and honours
     ;; commit lookup (for pipeline recent-run summaries)
     ((string-match-p "/commit/[0-9a-f]+\\'" path)
      '((message . "Fix the widget toggle\n\nlonger body ignored")))
+    ((and (equal method "POST") (string-match-p "/merge\\'" path))
+     ;; the merged PR, as Bitbucket answers a synchronous merge
+     '((id . 7) (state . "MERGED") (title . "Merged PR")))
     (t (error "bitbucket-mock: no route for %s %s" method path)))))
 
 (defun bitbucket-mock-diff (_full-name _id)

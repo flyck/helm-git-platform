@@ -293,6 +293,36 @@ omitting it would blank the PR's title (same trap as `set-draft')."
     (let ((data (nth 3 (car bitbucket-mock-calls))))
       (should (equal (alist-get 'description data) "")))))
 
+(ert-deftest bitbucket-test-merge-posts-strategy-and-options ()
+  "Merging POSTs the strategy, message and close flag."
+  (bitbucket-mock-with-service
+    (bitbucket-merge-pull-request "ws/slug" 7 "fast_forward" "ship it" t)
+    (let* ((call (car (cl-remove-if-not
+                       (lambda (c) (and (equal (car c) "POST")
+                                        (string-suffix-p "/merge" (nth 1 c))))
+                       bitbucket-mock-calls)))
+           (data (nth 3 call)))
+      (should (equal (alist-get 'type data) "pullrequest"))
+      (should (equal (alist-get 'merge_strategy data) "fast_forward"))
+      (should (equal (alist-get 'message data) "ship it"))
+      (should (eq (alist-get 'close_source_branch data) t)))))
+
+(ert-deftest bitbucket-test-merge-omits-what-was-not-asked-for ()
+  "No strategy means the destination branch's own default applies.
+An explicit nil must not be sent, or Bitbucket would reject it instead
+of falling back."
+  (bitbucket-mock-with-service
+    (bitbucket-merge-pull-request "ws/slug" 7)
+    (let ((data (nth 3 (car bitbucket-mock-calls))))
+      (should-not (assq 'merge_strategy data))
+      (should-not (assq 'message data))
+      (should-not (assq 'close_source_branch data)))))
+
+(ert-deftest bitbucket-test-merge-rejects-an-unknown-strategy ()
+  "A typo fails locally rather than as a remote 400."
+  (bitbucket-mock-with-service
+    (should-error (bitbucket-merge-pull-request "ws/slug" 7 "fast-forward"))))
+
 (ert-deftest bitbucket-test-split-diff-by-file ()
   (let* ((diff (concat
                 "diff --git a/src/a.ts b/src/a.ts\n"

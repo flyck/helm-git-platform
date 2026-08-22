@@ -200,5 +200,32 @@ nil on the other."
     (should (equal (gp-pipeline-id '((id . 42))) 42))
     (should (equal (gp-pipeline-step-id '((id . 7))) 7))))
 
+(ert-deftest gp-test-pr-web-url-differs-per-backend ()
+  "Each forge names the browser URL differently.
+Bitbucket nests it at `links.html.href', GitHub has a flat `html_url'
+and no `links' object at all -- so reading Bitbucket's shape directly
+made \"open in browser\" fail on every GitHub PR with \"No URL for this
+PR\"."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (equal (gp-pr-web-url '((links (html (href . "https://bb/pr/1")))))
+                   "https://bb/pr/1")))
+  (let ((git-platform-current-backend (git-platform-github)))
+    (should (equal (gp-pr-web-url '((html_url . "https://gh/pull/1")))
+                   "https://gh/pull/1"))
+    ;; a reshaped object carrying the shared shape still works
+    (should (equal (gp-pr-web-url '((links (html (href . "https://gh/pull/2")))))
+                   "https://gh/pull/2"))))
+
+(ert-deftest gp-test-comment-web-url-differs-per-backend ()
+  "Same split for a comment's browser URL."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (equal (gp-comment-web-url '((links (html (href . "https://bb/c/1")))))
+                   "https://bb/c/1")))
+  (let ((git-platform-current-backend (git-platform-github)))
+    (should (equal (gp-comment-web-url '((links (html (href . "https://gh/c/1")))))
+                   "https://gh/c/1"))
+    (should (equal (gp-comment-web-url '((html_url . "https://gh/c/2")))
+                   "https://gh/c/2"))))
+
 (provide 'git-platform-test)
 ;;; git-platform-test.el ends here

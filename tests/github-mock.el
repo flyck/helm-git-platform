@@ -143,6 +143,8 @@ Stateful so an add/remove round-trip can be driven through the real
                       (append (alist-get 'labels data) nil))))
     ((string-match-p "/repos/[^/]+/[^/]+\\'" path) '((default_branch . "main")))
     ((string-match-p "/commits/[^/]+/status\\'" path) '((state . "success")))
+    ((and (equal method "PUT") (string-match-p "/merge\\'" path))
+     '((sha . "deadbeef") (merged . t) (message . "Pull Request successfully merged")))
     (t (error "github-mock: no route for %s %s" method path)))))
 
 (defun github-mock-paged (path &optional params max-items)

@@ -396,6 +396,72 @@ hard block on commenting at all."
   (cl-letf (((symbol-function 'github-pull-request-diff) (lambda (&rest _) nil)))
     (should-not (github-inline-target-problem "acme/web" 7 "anything.el" 1))))
 
+;;;; Merging ---------------------------------------------------------------------
+
+(ert-deftest github-test-merge-puts-method-and-message ()
+  "Merging PUTs `merge_method' and the commit message."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (github-merge-pull-request "acme/web" 42 "squash" "ship it")
+      (let ((call (car github-mock-calls)))
+        (should (equal (nth 0 call) "PUT"))
+        (should (string-suffix-p "/pulls/42/merge" (nth 1 call)))
+        (should (equal (alist-get 'merge_method (nth 3 call)) "squash"))
+        (should (equal (alist-get 'commit_message (nth 3 call)) "ship it"))))))
+
+(ert-deftest github-test-merge-ignores-close-source-branch ()
+  "GitHub has no per-merge branch deletion, so the argument is dropped.
+Deletion follows the repository's `delete_branch_on_merge'; sending
+anything here would be a silently ignored field at best."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (github-merge-pull-request "acme/web" 42 "merge" nil t)
+      (let ((data (nth 3 (car github-mock-calls))))
+        (should-not (assq 'close_source_branch data))
+        (should-not (assq 'delete_branch data))))))
+
+(ert-deftest github-test-merge-rejects-a-bitbucket-strategy ()
+  "Bitbucket's tokens are not GitHub's; `fast_forward' is not a method."
+  (github-mock-with-service
+    (should-error (github-merge-pull-request "acme/web" 42 "fast_forward"))))
+
+(ert-deftest github-test-merge-strategies-come-from-repo-settings ()
+  "Only the methods the repository permits are offered."
+  (github-mock-with-service
+    (let ((github-mock-overrides
+           '(("/repos/acme/web\\'" . ((allow_merge_commit . t)
+                                     (allow_squash_merge . :json-false)
+                                     (allow_rebase_merge . t))))))
+      (let ((info (github-pull-request-merge-strategies "acme/web" 42)))
+        (should (equal (car info) '("merge" "rebase")))
+        ;; the default is the first permitted one, GitHub's own order
+        (should (equal (cdr info) "merge"))))))
+
+(ert-deftest github-test-mergeability-distinguishes-dirty-from-unknown ()
+  "A conflict and \"not computed yet\" must not be confused.
+`mergeable' is lazy -- GitHub answers null until it has judged -- and
+this package's parser maps both null and false to nil, so `mergeable'
+alone cannot tell them apart.  `mergeable_state' is what decides:
+\"dirty\" is a real conflict, anything else unproven.  Getting this
+backwards would refuse to merge a perfectly clean PR."
+  (github-mock-with-service
+    (cl-labels ((probe (fields)
+                  (let ((github-mock-overrides
+                         `(("/pulls/42\\'" . ,fields))))
+                    (github-pull-request-mergeability "acme/web" 42))))
+      ;; a stated conflict -> not mergeable
+      (should (equal (probe '((mergeable) (mergeable_state . "dirty")))
+                     '(nil . "dirty")))
+      ;; explicitly mergeable
+      (should (equal (probe '((mergeable . t) (mergeable_state . "clean")))
+                     '(t . "clean")))
+      ;; not judged yet -> unknown, which must NOT block a merge
+      (should (equal (probe '((mergeable) (mergeable_state . "unknown")))
+                     '(unknown . "unknown")))
+      ;; blocked for a non-conflict reason (review required) -> also unknown
+      (should (equal (probe '((mergeable . t) (mergeable_state . "blocked")))
+                     '(t . "blocked"))))))
+
 ;;;; Pipeline identity ----------------------------------------------------------
 
 (ert-deftest github-test-pipeline-id-is-the-run-id-not-a-uuid ()

@@ -450,5 +450,81 @@ and gets that space back where labels are unsupported."
                 (should (= (- without with-labels) 18)))))
         (kill-buffer buf)))))
 
+;;;; Recently merged -------------------------------------------------------------
+
+(ert-deftest gp-test-helm-merged-recently-uses-a-rolling-window ()
+  "Only PRs merged inside the rolling window are kept.
+Rolling rather than calendar-day so work merged late yesterday evening
+is still listed the next morning instead of vanishing at midnight."
+  (cl-letf* ((now (date-to-time "2026-08-22T10:00:00Z"))
+             ((symbol-function 'current-time) (lambda () now))
+             ((symbol-function 'gp-pr-merged-p) (lambda (pr) (alist-get 'merged pr)))
+             ((symbol-function 'gp-pr-merged-at) (lambda (pr) (alist-get 'at pr))))
+    ;; Times are compared in LOCAL days, so the fixtures are written in
+    ;; local time -- a UTC instant late on the 21st is already the 22nd in
+    ;; a positive-offset zone, which is correct but makes for a confusing
+    ;; fixture.
+    (let ((prs (list `((id . 1) (merged . t) (at . ,(format-time-string "%FT%T%z" now)))
+                     `((id . 2) (merged . t)
+                       (at . ,(format-time-string "%FT%T%z" (time-subtract now (* 6 3600)))))
+                     `((id . 3) (merged . t)
+                       (at . ,(format-time-string "%FT%T%z" (time-subtract now (* 26 3600)))))
+                     `((id . 4) (merged . t)
+                       (at . ,(format-time-string "%FT%T%z" (time-subtract now (* 24 3600 21))))))))
+      ;; 24 hours: the two from today, not the 26-hour-old one
+      (should (equal (mapcar (lambda (p) (alist-get 'id p))
+                            (gp-helm--merged-recently prs 24))
+                     '(1 2)))
+      ;; 48 hours reaches the one merged 26 hours ago
+      (should (equal (mapcar (lambda (p) (alist-get 'id p))
+                            (gp-helm--merged-recently prs 48))
+                     '(1 2 3)))
+      ;; a tight window keeps only what just landed
+      (should (equal (mapcar (lambda (p) (alist-get 'id p))
+                            (gp-helm--merged-recently prs 1))
+                     '(1))))))
+
+(ert-deftest gp-test-helm-merged-section-can-be-turned-off ()
+  "Nil `gp-helm-show-merged-recent' yields no section and no fetch.
+The list is open-only by default, so the section needs a request of its
+own -- which must not happen when the section is off."
+  (let ((fetches 0))
+    (cl-letf (((symbol-function 'gp-workspace-pull-requests)
+               (lambda (&rest _) (cl-incf fetches) nil)))
+      (let ((gp-helm-show-merged-recent nil))
+        (should-not (when gp-helm-show-merged-recent
+                      (gp-helm--merged-recently
+                       (gp-workspace-pull-requests nil "MERGED" 20))))
+        (should (= fetches 0)))
+      (let ((gp-helm-show-merged-recent t))
+        (when gp-helm-show-merged-recent
+          (gp-helm--merged-recently (gp-workspace-pull-requests nil "MERGED" 20)))
+        (should (= fetches 1))))))
+
+(ert-deftest gp-test-helm-merged-section-label-follows-the-window ()
+  "The heading names the window rather than saying \"today\"."
+  (let ((gp-helm-merged-recent-hours 24))
+    (should (equal (gp-helm--merged-section-label) "Merged in the last 24 hours")))
+  (let ((gp-helm-merged-recent-hours 72))
+    (should (equal (gp-helm--merged-section-label) "Merged in the last 3 days")))
+  (let ((gp-helm-merged-recent-hours 6))
+    (should (equal (gp-helm--merged-section-label) "Merged in the last 6 hours")))
+  (let ((gp-helm-merged-recent-hours 1))
+    (should (equal (gp-helm--merged-section-label) "Merged in the last hour"))))
+
+(ert-deftest gp-test-helm-merged-recently-skips-the-unmergeable-and-undated ()
+  "An open PR, or one whose merge time cannot be read, is left out.
+Guessing would put an open PR under a \"Merged today\" heading."
+  (cl-letf* ((now (date-to-time "2026-08-22T10:00:00Z"))
+             ((symbol-function 'current-time) (lambda () now))
+             ((symbol-function 'gp-pr-merged-p) (lambda (pr) (alist-get 'merged pr)))
+             ((symbol-function 'gp-pr-merged-at) (lambda (pr) (alist-get 'at pr))))
+    (should-not (gp-helm--merged-recently
+                 '(((id . 1) (merged . nil) (at . "2026-08-22T09:00:00Z"))) 24))
+    (should-not (gp-helm--merged-recently
+                 '(((id . 2) (merged . t) (at . nil))) 24))
+    (should-not (gp-helm--merged-recently
+                 '(((id . 3) (merged . t) (at . "not a date"))) 24))))
+
 (provide 'gp-helm-test)
 ;;; gp-helm-test.el ends here

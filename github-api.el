@@ -688,6 +688,80 @@ See `gp-pr-reviewers-async'."
       ("CHANGES_REQUESTED" 'changes)
       (_ nil))))
 
+(defconst github-merge-methods '("merge" "squash" "rebase")
+  "The `merge_method' values GitHub's merge endpoint accepts.
+A repository can disable any of them; ask rather than assume (see
+`github-pull-request-merge-strategies').")
+
+(defun github-pull-request-merge-strategies (full-name _number)
+  "Return (STRATEGIES . DEFAULT) permitted in FULL-NAME.
+Unlike Bitbucket this is a repository setting rather than a per-branch
+one, so NUMBER is ignored -- the signature matches the Bitbucket twin so
+the protocol op can be backend-agnostic.  DEFAULT is the first permitted
+method in GitHub's own order (a merge commit where allowed), since the
+API has no \"default method\" field of its own."
+  (let* ((repo (ignore-errors (github-api-request "GET" (format "/repos/%s" full-name))))
+         (allowed (delq nil
+                       (list (and (eq (alist-get 'allow_merge_commit repo) t) "merge")
+                             (and (eq (alist-get 'allow_squash_merge repo) t) "squash")
+                             (and (eq (alist-get 'allow_rebase_merge repo) t) "rebase")))))
+    (when allowed (cons allowed (car allowed)))))
+
+(defun github-pull-request-mergeability (full-name number)
+  "Return (MERGEABLE . STATE) for PR NUMBER in FULL-NAME.
+MERGEABLE is t, nil (conflicts) or `unknown'; STATE is GitHub's own
+`mergeable_state' word (\"clean\", \"dirty\", \"blocked\", \"behind\",
+\"unstable\", \"draft\", \"unknown\").
+
+`mergeable' is computed lazily: GitHub answers null on the first fetch
+of a PR it has not tested yet, filling it in moments later.  This
+package's JSON parser maps both null AND false to nil, so `mergeable'
+alone cannot separate \"conflicts\" from \"not computed yet\" -- getting
+that backwards would refuse to merge a perfectly clean PR.
+`mergeable_state' is what disambiguates: \"dirty\" is a real conflict,
+\"unknown\" is GitHub still thinking."
+  (let* ((pr (ignore-errors
+               (github-api-request "GET" (format "/repos/%s/pulls/%s" full-name number))))
+         (raw (alist-get 'mergeable pr))
+         (state (alist-get 'mergeable_state pr)))
+    (when pr
+      (cons (cond ((eq raw t) t)
+                  ;; a stated conflict, whatever `mergeable' came back as
+                  ((equal state "dirty") nil)
+                  ;; not judged yet, or blocked for a reason that is not a
+                  ;; conflict (review required, behind, failing checks)
+                  (t 'unknown))
+            state))))
+
+(defun github-pull-request-divergence (full-name base head)
+  "Return (AHEAD . BEHIND) commit counts of HEAD against BASE in FULL-NAME.
+BEHIND is how many commits BASE has that HEAD lacks -- \"how far behind
+the target branch this PR is\".  Nil when the comparison fails."
+  (when (and full-name base head)
+    (let ((r (ignore-errors
+               (github-api-request
+                "GET" (format "/repos/%s/compare/%s...%s" full-name base head)))))
+      (when r
+        (cons (or (alist-get 'ahead_by r) 0)
+              (or (alist-get 'behind_by r) 0))))))
+
+(defun github-merge-pull-request (full-name number &optional strategy message _close-source-branch)
+  "Merge PR NUMBER in FULL-NAME, returning the API's merge result.
+STRATEGY is one of `github-merge-methods' (nil lets GitHub choose).
+MESSAGE becomes the merge commit's message body.  CLOSE-SOURCE-BRANCH is
+ignored: GitHub deletes the head branch only per the repository's
+`delete_branch_on_merge' setting, with no per-merge override, so the
+argument exists for signature parity with Bitbucket.  Requires Pull
+requests: write."
+  (when (and strategy (not (member strategy github-merge-methods)))
+    (error "Not a GitHub merge method: %s" strategy))
+  (github-api-request
+   "PUT" (format "/repos/%s/pulls/%s/merge" full-name number)
+   nil
+   (append (when strategy `((merge_method . ,strategy)))
+           (when (and message (not (string-empty-p message)))
+             `((commit_message . ,message))))))
+
 (defun github-set-pull-request-description (full-name number description &optional _title)
   "Set PR NUMBER in FULL-NAME's body to DESCRIPTION.
 Unlike the draft flag, this is plain REST: a PATCH with just `body'

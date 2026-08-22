@@ -448,8 +448,8 @@ overlays); a general comment opens the detail buffer."
 
 (defun gp-helm--comment-url (pr comment)
   "Return the web URL focusing COMMENT on PR, with a fallback anchor."
-  (or (let-alist comment .links.html.href)
-      (let ((pr-url (let-alist pr .links.html.href))
+  (or (gp-comment-web-url comment)
+      (let ((pr-url (gp-pr-web-url pr))
             (cid (alist-get 'id comment)))
         (when (and pr-url cid)
           (format "%s#comment-%s" pr-url cid)))))
@@ -544,7 +544,7 @@ stop you from typing it."
             (list :full-name (gp-pr-full-name pr)
                   :id (alist-get 'id pr)))))
    (cons "Browse on web"
-         (lambda (pr) (browse-url (let-alist pr .links.html.href))))))
+         (lambda (pr) (browse-url (gp-pr-web-url pr))))))
 
 ;;;; Entry point -------------------------------------------------------------
 
@@ -565,6 +565,45 @@ so empty sections are omitted."
       :header-name (lambda (name)
                      (concat (gp-helm--header name prs)
                              "   (C-c g reload · C-c G refresh · C-c m merged)")))))
+
+(defcustom gp-helm-show-merged-recent t
+  "When non-nil, `gp-helm' shows a section of recently merged PRs.
+Nil removes it entirely -- and skips the extra request it needs, since
+merged PRs are not otherwise fetched for the open-only list."
+  :type 'boolean :group 'bitbucket)
+
+(defcustom gp-helm-merged-recent-hours 24
+  "How many hours back the \"Merged\" section reaches.
+A rolling window, so work merged late yesterday evening is still there
+the next morning -- which a calendar-day cutoff would drop at midnight.
+The section is omitted entirely when nothing falls inside it, so a wider
+setting costs nothing on a quiet day."
+  :type 'integer :group 'bitbucket)
+
+(defun gp-helm--merged-recently (prs &optional hours)
+  "Return the PRs from PRS merged within the last HOURS.
+HOURS defaults to `gp-helm-merged-recent-hours'.  The window rolls from
+now rather than snapping to midnight, so something merged last evening
+still counts this morning.  A PR whose merge time cannot be read is left
+out rather than guessed at."
+  (let* ((hours (or hours gp-helm-merged-recent-hours))
+         (cutoff (time-subtract (current-time) (seconds-to-time (* 3600 (max 1 hours))))))
+    (cl-remove-if-not
+     (lambda (pr)
+       (and (ignore-errors (gp-pr-merged-p pr))
+            (when-let* ((at (ignore-errors (gp-pr-merged-at pr)))
+                        (parsed (ignore-errors (date-to-time at))))
+              (time-less-p cutoff parsed))))
+     prs)))
+
+(defun gp-helm--merged-section-label ()
+  "Return the heading for the recently-merged section."
+  (let ((h gp-helm-merged-recent-hours))
+    (cond ((= h 24) "Merged in the last 24 hours")
+          ((and (> h 24) (zerop (% h 24)))
+           (format "Merged in the last %d days" (/ h 24)))
+          ((= h 1) "Merged in the last hour")
+          (t (format "Merged in the last %d hours" h)))))
 
 (defun gp-helm--prs-for-branch (prs branch)
   "Return the PRs from PRS whose source branch is BRANCH."
@@ -731,6 +770,20 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                       (gp-workspace-pull-requests
                        uuid (if include-merged nil "OPEN")))))
          (cat (gp-categorize-pull-requests mine-prs uuid))
+         ;; The recently-merged section is always shown, so it needs merged
+         ;; PRs even when the rest of the list is open-only.  Cached
+         ;; separately and capped: only the newest few can be in the window,
+         ;; and this must not turn the list into a full history fetch.
+         (merged-recent
+          (when gp-helm-show-merged-recent
+            (gp-helm--merged-recently
+             (if include-merged
+                 mine-prs
+               (gp-cache-with-cache
+                (list 'merged-recent uuid)
+                (lambda ()
+                  (ignore-errors
+                    (gp-workspace-pull-requests uuid "MERGED" 20))))))))
          (actions (gp-helm--pr-actions))
          (km (gp-helm--list-keymap include-merged)))
     (setq gp-helm--reviewing-cache 'loading
@@ -798,7 +851,11 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                          voted-source
                          covered-source
                          (gp-helm--source "My drafts"
-                                                 (plist-get cat :drafts) actions t km)))))
+                                                 (plist-get cat :drafts) actions t km)
+                         ;; last, and styled like drafts: merged work is
+                         ;; reference rather than something to act on
+                         (gp-helm--source (gp-helm--merged-section-label)
+                                          merged-recent actions t km)))))
       ;; reviewing PRs have no fast endpoint: serve from cache, else scan
       ;; repos in parallel (non-blocking) and fill the section as batches land
       (let ((hit (gp-cache-get (list 'reviewing uuid states))))
