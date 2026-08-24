@@ -209,6 +209,10 @@ delete, `V` reviewers, `L` labels), so a stray lowercase key can't mutate anythi
   Anyone who has already reviewed is locked, since removing them can't withdraw the review.
 - **Labels** (`L`, GitHub only): shown in GitHub's colours in the picker, list and header. Tunables:
   `gp-helm-labels-width` (0 hides the column), `gp-label-colors`.
+- **Filtering by label**: the helm search takes `field:value` tokens that combine
+  (`label:bug repo:portal author:ada branch:fix`). `C-c l` in the picker adds the row's label, and
+  clicking a label (or `C-c C-c` on it) in the list or detail buffer opens the picker with
+  `label:NAME` already typed.
 - **CI pipelines**: finished ones start collapsed (`TAB` expands). `s` stops, `T` triggers or starts
   a manual step, `P` re-runs one step where supported, `l` opens a step's log (polled while
   running). Stop/trigger are whole-pipeline only.
