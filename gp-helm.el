@@ -744,7 +744,39 @@ By default only OPEN PRs are shown; with a prefix argument, or
       (require 'gp-create)
       (gp-create-pr (nth 0 ctx) (nth 1 ctx) (nth 2 ctx)))
      ;; several PRs on the branch, default branch, or non-magit -> full list
-     (t (gp-helm--list include-merged)))))
+     (t (gp-helm--magit-report-fallthrough include-merged)
+        (gp-helm--list include-merged)))))
+
+(defun gp-helm--magit-report-fallthrough (include-merged)
+  "Say why `gp-helm' fell back to the full list from a magit buffer.
+Only speaks up in a magit buffer where the branch-PR shortcut was
+supposed to apply, so the ordinary uses of the list stay quiet.
+Without this, a repo or branch that fails to resolve is
+indistinguishable from a branch that simply has no PR: both quietly
+open the workspace list, which is the same thing `gp-helm' does
+everywhere else."
+  (when (and (not include-merged)
+             (derived-mode-p 'magit-mode)
+             default-directory)
+    (require 'gp-watch)
+    (let* ((dir (expand-file-name default-directory))
+           (full-name (gp-watch--repo-for-path dir))
+           (branch (and full-name (gp-watch--current-branch dir))))
+      (cond
+       ((not full-name)
+        (message "gp-helm: no forge repo for %s (active backend: %s) -- showing the full list"
+                 (abbreviate-file-name dir)
+                 (ignore-errors (eieio-object-class-name (git-platform-backend)))))
+       ((not branch)
+        (message "gp-helm: could not read the branch in %s -- showing the full list"
+                 (abbreviate-file-name dir)))
+       (t
+        (let ((n (length (gp-helm--prs-for-branch
+                          (ignore-errors (gp-repo-pull-requests full-name))
+                          branch))))
+          (when (> n 1)
+            (message "gp-helm: %d open PRs on %s -- showing the full list"
+                     n branch))))))))
 
 (defun gp-helm--magit-branch-prs ()
   "Return the open PRs for the current magit buffer's repo+branch, or nil.

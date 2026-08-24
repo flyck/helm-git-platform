@@ -48,6 +48,15 @@
   :type 'integer
   :group 'bitbucket)
 
+(defcustom gp-watch-repo-negative-cache-ttl 60
+  "Seconds to cache a FAILED repo lookup for a directory (default 1 minute).
+Shorter than `gp-watch-repo-cache-ttl' on purpose: a failure can mean the
+directory is not a forge repo, but it can equally mean the active backend
+does not talk to that remote's forge, which is a condition that changes
+within a session."
+  :type 'integer
+  :group 'bitbucket)
+
 (defcustom gp-watch-pr-cache-ttl 300
   "Seconds to cache the open-PR / comment lookups for a repo+branch."
   :type 'integer
@@ -105,8 +114,10 @@ A stored `none' represents a cached negative; it is returned as nil."
 ;;;; Resolution steps (each cached) ------------------------------------------
 
 (defun gp-watch--repo-for-path (path)
-  "Return the repo \"ws/slug\" for PATH, or nil. Cached for a day.
-PATH may be a file or directory."
+  "Return the repo \"ws/slug\" for PATH, or nil.
+PATH may be a file or directory.  A hit is cached for
+`gp-watch-repo-cache-ttl', a miss only for
+`gp-watch-repo-negative-cache-ttl'."
   (when path
     (let* ((expanded (expand-file-name path))
            (dir (if (file-directory-p expanded)
@@ -117,10 +128,15 @@ PATH may be a file or directory."
            (cached (gp-watch--cache-get gp-watch--repo-cache key)))
       (if (not (eq cached 'miss))
           cached
-        (gp-watch--cache-put
-         gp-watch--repo-cache key
-         (gp-local--dir-remote key)
-         gp-watch-repo-cache-ttl)))))
+        (let ((full-name (gp-local--dir-remote key)))
+          ;; A hit is a durable fact about the directory and gets the full
+          ;; TTL.  A miss is not: it also happens when the active backend
+          ;; talks to the other forge (see `gp-local--dir-remote'), so a
+          ;; day-long negative would outlive the condition that caused it.
+          (gp-watch--cache-put
+           gp-watch--repo-cache key full-name
+           (if full-name gp-watch-repo-cache-ttl
+             gp-watch-repo-negative-cache-ttl)))))))
 
 (defalias 'gp-watch--repo-for-file #'gp-watch--repo-for-path)
 

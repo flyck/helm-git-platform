@@ -131,7 +131,14 @@ Works in plain clones, worktrees and submodules."
         cached
       (let ((parsed (gp-local--parse-remote
                      (gp-local--forge-remote-url key))))
-        (puthash key parsed gp-local--remote-cache)
+        ;; Only a successful parse is cached.  A nil here is not durably
+        ;; "no repo": `gp-local--parse-remote' also returns nil when the
+        ;; remote is on the forge the ACTIVE backend does not talk to, and
+        ;; the active backend is resolved lazily and memoised on first use
+        ;; (`git-platform-backend').  Caching that nil pins a wrong answer
+        ;; for the rest of the session, long after the backend is right.
+        (when parsed
+          (puthash key parsed gp-local--remote-cache))
         parsed))))
 
 (defun gp-local-clear-cache ()

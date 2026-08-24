@@ -54,6 +54,41 @@
          (gp-watch--repo-for-file "/repo/a.el")
          (should (= calls 2))))))
 
+(ert-deftest gp-test-watch-repo-lookup-negative-expires-sooner ()
+  "A failed repo lookup is retried long before a successful one would be.
+A miss can mean the active backend talks to the other forge, which
+changes within a session -- so it must not be pinned for a whole day."
+  (gp-watch-test--with-clock
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'gp-local--dir-remote)
+                 (lambda (_dir) (cl-incf calls) nil))
+                ((symbol-function 'locate-dominating-file)
+                 (lambda (_d _n) "/repo/")))
+        (should-not (gp-watch--repo-for-file "/repo/a.el"))
+        (should (= calls 1))
+        ;; still inside the short negative window: served from cache
+        (setq clock (+ clock (max 0 (- gp-watch-repo-negative-cache-ttl 1))))
+        (should-not (gp-watch--repo-for-file "/repo/a.el"))
+        (should (= calls 1))
+        ;; past it -- and still far short of the positive TTL -- so re-resolved
+        (setq clock (+ clock 2))
+        (should (< gp-watch-repo-negative-cache-ttl gp-watch-repo-cache-ttl))
+        (should-not (gp-watch--repo-for-file "/repo/a.el"))
+        (should (= calls 2))))))
+
+(ert-deftest gp-test-watch-repo-lookup-positive-keeps-long-ttl ()
+  "A successful lookup still gets the full day-long cache."
+  (gp-watch-test--with-clock
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'gp-local--dir-remote)
+                 (lambda (_dir) (cl-incf calls) "ws/slug"))
+                ((symbol-function 'locate-dominating-file)
+                 (lambda (_d _n) "/repo/")))
+        (should (equal (gp-watch--repo-for-file "/repo/a.el") "ws/slug"))
+        (setq clock (+ clock gp-watch-repo-negative-cache-ttl 1))
+        (should (equal (gp-watch--repo-for-file "/repo/a.el") "ws/slug"))
+        (should (= calls 1))))))
+
 (ert-deftest gp-test-watch-repo-lookup-for-directory ()
   "Directory-backed buffers resolve via the repo root too."
   (gp-watch-test--with-clock
