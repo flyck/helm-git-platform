@@ -36,6 +36,7 @@
 (declare-function helm-run-after-exit "helm-core")
 (declare-function helm-get-selection "helm-core")
 (declare-function helm-update "helm-core")
+(declare-function helm-set-pattern "helm-core")
 (declare-function gp-compose "gp-compose")
 (declare-function gp-create-pr "gp-create")
 (declare-function gp-watch--repo-for-path "gp-watch")
@@ -44,6 +45,7 @@
 (declare-function gp-local-find-checkout "gp-local")
 (defvar helm-map)
 (defvar helm-alive-p)
+(defvar helm-pattern)
 
 (defvar gp-helm--last-visited-pr-id nil
   "Id of the last PR opened via `gp-show-pr', so the list can preselect it.
@@ -854,7 +856,9 @@ so empty sections are omitted."
       :keymap (or keymap (gp-helm--list-keymap nil))
       :header-name (lambda (name)
                      (concat (gp-helm--header name prs)
-                             "   (C-c g reload · C-c G refresh · C-c m merged)")))))
+                             "   (C-c g reload · C-c G refresh · C-c m merged"
+                             (if (gp-labels-supported-p) " · C-c l label" "")
+                             ")")))))
 
 (defcustom gp-helm-show-merged-recent t
   "When non-nil, `gp-helm' shows a section of recently merged PRs.
@@ -1000,6 +1004,43 @@ same key the synchronous path used, so a reopen is instant."
                       (equal (gp-pr-source-branch pr) branch))
                     prs))
 
+(defun gp-helm--append-to-pattern (token)
+  "Append TOKEN to the live Helm pattern, narrowing the current session.
+Appends rather than replaces so scoped tokens stack -- pressing the
+key on a `bug' PR and then on a `portal' one leaves
+`label:bug label:portal' -- and so a pattern you had already typed
+survives.  A token already present is not added twice, which makes
+the key idempotent instead of building up duplicates that match the
+same thing."
+  (let* ((pattern (or helm-pattern ""))
+         (parts (split-string pattern "[ \t]+" t)))
+    (unless (member token parts)
+      (helm-set-pattern
+       (if (string-empty-p pattern) token (concat pattern " " token))))))
+
+(defun gp-helm--filter-by-label ()
+  "Narrow the list to the label of the PR at point.
+Prompts when the PR carries several labels, since there is no way to
+tell which one was meant.  Inserts the scoped `label:NAME' token
+\(see `gp-helm--pr-search-tokens') into the search rather than
+filtering behind Helm's back, so the narrowing is visible in the
+pattern, composes with whatever else is typed, and is undone by
+plain editing."
+  (interactive)
+  (let* ((pr (helm-get-selection))
+         (names (and (consp pr)
+                     (delq nil (mapcar (lambda (l) (plist-get l :name))
+                                       (gp-pr-labels pr))))))
+    (cond
+     ((null names)
+      (message "gp: no labels on this pull request"))
+     ((cdr names)
+      (gp-helm--append-to-pattern
+       (gp-helm--search-token
+        "label" (completing-read "Filter by label: " names nil t))))
+     (t (gp-helm--append-to-pattern
+         (gp-helm--search-token "label" (car names)))))))
+
 (defun gp-helm--list-keymap (include-merged)
   "Keymap for the main PR list.
 C-c g reloads: clears the PR-list cache AND the deploy-status caches
@@ -1013,9 +1054,10 @@ all layers, see `gp-reset-caches') -- use this when a repo or PR is
 missing because a stale cache (e.g. the 24h repo-list cache) predates
 it.
 C-c m toggles whether MERGED/DECLINED PRs are shown \(currently
-INCLUDE-MERGED)."
+INCLUDE-MERGED).  C-c l narrows to the label of the PR at point."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map helm-map)
+    (define-key map (kbd "C-c l") #'gp-helm--filter-by-label)
     (define-key map (kbd "C-c g")
                 (lambda () (interactive)
                   (helm-run-after-exit

@@ -766,6 +766,64 @@ exactly as before while `label:bug' still matches."
         ;; the author's space is folded, so it stays one Helm pattern
         (should (member "author:Ann-Smith" tokens))))))
 
+(ert-deftest gp-test-helm-append-to-pattern-stacks-and-dedupes ()
+  "Appending narrows further instead of replacing, and the same token
+twice is a no-op so the key is idempotent."
+  (let* ((helm-pattern "")
+         (set nil))
+    (cl-letf (((symbol-function 'helm-set-pattern)
+               (lambda (p) (setq set p helm-pattern p))))
+      (gp-helm--append-to-pattern "label:bug")
+      (should (equal set "label:bug"))
+      ;; a second, different token stacks onto the first
+      (gp-helm--append-to-pattern "repo:web")
+      (should (equal set "label:bug repo:web"))
+      ;; the same token again changes nothing
+      (setq set nil)
+      (gp-helm--append-to-pattern "label:bug")
+      (should (null set)))))
+
+(ert-deftest gp-test-helm-filter-by-label-uses-the-only-label ()
+  "One label needs no prompt: the key inserts it straight away."
+  (let ((helm-pattern "")
+        (inserted nil))
+    (cl-letf (((symbol-function 'helm-get-selection)
+               (lambda (&rest _) '((id . 42) (labels . [((name . "bug") (color . "d73a4a"))]))))
+              ((symbol-function 'gp-pr-labels)
+               (lambda (_pr) '((:name "bug" :color "d73a4a"))))
+              ((symbol-function 'helm-set-pattern)
+               (lambda (p) (setq inserted p))))
+      (gp-helm--filter-by-label)
+      (should (equal inserted "label:bug")))))
+
+(ert-deftest gp-test-helm-filter-by-label-prompts-when-ambiguous ()
+  "Several labels give no way to tell which was meant, so it asks."
+  (let ((helm-pattern "")
+        (inserted nil)
+        (offered nil))
+    (cl-letf (((symbol-function 'helm-get-selection) (lambda (&rest _) '((id . 42))))
+              ((symbol-function 'gp-pr-labels)
+               (lambda (_pr) '((:name "bug") (:name "ui"))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt coll &rest _) (setq offered coll) "ui"))
+              ((symbol-function 'helm-set-pattern)
+               (lambda (p) (setq inserted p))))
+      (gp-helm--filter-by-label)
+      (should (equal offered '("bug" "ui")))
+      (should (equal inserted "label:ui")))))
+
+(ert-deftest gp-test-helm-filter-by-label-noop-without-labels ()
+  "An unlabelled PR leaves the pattern alone rather than inserting a
+`label:' token that would match nothing."
+  (let ((helm-pattern "")
+        (inserted nil))
+    (cl-letf (((symbol-function 'helm-get-selection) (lambda (&rest _) '((id . 42))))
+              ((symbol-function 'gp-pr-labels) (lambda (_pr) nil))
+              ((symbol-function 'helm-set-pattern)
+               (lambda (p) (setq inserted p))))
+      (gp-helm--filter-by-label)
+      (should (null inserted)))))
+
 (ert-deftest gp-test-helm-title-width-reserves-the-label-column ()
   "The auto-growing title column shrinks by the label column's width,
 and gets that space back where labels are unsupported."
