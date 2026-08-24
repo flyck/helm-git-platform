@@ -557,13 +557,51 @@ must show up here well before `gp-cache-ttl' would force a relist."
                     gp-helm--comment-resolution-cache)
            (gp-helm--refresh-if-alive)))))))
 
+(defun gp-helm--search-token (field value)
+  "Return \"FIELD:VALUE\" with whitespace in VALUE folded to `-', or nil.
+Nil when VALUE is empty, so callers can `delq' it away.  Spaces are
+folded because Helm splits a pattern on whitespace: a token with a
+space in it would be read as two independent patterns, and
+`label:needs review' would filter on `label:needs' plus a stray
+`review' matching anywhere in the row."
+  (when (and value (not (string-empty-p (format "%s" value))))
+    (format "%s:%s" field
+            (replace-regexp-in-string "[ \t]+" "-" (format "%s" value)))))
+
+(defun gp-helm--pr-search-tokens (pr)
+  "Return PR's field-scoped search tokens as a list of strings.
+Helm has no query language of its own -- it matches the candidate's
+display string -- so scoped search is done by *putting the scope in
+the string*: each field is emitted a second time prefixed with its
+name, and typing `label:bug' then matches natively, no custom
+`:match' needed.  Because Helm ANDs whitespace-separated patterns,
+the tokens compose for free: `label:bug repo:portal' narrows on both.
+
+Matching stays substring-loose (`label:bug' also hits a label named
+`bugfix'), which is the same looseness the rest of the row already
+has and keeps prefix-typing useful."
+  ;; The normalised `gp-pr-*' accessors, not the raw payload: GitHub keys
+  ;; the slug and author differently from Bitbucket, so reading the alist
+  ;; directly would silently emit no `repo:'/`author:' token on one backend.
+  (delq nil
+        (append
+         (list (gp-helm--search-token "repo" (gp-pr-repo-slug pr))
+               (gp-helm--search-token "author" (gp-pr-author-name pr))
+               (gp-helm--search-token "branch" (gp-pr-source-branch pr)))
+         (mapcar (lambda (l) (gp-helm--search-token "label" (plist-get l :name)))
+                 (gp-pr-labels pr)))))
+
 (defun gp-helm--pr-search-tail (pr)
   "Return an invisible, searchable suffix of PR's full untruncated fields.
 The visible row truncates the repo slug, title and author to fixed
 column widths (see `gp-helm--pad'), so Helm -- which matches the
 display string -- cannot match text past the cut.  Appending the
 full fields as an invisible tail makes the whole slug/title/author
-matchable regardless of truncation."
+matchable regardless of truncation.
+
+The bare fields come first, so plain typing works as it always did;
+`gp-helm--pr-search-tokens' then repeats them in `field:value' form
+so a search can be scoped to one field."
   (let-alist pr
     (propertize
      (concat " " (mapconcat #'identity
@@ -575,7 +613,8 @@ matchable regardless of truncation."
                                        ;; label names too, so typing one filters
                                        ;; even when the column truncated it
                                        (mapcar (lambda (l) (plist-get l :name))
-                                               (gp-pr-labels pr))))
+                                               (gp-pr-labels pr))
+                                       (gp-helm--pr-search-tokens pr)))
                             " "))
      'invisible t)))
 

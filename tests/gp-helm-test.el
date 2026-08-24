@@ -720,6 +720,51 @@ from it -- but on any normal window it keeps far more than a title needs."
             ;; ...and both still fit inside the window
             (should (<= (+ wide 38) win))))
       (kill-buffer buf))))
+(ert-deftest gp-test-helm-search-tokens-scope-each-field ()
+  "Every field is repeated in `field:value' form, so a search can name
+the field it means -- `label:bug' rather than a bare `bug' that would
+also hit a title mentioning bugs."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (let ((tokens (gp-helm--pr-search-tokens github-mock--pr-1)))
+        (should (member "label:bug" tokens))
+        (should (member "label:ui" tokens))
+        (should (member "repo:web" tokens))
+        (should (member "author:ada" tokens))
+        (should (member "branch:feature/widget" tokens))))))
+
+(ert-deftest gp-test-helm-search-token-folds-spaces ()
+  "Helm splits a pattern on whitespace, so a multi-word value has to
+arrive as one token or it would be read as two independent patterns."
+  (should (equal (gp-helm--search-token "label" "needs review")
+                 "label:needs-review"))
+  ;; nothing to scope on -- the caller `delq's these away
+  (should (null (gp-helm--search-token "label" nil)))
+  (should (null (gp-helm--search-token "label" ""))))
+
+(ert-deftest gp-test-helm-search-tokens-reach-the-tail ()
+  "The scoped tokens ride the existing invisible tail, so rows look
+exactly as before while `label:bug' still matches."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (let ((tail (gp-helm--pr-search-tail github-mock--pr-1)))
+        (should (get-text-property 0 'invisible tail))
+        (should (string-match-p "label:bug" (substring-no-properties tail)))))))
+
+(ert-deftest gp-test-helm-search-tokens-empty-without-labels ()
+  "A backend with no labels contributes no label tokens -- and no
+`label:' prefix that could never match anything."
+  (bitbucket-mock-with-service
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (let ((tokens (gp-helm--pr-search-tokens
+                     '((id . 42)
+                       (destination (repository (slug . "my-repo")))
+                       (source (branch (name . "feature/x")))
+                       (author (display_name . "Ann Smith"))))))
+        (should-not (cl-find-if (lambda (tk) (string-prefix-p "label:" tk)) tokens))
+        (should (member "repo:my-repo" tokens))
+        ;; the author's space is folded, so it stays one Helm pattern
+        (should (member "author:Ann-Smith" tokens))))))
 
 (ert-deftest gp-test-helm-title-width-reserves-the-label-column ()
   "The auto-growing title column shrinks by the label column's width,
