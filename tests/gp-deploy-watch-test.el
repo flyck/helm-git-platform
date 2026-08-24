@@ -351,6 +351,29 @@ before padding or the state and step name run together."
         (should (string-match-p "cancelled +deploy-dev"
                                 (substring-no-properties (buffer-string))))))))
 
+(ert-deftest gp-test-dw-status-glyph-is-shared-across-the-ui ()
+  "One glyph per state, used by the notification, the step marker, the
+list and the log header, so an outcome looks the same wherever it is read."
+  (should (equal (gp-deploy-watch--state-glyph 'done) "🟢"))
+  (should (equal (gp-deploy-watch--state-glyph 'failed) "🔴"))
+  (should (equal (gp-deploy-watch--state-glyph 'waiting) "⏳"))
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-dev")))
+      ;; the step line
+      (should (string-match-p
+               "⏳" (substring-no-properties
+                    (gp-deploy-watch-step-marker
+                     (gp-dw-test--gate "deploy-dev") "acme/web" "feature/widget"))))
+      ;; the list
+      (with-temp-buffer
+        (gp-deploy-watch--render-list)
+        (should (string-match-p "⏳" (substring-no-properties (buffer-string)))))
+      ;; the log header
+      (gp-deploy-watch-cancel-watcher w)
+      (with-temp-buffer
+        (gp-deploy-watch--render-log w)
+        (should (string-match-p "⚪" (substring-no-properties (buffer-string))))))))
+
 (ert-deftest gp-test-dw-list-is-empty-without-watchers ()
   (gp-dw-test--with-clean-registry
     (with-temp-buffer
@@ -390,13 +413,149 @@ before padding or the state and step name run together."
           (gp-deploy-watch-toggle-at-point)
           (should (eq (gp-deploy-watch-state w) 'cancelled)))))))
 
-(ert-deftest gp-test-dw-manual-steps-supported-per-backend ()
-  "Bitbucket models gates; GitHub does not, and the difference is asked
-of the backend rather than hardcoded here."
+(ert-deftest gp-test-dw-only-triggerable-steps-are-schedulable ()
+  "Only a step somebody could press can be scheduled -- waiting for a
+step that runs itself would be waiting for nothing."
   (let ((git-platform-current-backend (git-platform-bitbucket)))
-    (should (gp-pipeline--manual-steps-supported-p)))
+    (should (gp-deploy-watch-schedulable-p (gp-dw-test--gate "deploy-dev")))
+    (should-not (gp-deploy-watch-schedulable-p
+                 (gp-dw-test--pending-auto "build")))
+    (should-not (gp-deploy-watch-schedulable-p nil))))
+
+(ert-deftest gp-test-dw-backend-support-is-asked-not-hardcoded ()
+  "Bitbucket has triggerable steps; GitHub Actions has none in this
+model, and the difference is asked of the backend rather than branching
+on which forge is in use."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (gp-deploy-watch-backend-supports-p)))
   (let ((git-platform-current-backend (git-platform-github)))
-    (should-not (gp-pipeline--manual-steps-supported-p))))
+    (should-not (gp-deploy-watch-backend-supports-p))
+    ;; and so nothing on GitHub is schedulable
+    (should-not (gp-deploy-watch-schedulable-p (gp-dw-test--gate "deploy-dev")))))
+
+;;;; Chained gates -- deploy-live behind deploy-dev ----------------------------------
+
+(ert-deftest gp-test-dw-steps-before-is-run-order ()
+  "\"Earlier\" means earlier in the run's own step list -- the only
+ordering the backend gives us, and the only one that matters."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-live"))
+          (steps (list (gp-dw-test--pending-auto "lint")
+                       (gp-dw-test--pending-auto "build")
+                       (gp-dw-test--gate "deploy-dev")
+                       (gp-dw-test--gate "deploy-live")
+                       (gp-dw-test--gate "deploy-after"))))
+      (should (equal (mapcar (lambda (s) (alist-get 'name s))
+                             (gp-deploy-watch--steps-before w steps))
+                     '("lint" "build" "deploy-dev")))
+      ;; a gate AFTER the target is not in the way
+      (should-not (member "deploy-after"
+                          (mapcar (lambda (s) (alist-get 'name s))
+                                  (gp-deploy-watch--steps-before w steps)))))))
+
+(ert-deftest gp-test-dw-presses-an-earlier-gate-then-keeps-waiting ()
+  "Scheduling deploy-live auto-approves the deploy-dev gate in its way,
+and does NOT finish -- pressing dev is a step on the road to live."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-live"))
+          (pressed nil))
+      (cl-letf (((symbol-function 'gp-pipeline-run-manual-step)
+                 (lambda (_f _b _p s) (push (alist-get 'name s) pressed) t)))
+        (let ((gp-pipeline-deploy-script nil))
+          (gp-deploy-watch--consider
+           w (gp-dw-test--data
+              gp-dw-test--running-pipeline
+              (list (gp-dw-test--gate "deploy-dev")
+                    (gp-dw-test--unreached-gate "deploy-live"))))))
+      (should (equal pressed '("deploy-dev")))
+      ;; still waiting for the target it was actually armed on
+      (should (eq (gp-deploy-watch-state w) 'waiting)))))
+
+(ert-deftest gp-test-dw-presses-each-earlier-gate-only-once ()
+  "A gate keeps reporting open for a moment after it is triggered;
+pressing it every poll would launch it again and again."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-live"))
+          (presses 0))
+      (cl-letf (((symbol-function 'gp-pipeline-run-manual-step)
+                 (lambda (&rest _) (setq presses (1+ presses)) t)))
+        (let ((gp-pipeline-deploy-script nil)
+              (data (gp-dw-test--data
+                     gp-dw-test--running-pipeline
+                     (list (gp-dw-test--gate "deploy-dev")
+                           (gp-dw-test--unreached-gate "deploy-live")))))
+          (gp-deploy-watch--consider w data)
+          (gp-deploy-watch--consider w data)
+          (gp-deploy-watch--consider w data)))
+      (should (= presses 1)))))
+
+(ert-deftest gp-test-dw-target-wins-over-an-earlier-open-gate ()
+  "When the target itself is ready it fires now, never deferred behind
+a gate that is no longer in its way."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-live"))
+          (fired nil))
+      (cl-letf (((symbol-function 'gp-deploy-watch--fire)
+                 (lambda (_w _p s) (setq fired (alist-get 'name s)))))
+        (gp-deploy-watch--consider
+         w (gp-dw-test--data gp-dw-test--running-pipeline
+                             (list (gp-dw-test--gate "deploy-dev")
+                                   (gp-dw-test--gate "deploy-live")))))
+      (should (equal fired "deploy-live")))))
+
+(ert-deftest gp-test-dw-automatic-step-ahead-is-not-pressed ()
+  "An automatic step in the way is just work still to do, not a button."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-live"))
+          (pressed nil))
+      (cl-letf (((symbol-function 'gp-pipeline-run-manual-step)
+                 (lambda (&rest _) (setq pressed t) t)))
+        (gp-deploy-watch--consider
+         w (gp-dw-test--data gp-dw-test--running-pipeline
+                             (list (gp-dw-test--pending-auto "build")
+                                   (gp-dw-test--unreached-gate "deploy-live")))))
+      (should-not pressed)
+      (should (eq (gp-deploy-watch-state w) 'waiting)))))
+
+(ert-deftest gp-test-dw-aborts-when-a-step-before-the-gate-fails ()
+  "A failed earlier step makes the target unreachable, so the watcher
+stops and names the step that broke rather than waiting out the timeout."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-live")))
+      (gp-deploy-watch--consider
+       w (gp-dw-test--data
+          gp-dw-test--running-pipeline
+          (list `((name . "build")
+                  (state (name . "COMPLETED") (result (name . "FAILED")))
+                  (trigger (type . "pipeline_step_trigger_automatic")))
+                (gp-dw-test--unreached-gate "deploy-live"))))
+      (should (eq (gp-deploy-watch-state w) 'failed))
+      (should (string-match-p "build" (gp-deploy-watch-detail w)))
+      (should (string-match-p "unreachable" (gp-deploy-watch-detail w))))))
+
+(ert-deftest gp-test-dw-terminal-states-notify ()
+  "A watcher runs unattended, so an outcome must reach the user outside
+the frame -- above all a failure.  Cancelling does not notify: the user
+just did it."
+  (gp-dw-test--with-clean-registry
+    (let ((notes nil))
+      (cl-letf (((symbol-function 'gp-notify)
+                 (lambda (title _body &optional urgent)
+                   (push (cons title urgent) notes))))
+        (let ((w (gp-dw-test--arm "deploy-live")))
+          (gp-deploy-watch--set-state w 'failed "build broke")
+          (should (= 1 (length notes)))
+          (should (cdar notes))                      ; urgent
+          (should (string-match-p "blocked" (caar notes))))
+        (setq notes nil)
+        (let ((w (gp-dw-test--arm "deploy-dev")))
+          (gp-deploy-watch--set-state w 'done "fired")
+          (should (= 1 (length notes)))
+          (should-not (cdar notes)))
+        (setq notes nil)
+        (let ((w (gp-dw-test--arm "deploy-other")))
+          (gp-deploy-watch-cancel-watcher w)
+          (should (null notes)))))))
 
 (provide 'gp-deploy-watch-test)
 ;;; gp-deploy-watch-test.el ends here
