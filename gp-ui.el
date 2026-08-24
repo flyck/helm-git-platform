@@ -22,6 +22,7 @@
 (require 'gp-log)
 (require 'gp-pipeline)
 
+(declare-function gp-deploy-watch-list-show "gp-deploy-watch")
 (declare-function gp-checkout--git "gp-checkout")
 (declare-function gp-checkout-current-branch "gp-checkout")
 (declare-function gp-helm "gp-helm")
@@ -1278,6 +1279,8 @@ that is when you need a way to add the first one."
   "s"   #'gp-detail-pipeline-stop
   "T"   #'gp-detail-pipeline-trigger-or-run-manual
   "P"   #'gp-detail-pipeline-rerun-step
+  "A"   #'gp-detail-pipeline-arm-deploy   ;; arm/disarm a deploy watcher
+  "C-c A" #'gp-deploy-watch-list-show     ;; every armed watcher
   "m"   #'gp-detail-toggle-mark
   "l"   #'gp-detail-pipeline-step-log)
 

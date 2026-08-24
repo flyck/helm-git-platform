@@ -39,6 +39,8 @@
 
 (defvar gp--pr)                         ;; the detail buffer's PR (gp-ui.el)
 (declare-function gp-detail-refresh "gp-ui")
+(declare-function gp-deploy-watch-step-marker "gp-deploy-watch")
+(declare-function gp-deploy-watch-toggle-at-point "gp-deploy-watch")
 
 ;;;; Faces ---------------------------------------------------------------------
 
@@ -348,6 +350,14 @@ the indistinguishable running state."
                   (manual (propertize "  [manual]" 'face 'shadow)))
                 (when rerunnable
                   (propertize "  [rerun ▸ P]" 'face 'gp-pipeline-running-face))
+                ;; an armed deploy watcher, so a waiting gate is visible from
+                ;; the PR itself rather than only in the watcher list
+                (and manual (fboundp 'gp-deploy-watch-step-marker)
+                     (boundp 'gp--pr) gp--pr
+                     (ignore-errors
+                       (gp-deploy-watch-step-marker
+                        step (gp-pr-full-name gp--pr)
+                        (gp-pr-source-branch gp--pr))))
                 (unless (string-empty-p dur)
                   ;; A running step's duration is computed from `started_on'
                   ;; at RENDER time, so it is a snapshot, not a clock.  The
@@ -835,6 +845,16 @@ Only offered on a manual step that is still waiting."
                 (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
             (error (message "Could not run manual step: %s"
                             (error-message-string e))))))))
+
+(defun gp-detail-pipeline-arm-deploy ()
+  "Arm the manual step at point to run as soon as the build reaches it.
+Pressing `A' again on an armed step cancels it.  The waiting itself
+lives in `gp-deploy-watch'; this is just the detail view's door into
+it, kept beside the other pipeline commands so the keymap has one
+place to point at."
+  (interactive)
+  (require 'gp-deploy-watch)
+  (gp-deploy-watch-toggle-at-point))
 
 (defun gp-detail-pipeline-rerun-step ()
   "Re-run the finished step at point in place.
