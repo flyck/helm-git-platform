@@ -163,6 +163,12 @@ backend has no per-merge control (GitHub decides by repository setting)
 it is ignored.  Either way the forge owns the remote branch -- callers
 must never delete it themselves.")
 
+(gp-defop set-pull-request-title (full-name id title)
+  "Set PR FULL-NAME/ID's title to TITLE, returning the updated PR.
+Backends differ in what else they must resend: Bitbucket's update is a
+whole-object PUT (so the description rides along or is lost), GitHub's a
+partial PATCH.  An empty title is rejected rather than sent.")
+
 (gp-defop set-pull-request-description (full-name id description &optional title)
   "Set PR FULL-NAME/ID's description/body to DESCRIPTION.
 TITLE is an optimisation for backends whose update is a whole-object

@@ -1081,6 +1081,61 @@ order it happened to see locally."
                        (overlay-start o) (overlay-end o)))
           (gp-test--buttons)))
 
+;;;; Title editing ---------------------------------------------------------------
+
+(ert-deftest gp-test-edit-title-saves-a-changed-title ()
+  "A changed title is sent, then the buffer refreshes."
+  (let ((pr (append '((title . "old title")) (car (gp-test--mock-prs))))
+        sent refreshed)
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "  new title  "))
+              ((symbol-function 'gp-set-pull-request-title)
+               (lambda (_fn _id title) (setq sent title)))
+              ((symbol-function 'gp-invalidate-pr-caches) #'ignore)
+              ((symbol-function 'gp-detail-refresh) (lambda () (setq refreshed t))))
+      (gp-ui-edit-title pr))
+    ;; trimmed before sending
+    (should (equal sent "new title"))
+    (should refreshed)))
+
+(ert-deftest gp-test-edit-title-does-nothing-when-unchanged ()
+  "Submitting the same title costs no request.
+The prompt is pre-filled with the current title, so RET is the most
+likely keystroke -- it must not fire a pointless write."
+  (let ((pr (append '((title . "same title")) (car (gp-test--mock-prs))))
+        (sent nil))
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "same title"))
+              ((symbol-function 'gp-set-pull-request-title)
+               (lambda (&rest _) (setq sent t)))
+              ((symbol-function 'gp-detail-refresh) #'ignore))
+      (gp-ui-edit-title pr))
+    (should-not sent)))
+
+(ert-deftest gp-test-edit-title-refuses-an-empty-title ()
+  "Clearing the prompt aborts rather than blanking the PR's title.
+Unlike a description, an empty title is never a legitimate edit."
+  (let ((pr (append '((title . "old")) (car (gp-test--mock-prs))))
+        (sent nil))
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "   "))
+              ((symbol-function 'gp-set-pull-request-title)
+               (lambda (&rest _) (setq sent t))))
+      (should-error (gp-ui-edit-title pr) :type 'user-error))
+    (should-not sent)))
+
+(ert-deftest gp-test-title-edit-button-only-on-open-prs ()
+  "The title carries an edit button while open, and none once closed."
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (let ((open (car (gp-test--mock-prs))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t)) (gp--render-detail open nil))
+        (should (string-match-p "✎ \\[N\\]" (substring-no-properties (buffer-string))))))
+    (let ((merged (append '((state . "MERGED")) (car (gp-test--mock-prs)))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t)) (gp--render-detail merged nil))
+        (should-not (string-match-p "✎ \\[N\\]"
+                                    (substring-no-properties (buffer-string))))))))
+
 ;;;; Merge affordance -----------------------------------------------------------
 
 (ert-deftest gp-test-merge-button-shown-when-mergeable ()

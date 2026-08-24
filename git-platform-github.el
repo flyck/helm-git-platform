@@ -72,6 +72,8 @@
 (cl-defmethod gp--merge-pull-request ((_ git-platform-github) full-name id
                                       &optional strategy message close-source-branch)
   (github-merge-pull-request full-name id strategy message close-source-branch))
+(cl-defmethod gp--set-pull-request-title ((_ git-platform-github) full-name id title)
+  (github-set-pull-request-title full-name id title))
 (cl-defmethod gp--set-pull-request-description ((_ git-platform-github) full-name id description &optional title)
   (github-set-pull-request-description full-name id description title))
 (cl-defmethod gp--set-pull-request-draft ((_ git-platform-github) full-name id draft &optional title)

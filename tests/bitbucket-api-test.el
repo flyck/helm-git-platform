@@ -293,6 +293,28 @@ omitting it would blank the PR's title (same trap as `set-draft')."
     (let ((data (nth 3 (car bitbucket-mock-calls))))
       (should (equal (alist-get 'description data) "")))))
 
+(ert-deftest bitbucket-test-set-title-preserves-the-description ()
+  "Retitling must resend the description, or the PUT blanks it.
+The endpoint replaces the whole object -- the mirror of
+`bitbucket-set-pull-request-description' having to resend the title."
+  (bitbucket-mock-with-service
+    (bitbucket-set-pull-request-title "ws/slug" 7 "A better title")
+    (let* ((put (car (cl-remove-if-not
+                      (lambda (c) (and (equal (car c) "PUT")
+                                       (string-suffix-p "/pullrequests/7" (nth 1 c))))
+                      bitbucket-mock-calls)))
+           (data (nth 3 put)))
+      (should (equal (alist-get 'title data) "A better title"))
+      ;; present, so the existing description survives the replace
+      (should (assq 'description data)))))
+
+(ert-deftest bitbucket-test-set-title-rejects-an-empty-title ()
+  "An empty title fails locally rather than blanking the PR's title."
+  (bitbucket-mock-with-service
+    (should-error (bitbucket-set-pull-request-title "ws/slug" 7 ""))
+    (should-error (bitbucket-set-pull-request-title "ws/slug" 7 "   "))
+    (should-error (bitbucket-set-pull-request-title "ws/slug" 7 nil))))
+
 (ert-deftest bitbucket-test-merge-posts-strategy-and-options ()
   "Merging POSTs the strategy, message and close flag."
   (bitbucket-mock-with-service

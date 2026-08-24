@@ -730,6 +730,20 @@ also delete the remote branch.  Requires Pull-requests:Write."
            (when (and message (not (string-empty-p message))) `((message . ,message)))
            (when close-source-branch '((close_source_branch . t))))))
 
+(defun bitbucket-set-pull-request-title (full-name id title)
+  "Set the title of PR ID in FULL-NAME to TITLE.
+The endpoint is a whole-object PUT, so the DESCRIPTION has to be resent
+alongside -- the mirror image of `bitbucket-set-pull-request-description'
+resending the title.  Omitting it would silently blank the description.
+Bitbucket only allows mutating OPEN pull requests.  Requires
+Pull-requests:Write.  Returns the updated PR."
+  (when (or (null title) (string-empty-p (string-trim title)))
+    (error "A pull request title cannot be empty"))
+  (let ((description (or (alist-get 'description (bitbucket-pull-request full-name id)) "")))
+    (bitbucket-api-request
+     "PUT" (format "/repositories/%s/pullrequests/%s" full-name id)
+     nil `((title . ,title) (description . ,description)))))
+
 (defun bitbucket-set-pull-request-description (full-name id description &optional title)
   "Set the description of PR ID in FULL-NAME to DESCRIPTION.
 PUT replaces the PR, so TITLE is sent to preserve it (fetched when

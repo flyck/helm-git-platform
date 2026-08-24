@@ -181,6 +181,7 @@ lowercase keypress while reading can't mutate anything:
 | `X` | Resolve / reopen the comment at point |
 | `K` | Delete the comment at point (see below) |
 | `V` | Add / remove reviewers on this PR |
+| `N` | Edit this PR's title (minibuffer; empty aborts) |
 | `E` | Edit this PR's description (opens a compose buffer; empty clears it) |
 | `C` | Add a general (non-inline) comment on the PR |
 | `+` | Toggle your 👍 on the comment at point (GitHub; hidden on Bitbucket) |

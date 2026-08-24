@@ -1070,6 +1070,11 @@ that is when you need a way to add the first one."
       (insert "  ")
       (insert (propertize (or .title "(no title)")
                           'face 'gp-detail-title-face))
+      (when (gp-pr-open-p pr)
+        (insert "   ")
+        (gp--insert-action-button
+         "✎ [N]" "Edit this pull request's title"
+         (lambda () (gp-ui-edit-title pr))))
       (insert "\n")
       (insert "🔀 "
               (propertize (format "%s → %s"
@@ -1253,6 +1258,7 @@ that is when you need a way to add the first one."
   "X"   #'gp-detail-resolve
   "e"   #'gp-detail-edit
   "E"   #'gp-detail-edit-description  ;; edit the PR's own description
+  "N"   #'gp-detail-edit-title        ;; rename: edit the PR's title
   "C"   #'gp-detail-add-general-comment ;; new general (non-inline) comment
   "M"   #'gp-detail-merge               ;; merge (C-u picks the strategy)
   "+"   #'gp-detail-like-comment        ;; quick 👍 toggle on the comment at point
@@ -1279,6 +1285,11 @@ that is when you need a way to add the first one."
   "Add or remove reviewers on the PR shown in this buffer."
   (interactive)
   (gp-ui-edit-reviewers gp--pr))
+
+(defun gp-detail-edit-title ()
+  "Edit the title of the PR shown in this buffer."
+  (interactive)
+  (gp-ui-edit-title gp--pr))
 
 (defun gp-detail-edit-description ()
   "Edit the description of the PR shown in this buffer."
@@ -1672,6 +1683,25 @@ those is a privilege, and a misfire is not undoable."
     (if (and sec (object-of-class-p sec 'gp-comment-section))
         (gp-ui-goto-comment-file gp--pr (oref sec value))
       (user-error "Point is not on a comment"))))
+
+(defun gp-ui-edit-title (pr)
+  "Edit PR's title in the minibuffer, saving it back on RET.
+A title is one line, so this is a `read-string' rather than a compose
+buffer -- the editor `E' opens would be the wrong shape for it.  The
+current title is pre-filled and editable in place; leaving it unchanged,
+or blank, does nothing."
+  (let* ((full-name (gp-pr-full-name pr))
+         (id (alist-get 'id pr))
+         (current (or (alist-get 'title pr) ""))
+         (new (string-trim (read-string (format "Title for PR #%s: " id) current))))
+    (cond
+     ((string-empty-p new) (user-error "A pull request title cannot be empty"))
+     ((equal new (string-trim current)) (message "Title unchanged"))
+     (t
+      (gp-set-pull-request-title full-name id new)
+      (gp-invalidate-pr-caches pr)
+      (gp-detail-refresh)
+      (message "PR #%s retitled" id)))))
 
 (defun gp-ui-edit-description (pr)
   "Edit PR's description in a compose buffer, saving it back on submit.

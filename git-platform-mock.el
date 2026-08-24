@@ -533,6 +533,12 @@ discard an approval."
                     (list title id)))
   (gp--pull-request (git-platform-backend) full-name id))
 
+(cl-defmethod gp--set-pull-request-title ((_ git-platform-mock) full-name id title)
+  (sqlite-execute (gp-mock--db)
+                  "UPDATE prs SET title = ?, updated_on = ? WHERE id = ?"
+                  (list title (gp-mock--iso) id))
+  (gp--pull-request (git-platform-backend) full-name id))
+
 (cl-defmethod gp--set-pull-request-description ((_ git-platform-mock) full-name id
                                                 description &optional _title)
   (sqlite-execute (gp-mock--db)

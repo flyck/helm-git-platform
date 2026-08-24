@@ -762,6 +762,17 @@ requests: write."
            (when (and message (not (string-empty-p message)))
              `((commit_message . ,message))))))
 
+(defun github-set-pull-request-title (full-name number title)
+  "Set PR NUMBER in FULL-NAME's title to TITLE.
+A partial PATCH, so nothing else is touched -- no need to resend the
+body the way the Bitbucket backend must.  Requires Pull requests: write.
+Returns the updated PR."
+  (when (or (null title) (string-empty-p (string-trim title)))
+    (error "A pull request title cannot be empty"))
+  (github-api-request
+   "PATCH" (format "/repos/%s/pulls/%s" full-name number)
+   nil `((title . ,title))))
+
 (defun github-set-pull-request-description (full-name number description &optional _title)
   "Set PR NUMBER in FULL-NAME's body to DESCRIPTION.
 Unlike the draft flag, this is plain REST: a PATCH with just `body'

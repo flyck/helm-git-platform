@@ -261,5 +261,18 @@ backend's internals, so the protocol's contract is what is pinned."
                              (gp-comment-reactions fn comment))
                      '("rocket"))))))
 
+(ert-deftest gp-mock-test-set-title-round-trip ()
+  "Retitling goes through the protocol and reads back, description intact."
+  (gp-mock-test--with
+    (let* ((fn "acme/webshop")
+           (pr (car (gp-workspace-pull-requests)))
+           (id (alist-get 'id pr))
+           (before (gp-pr-description pr)))
+      (gp-set-pull-request-title fn id "a retitled pull request")
+      (let ((fresh (gp-pull-request fn id)))
+        (should (equal (alist-get 'title fresh) "a retitled pull request"))
+        ;; the description must not be collateral damage
+        (should (equal (gp-pr-description fresh) before))))))
+
 (provide 'git-platform-mock-test)
 ;;; git-platform-mock-test.el ends here

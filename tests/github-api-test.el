@@ -396,6 +396,27 @@ hard block on commenting at all."
   (cl-letf (((symbol-function 'github-pull-request-diff) (lambda (&rest _) nil)))
     (should-not (github-inline-target-problem "acme/web" 7 "anything.el" 1))))
 
+;;;; Title ------------------------------------------------------------------------
+
+(ert-deftest github-test-set-title-patches-only-the-title ()
+  "Retitling sends just the title -- a PATCH leaves the body alone.
+Unlike Bitbucket there is nothing to resend, and sending the body would
+risk overwriting a description edited elsewhere in the meantime."
+  (github-mock-with-service
+    (let ((github-mock-calls nil))
+      (github-set-pull-request-title "acme/web" 42 "A better title")
+      (let ((call (car github-mock-calls)))
+        (should (equal (nth 0 call) "PATCH"))
+        (should (string-suffix-p "/pulls/42" (nth 1 call)))
+        (should (equal (alist-get 'title (nth 3 call)) "A better title"))
+        (should-not (assq 'body (nth 3 call)))))))
+
+(ert-deftest github-test-set-title-rejects-an-empty-title ()
+  "An empty title fails locally rather than as a remote 422."
+  (github-mock-with-service
+    (should-error (github-set-pull-request-title "acme/web" 42 ""))
+    (should-error (github-set-pull-request-title "acme/web" 42 nil))))
+
 ;;;; Merging ---------------------------------------------------------------------
 
 (ert-deftest github-test-merge-puts-method-and-message ()

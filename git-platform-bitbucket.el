@@ -109,6 +109,8 @@
 (cl-defmethod gp--merge-pull-request ((_ git-platform-bitbucket) full-name id
                                       &optional strategy message close-source-branch)
   (bitbucket-merge-pull-request full-name id strategy message close-source-branch))
+(cl-defmethod gp--set-pull-request-title ((_ git-platform-bitbucket) full-name id title)
+  (bitbucket-set-pull-request-title full-name id title))
 (cl-defmethod gp--set-pull-request-description ((_ git-platform-bitbucket) full-name id description &optional title)
   (bitbucket-set-pull-request-description full-name id description title))
 (cl-defmethod gp--set-pull-request-reviewers ((_ git-platform-bitbucket)

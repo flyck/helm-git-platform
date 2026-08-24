@@ -1,5 +1,13 @@
 # TODO
 
+## Coloring
+
+would be nice if the progress animation were blue and not red.
+
+## Add a queued status for pipeline steps
+
+we should have a loading indecator icon here for spinning
+
 ## GitHub labels support
 
 - `C-c C-c` on a label in either view should filter/jump to the set of PRs
