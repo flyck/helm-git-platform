@@ -249,6 +249,17 @@ background and fires the step the moment the backend reports its gate genuinely 
 the pipeline's business, not ours: the watcher never models the dependency graph, it just refuses to
 act until the gate is actually open, so it cannot fire early.
 
+Only *triggerable* steps can be scheduled -- waiting for a step that runs itself would be waiting for
+nothing to happen.
+
+Arming a step also **auto-approves any earlier gates in its way**. Schedule `deploy-live` on a
+pipeline that gates `deploy-dev` first, and the watcher waits for lint and build, presses `deploy-dev`
+when that gate opens, waits again, then fires `deploy-live` -- each gate pressed once, in order.
+Getting to live is what you asked for, so it does not stop to ask again on the way. If a step ahead
+of the target fails, the target is unreachable: the watcher stops immediately and names the step that
+broke, rather than waiting out its timeout. Every outcome raises a desktop notification (🟢 deployed,
+🔴 blocked) -- you armed it so you could stop watching, so the result has to find you.
+
 Watchers are global, not tied to the PR buffer -- closing it (or wandering off to another PR) will
 not silently cancel a deploy you are waiting on. Each keeps an in-memory event log. `A` again
 disarms; `C-c A` lists every watcher, where `RET` opens one's log, `k` cancels, and `C` clears the
