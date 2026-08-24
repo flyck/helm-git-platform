@@ -49,11 +49,6 @@ read as "running" anywhere in the UI (bubble, step glyph) -- it's
 indistinguishable from idle/not-started, so a PR that's actually waiting
 in a queue looks the same as one with nothing happening at all.
 
-## GitHub labels support
-
-- `C-c C-c` on a label in either view should filter/jump to the set of PRs
-  carrying that label (open PRs with that label, workspace/repo-wide).
-
 ## Notice when the PR's branch has uncommitted local work
 
 Show `⚠ branch has uncommitted local work` in the detail view, but only when
