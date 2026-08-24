@@ -1462,6 +1462,100 @@ take down the rest of the detail load."
                  (lambda (_time _rep fn &rest args) (apply fn args))))
         (should-not (gp--detail-load-local-dirty (current-buffer) pr))
         (should-not gp--detail-local-dirty)))))
+(ert-deftest gp-test-label-carries-its-name-and-keymap ()
+  "A rendered label knows which label it is, so a click on it needs no
+re-derivation from the surrounding text."
+  (github-mock-with-service
+    (let* ((git-platform-current-backend (git-platform-github))
+           (rendered (gp--format-labels (gp-pr-labels github-mock--pr-1)))
+           (pos (string-match "bug" rendered)))
+      (should (equal (get-text-property pos 'gp-label rendered) "bug"))
+      (should (eq (get-text-property pos 'keymap rendered) gp-label-map))
+      ;; and the click target is discoverable before clicking it
+      (should (get-text-property pos 'mouse-face rendered))
+      (should (string-match-p "click to filter"
+                              (get-text-property pos 'help-echo rendered))))))
+
+(ert-deftest gp-test-label-map-binds-click-and-key ()
+  "Both routes into the filter are bound on the label itself, not on the
+mode map, so `C-c C-c' keeps its meaning everywhere else in the buffer."
+  (should (eq (lookup-key gp-label-map [mouse-1]) #'gp-filter-by-label))
+  (should (eq (lookup-key gp-label-map (kbd "C-c C-c")) #'gp-filter-by-label))
+  (should-not (lookup-key gp-list-mode-map (kbd "C-c C-c")))
+  (should-not (lookup-key gp-detail-mode-map (kbd "C-c C-c"))))
+
+(ert-deftest gp-test-label-at-point-reads-the-heading ()
+  "The label is readable from a real rendered buffer, at the position a
+click would land on."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (with-temp-buffer
+        (gp-list-mode)
+        (let ((inhibit-read-only t))
+          (magit-insert-section (gp-root)
+            (gp--insert-pr github-mock--pr-1)))
+        (goto-char (point-min))
+        (should (search-forward "bug" nil t))
+        (goto-char (match-beginning 0))
+        (should (equal (gp-label-at-point) "bug"))
+        ;; off the label there is nothing to filter by
+        (goto-char (point-min))
+        (should-not (gp-label-at-point))))))
+
+(ert-deftest gp-test-filter-by-label-hands-off-to-helm ()
+  "Where Helm is loaded the filter goes into its search box, so the
+narrowing is visible and can be widened by ordinary editing."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (asked nil))
+      (cl-letf (((symbol-function 'gp-helm-list-by-label)
+                 (lambda (name) (setq asked name))))
+        (with-temp-buffer
+          (gp-list-mode)
+          (let ((inhibit-read-only t))
+            (magit-insert-section (gp-root)
+              (gp--insert-pr github-mock--pr-1)))
+          (goto-char (point-min))
+          (search-forward "bug")
+          (goto-char (match-beginning 0))
+          (gp-filter-by-label)
+          (should (equal asked "bug")))))))
+
+(ert-deftest gp-test-filter-by-label-errors-off-a-label ()
+  "Called where there is no label, it says so rather than guessing one."
+  (with-temp-buffer
+    (gp-list-mode)
+    (should-error (gp-filter-by-label) :type 'user-error)))
+
+(ert-deftest gp-test-list-labelled-filters-loaded-prs ()
+  "The Helm-less fallback filters the PRs already in hand -- no refetch
+on a click -- and shows only the ones actually carrying the label."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github))
+          (buf nil))
+      (unwind-protect
+          (with-temp-buffer
+            (gp-list-mode)
+            (setq gp--prs (list github-mock--pr-1 github-mock--pr-2))
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (b &rest _) (setq buf b))))
+              (gp--list-labelled "bug"))
+            (with-current-buffer buf
+              (let ((text (substring-no-properties (buffer-string))))
+                (should (string-match-p "Labelled bug" text))
+                (should (string-match-p "Add the widget toggle" text))
+                ;; pr-2 has no labels at all, so it must not be listed
+                (should-not (string-match-p "Fix the flaky test" text)))))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest gp-test-list-labelled-errors-when-nothing-matches ()
+  "A label no loaded PR carries opens no empty buffer."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (with-temp-buffer
+        (gp-list-mode)
+        (setq gp--prs (list github-mock--pr-2))
+        (should-error (gp--list-labelled "bug") :type 'user-error)))))
 
 (ert-deftest gp-test-labels-hidden-entirely-on-bitbucket ()
   "Bitbucket has no labels, so nothing label-shaped is rendered at all --

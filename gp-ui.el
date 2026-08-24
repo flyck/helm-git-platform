@@ -171,18 +171,40 @@ carrying)."
             (puthash hex face gp--label-face-cache)
             face)))))
 
+(defvar gp-label-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'gp-filter-by-label)
+    (define-key map (kbd "C-c C-c") #'gp-filter-by-label)
+    map)
+  "Keymap active on a rendered label, for filtering by it.
+Lives on the label text itself rather than in the mode map, so the
+binding only fires where a label actually is -- `C-c C-c' anywhere
+else in the buffer keeps whatever meaning the mode gives it.")
+
 (defun gp--format-labels (labels)
   "Return LABELS as one propertized string, or \"\" when there are none.
 LABELS is `gp-pr-labels' shape.  Returns the empty string rather than
-nil so callers can `concat' it unconditionally."
+nil so callers can `concat' it unconditionally.
+
+Each label carries its name in a `gp-label' text property and the
+`gp-label-map' keymap, so clicking it (or `C-c C-c' on it) can filter
+the list by that label without re-deriving which one was under point."
   (if (null labels)
       ""
     (mapconcat
      (lambda (l)
-       (propertize (format " %s " (plist-get l :name))
-                   'face (gp--label-face (plist-get l :color))
-                   'help-echo (format "label: %s" (plist-get l :name))))
+       (let ((name (plist-get l :name)))
+         (propertize (format " %s " name)
+                     'face (gp--label-face (plist-get l :color))
+                     'gp-label name
+                     'mouse-face 'highlight
+                     'keymap gp-label-map
+                     'help-echo (format "label: %s (click to filter)" name))))
      labels " ")))
+
+(defun gp-label-at-point ()
+  "Return the name of the label at point, or nil."
+  (get-text-property (point) 'gp-label))
 
 ;;;; Section types -----------------------------------------------------------
 
@@ -2449,6 +2471,61 @@ which optional layers (gp-watch, gp-helm) are in use."
   "Open the detail buffer for the PR at point."
   (interactive)
   (gp-show-pr (gp-current-pr)))
+
+(defun gp-filter-by-label (&optional event)
+  "Show the pull requests carrying the label at point.
+Bound on the label text itself (`gp-label-map'), so it fires for a
+click or `C-c C-c' on a label in either the list or the detail
+buffer and nowhere else.  EVENT is the mouse event when clicked;
+point is moved to it first, since a click does not move point on its
+own and the label under the *pointer* is the one meant.
+
+Hands off to Helm where it is available, opening the overview with
+`label:NAME' already in the search box -- a starting pattern the
+user can widen or extend, not a hidden filter.  Without Helm there is
+nothing to type into, so the current buffer's PRs are filtered into
+a list buffer of their own instead."
+  (interactive (list last-nonmenu-event))
+  (when (and event (listp event))
+    (let ((pos (event-start event)))
+      (when (posn-point pos)
+        (select-window (posn-window pos))
+        (goto-char (posn-point pos)))))
+  (let ((name (gp-label-at-point)))
+    (cond
+     ((null name) (user-error "No label at point"))
+     ((fboundp 'gp-helm-list-by-label) (gp-helm-list-by-label name))
+     (t (gp--list-labelled name)))))
+
+(defun gp--list-labelled (name)
+  "Render the PRs labelled NAME into a dedicated list buffer.
+The Helm-less fallback for `gp-filter-by-label'.  Filters the PRs
+already loaded rather than refetching: the label came off one of
+them, so the set is in hand, and a fetch here would block redisplay
+on the click."
+  (let* ((prs (or gp--prs
+                  (buffer-local-value
+                   'gp--prs (or (get-buffer gp-list-buffer-name)
+                                (current-buffer)))))
+         (matching (cl-remove-if-not
+                    (lambda (pr)
+                      (cl-find name (gp-pr-labels pr)
+                               :key (lambda (l) (plist-get l :name))
+                               :test #'equal))
+                    prs)))
+    (unless matching
+      (user-error "No loaded pull request carries the label %s" name))
+    (let ((buf (get-buffer-create
+                (gp--buffer-name (format "PRs [%s]" name)))))
+      (with-current-buffer buf
+        (gp-list-mode)
+        (setq gp--prs matching)
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (magit-insert-section (gp-root)
+            (gp--insert-group (format "Labelled %s" name) matching)))
+        (goto-char (point-min)))
+      (pop-to-buffer buf))))
 
 (defcustom gp-detail-show-stats t
   "When non-nil, fetch and show commit/file/line stats in the detail buffer.

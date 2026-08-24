@@ -1041,6 +1041,13 @@ plain editing."
      (t (gp-helm--append-to-pattern
          (gp-helm--search-token "label" (car names)))))))
 
+(defun gp-helm-list-by-label (name)
+  "Open the Helm PR list narrowed to label NAME.
+The entry point `gp-filter-by-label' uses from the list and detail
+buffers, which have no Helm dependency of their own."
+  (require 'helm)
+  (gp-helm--list nil (concat (gp-helm--search-token "label" name) " ")))
+
 (defun gp-helm--list-keymap (include-merged)
   "Keymap for the main PR list.
 C-c g reloads: clears the PR-list cache AND the deploy-status caches
@@ -1255,8 +1262,13 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
          (lambda (pr) (equal (gp-pr-source-branch pr) branch))
          (gp-repo-pull-requests full-name))))))
 
-(defun gp-helm--list (include-merged)
-  "Show the Helm workspace PR list.  See `gp-helm' for INCLUDE-MERGED."
+(defun gp-helm--list (include-merged &optional input)
+  "Show the Helm workspace PR list.  See `gp-helm' for INCLUDE-MERGED.
+INPUT pre-fills the search pattern, so a caller can open the list
+already narrowed -- `gp-filter-by-label' passes a `label:NAME' token
+\(see `gp-helm--pr-search-tokens').  It is only a starting pattern:
+editing it widens the list again, so nothing is hidden behind a
+filter the user cannot see or undo."
   (let* ((uuid (gp-user-uuid))
          (states (if include-merged '("OPEN" "MERGED" "DECLINED") '("OPEN")))
          (mine-hit (gp-cache-get (list 'mine uuid include-merged)))
@@ -1401,8 +1413,12 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
             :truncate-lines t
             :buffer gp-helm-buffer
             :full-frame gp-helm-full-frame
-            :preselect (when gp-helm--last-visited-pr-id
-                         (format "#%s " gp-helm--last-visited-pr-id))))))
+            :input (or input "")
+            ;; a pre-filled pattern already picks the row; preselecting the
+            ;; last-visited PR on top of it would fight the filter
+            :preselect (unless input
+                         (when gp-helm--last-visited-pr-id
+                           (format "#%s " gp-helm--last-visited-pr-id)))))))
 
 (defun gp-helm--scan-pipelines-async (prs)
   "Fetch each PR's latest-commit pipeline state in parallel, refreshing live.
