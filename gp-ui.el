@@ -25,6 +25,7 @@
 (declare-function gp-deploy-watch-list-show "gp-deploy-watch")
 (declare-function gp-checkout--git "gp-checkout")
 (declare-function gp-checkout-current-branch "gp-checkout")
+(declare-function gp-checkout-dirty-count "gp-checkout")
 (declare-function gp-helm "gp-helm")
 (declare-function gp-helm-terminal-send-comment "gp-helm-terminal")
 (declare-function gp-helm-terminal-send-comments "gp-helm-terminal")
@@ -99,6 +100,12 @@
 Distinct from `gp-branch-face' so the repo line does not read as
 another branch: they sit one above the other and would otherwise be
 one indistinguishable block." :group 'bitbucket-faces)
+(defface gp-dirty-tree-face '((t :inherit warning))
+  "Face for the uncommitted-local-changes notice in the detail buffer.
+`warning', not `error': uncommitted work is a caution about what a
+checkout would move, not something broken -- the conflict warning
+right below it owns `error', and two lines shouting equally would
+flatten the difference." :group 'bitbucket-faces)
 (defface gp-comment-author-face '((t :inherit bold))
   "Face for comment authors." :group 'bitbucket-faces)
 (defface gp-detail-title-face
@@ -230,6 +237,14 @@ render functions check this so that ONE button swaps to a spinner in
 its own slot on the immediate redraw, instead of the mutation
 blocking Emacs with no feedback until the full post-mutation refresh
 lands (see `gp--insert-action-button/spinner').")
+(defvar-local gp--detail-local-dirty nil
+  "Local working-tree state of the PR's checkout, or nil.
+Plist (:dir DIR :branch BRANCH :count N), set only when the tree has
+uncommitted changes.  Filled by `gp--detail-load-local-dirty', never
+during a render: it shells out to git, and the no-fetch-in-render rule
+covers a subprocess just as much as a request.  Nil also means \"no
+clone\" and \"not asked yet\", all three of which draw nothing -- a
+notice about work that may not exist is worse than none.")
 (defvar-local gp--detail-marked-comment-ids nil
   "Comment ids marked for batch terminal handoff in the detail buffer.")
 (defvar-local gp--detail-refresh-token 0
@@ -820,6 +835,32 @@ knowing -- and for a decline, the reason where the backend has one
           (insert (propertize (format "  %s\n" (string-trim reason)) 'face 'shadow))))
       (insert "\n"))))
 
+(defun gp--insert-local-dirty-warning ()
+  "Insert a notice when the PR's local checkout has uncommitted changes.
+Reads `gp--detail-local-dirty' rather than shelling out to git, so this
+costs nothing during a render (same rule as the conflict warning).
+
+Sits near the top because the buttons a few lines above it -- checkout,
+show-diff -- are exactly the ones that move the working tree, and
+knowing there is unsaved work HERE is what stops you pressing them
+blind.  It says the branch the work is sitting on: dirty work on the
+PR's own source branch is a different situation from dirty work on some
+unrelated branch, and only the second is a surprise."
+  (when-let* ((state gp--detail-local-dirty)
+              (count (plist-get state :count)))
+    (insert (propertize "⚠ Uncommitted local changes" 'face 'gp-dirty-tree-face))
+    (insert (propertize
+             (format "  (%d file%s%s)\n"
+                     count (if (= count 1) "" "s")
+                     (if-let* ((branch (plist-get state :branch)))
+                         (format " on %s" branch)
+                       ""))
+             'face 'shadow))
+    (insert (propertize
+             "  Checkout [O] stashes them first; [o] opens the repo as it is.\n"
+             'face 'shadow))
+    (insert "\n")))
+
 (defun gp--insert-merge-conflict-warning (pr)
   "Insert a conflict warning for PR when the forge reports one.
 Reads `gp--detail-mergeability' rather than asking the forge, so this
@@ -1225,6 +1266,7 @@ that is when you need a way to add the first one."
                          buf 'changes (lambda () (gp-ui-set-review pr 'changes nil))))))))
       (insert "\n\n"))
     (gp--insert-outcome-banner pr)
+    (gp--insert-local-dirty-warning)
     (gp--insert-description pr)
     (gp--insert-merge-conflict-warning pr)
     (gp--insert-merge-pipelines pr)
@@ -2329,6 +2371,7 @@ fresh data bind `gp-cache-ttl' to 0 around the call."
                             (gp--detail-load-stats-diff buf pr ttl)
                             (gp--detail-load-reviewers buf pr)
                             (gp--detail-load-commits buf pr)
+                            (gp--detail-load-local-dirty buf pr)
                             (gp--detail-load-mergeability buf pr)
                             (gp--detail-load-merge-pipelines buf pr)
                             (if gp-detail-show-pipelines
@@ -2463,6 +2506,45 @@ waits on it.  A wall-clock timer, NOT `run-with-idle-timer' -- see
             gp-detail-max-commits)
          (error
           (gp-log-error "commits load failed: %s" (error-message-string e))))))))
+
+(defun gp--detail-load-local-dirty (buf pr)
+  "Check PR's local checkout for uncommitted work and fold it into BUF.
+Deferred like the other heavy data.  Git here is a subprocess rather
+than a request, but `call-process' blocks Emacs just as flatly as a
+socket read does, so it stays off the visible-render path for the same
+reason -- and a `git status' on a large tree is not reliably fast.
+
+Local resolution only (`gp-local-find-checkout'), never
+`gp-local-ensure-checkout': drawing a warning must not clone a repo or
+switch a branch as a side effect.  No clone means nothing to warn
+about, and the value stays nil.
+
+Re-read on every refresh rather than cached: the whole point is to
+reflect the tree as it is right now, and it goes stale the moment you
+save a file outside Emacs."
+  (run-at-time
+   0.1 nil
+   (lambda ()
+     (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
+       (condition-case e
+           (let* ((_ (require 'gp-checkout))
+                  (full-name (ignore-errors (gp-pr-full-name pr)))
+                  (dir (and full-name (gp-local-find-checkout full-name)))
+                  (count (and dir (gp-checkout-dirty-count dir)))
+                  (state (when (and count (> count 0))
+                           (list :dir dir
+                                 :branch (gp-checkout-current-branch dir)
+                                 :count count))))
+             (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
+               (with-current-buffer buf
+                 ;; redraw only on a real change: a clean tree is the common
+                 ;; case, and re-rendering the whole buffer to draw nothing
+                 ;; would throw away point and section visibility for free
+                 (unless (equal state gp--detail-local-dirty)
+                   (setq gp--detail-local-dirty state)
+                   (gp--detail-rerender buf)))))
+         (error
+          (gp-log-error "local dirty check failed: %s" (error-message-string e))))))))
 
 (defun gp--detail-load-reviewers (buf pr)
   "Fetch PR's individual reviewers asynchronously and fold them into BUF.

@@ -61,6 +61,19 @@ is an error."
     (and (= (car res) 0)
          (not (string-empty-p (cdr res))))))
 
+(defun gp-checkout-dirty-count (dir)
+  "Return how many paths in DIR's working tree have uncommitted changes.
+Zero when the tree is clean AND when git could not answer at all -- a
+caller showing a warning wants \"nothing to say\" in both cases, and a
+repo git refuses to read is not evidence of unsaved work.  Counts
+`git status --porcelain' lines, so an untracked path counts once and a
+staged-plus-modified path also counts once, matching what the user
+would see in `magit-status'."
+  (let ((res (gp-checkout--git dir "status" "--porcelain")))
+    (if (and (= (car res) 0) (not (string-empty-p (cdr res))))
+        (length (split-string (cdr res) "\n" t))
+      0)))
+
 (defun gp-checkout-current-branch (dir)
   "Return the current branch name in DIR, or nil."
   (let ((res (gp-checkout--git dir "rev-parse" "--abbrev-ref" "HEAD")))
