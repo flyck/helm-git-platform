@@ -899,6 +899,60 @@ a stray double space where they would have gone."
            (h (substring-no-properties (gp--pr-heading github-mock--pr-2))))
       (should (string-match-p (regexp-quote "Fix the flaky test  [web]") h)))))
 
+(ert-deftest gp-test-detail-shows-the-repo-above-the-branches ()
+  "A detail buffer reached from a workspace-wide list has to say which
+repo it is for -- the branch line answers where-to-where, not in-what."
+  (bitbucket-mock-with-service
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail (car (gp-test--mock-prs)) nil))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "acme/web-frontend" text))
+            ;; above the branch line, below the title
+            (should (< (string-match "acme/web-frontend" text)
+                       (string-match "🔀" text)))))))))
+
+(ert-deftest gp-test-detail-repo-uses-the-owner-qualified-name ()
+  "The owner is what tells two same-named repos apart, so the full name
+is shown rather than the bare slug."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail github-mock--pr-1 nil))
+          (should (string-match-p "acme/web"
+                                  (substring-no-properties (buffer-string)))))))))
+
+(ert-deftest gp-test-detail-omits-the-repo-line-when-unreadable ()
+  "A PR whose repo cannot be read shows no line at all, rather than a
+`?' standing in for information nobody has."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((inhibit-read-only t))
+      (gp--render-detail '((id . 9) (title . "no repo")) nil))
+    (should-not (string-match-p "📁" (substring-no-properties (buffer-string))))))
+
+(ert-deftest gp-test-detail-repo-glyph-is-not-reused-in-the-header ()
+  "Two different things wearing one glyph defeats the scanning it is for:
+the checkout button already owns 📦."
+  (bitbucket-mock-with-service
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail (car (gp-test--mock-prs)) nil))
+          (let* ((text (substring-no-properties (buffer-string)))
+                 (repo-line (car (seq-filter
+                                  (lambda (l) (string-match-p "web-frontend" l))
+                                  (split-string text "\n")))))
+            (should (string-prefix-p "📁" repo-line))))))))
+
 (ert-deftest gp-test-labels-hidden-entirely-on-bitbucket ()
   "Bitbucket has no labels, so nothing label-shaped is rendered at all --
 not the list segment, and not a \"no labels\" placeholder in the detail

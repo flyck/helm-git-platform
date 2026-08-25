@@ -94,6 +94,11 @@
   "Face for PR authors." :group 'bitbucket-faces)
 (defface gp-branch-face '((t :inherit magit-branch-local))
   "Face for branch names." :group 'bitbucket-faces)
+(defface gp-repo-face '((t :inherit magit-branch-remote))
+  "Face for a repository name in the detail buffer.
+Distinct from `gp-branch-face' so the repo line does not read as
+another branch: they sit one above the other and would otherwise be
+one indistinguishable block." :group 'bitbucket-faces)
 (defface gp-comment-author-face '((t :inherit bold))
   "Face for comment authors." :group 'bitbucket-faces)
 (defface gp-detail-title-face
@@ -1077,6 +1082,17 @@ that is when you need a way to add the first one."
          "✎ [N]" "Edit this pull request's title"
          (lambda () (gp-ui-edit-title pr))))
       (insert "\n")
+      ;; The repo, on its own line above the branches.  A detail buffer is
+      ;; often reached from a workspace-wide list where consecutive PRs come
+      ;; from different repos, and "#42 fix the toggle" says nothing about
+      ;; which one -- the branch line below answers "from where to where",
+      ;; not "in what".  Full name rather than the bare slug, since the
+      ;; owner is what tells two same-named repos apart.
+      (when-let* ((repo (ignore-errors (gp-pr-full-name pr))))
+        ;; 📁 not 📦: the checkout button below already uses 📦, and two
+        ;; different things wearing one glyph in the same header defeats the
+        ;; scanning the emoji is there for.
+        (insert "📁 " (propertize repo 'face 'gp-repo-face) "\n"))
       (insert "🔀 "
               (propertize (format "%s → %s"
                                   (or (gp-pr-source-branch pr) "?")
