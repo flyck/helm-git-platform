@@ -91,8 +91,21 @@ Normally the title column auto-grows to fill the available width
   "Minimum width the auto-growing title column will shrink to."
   :type 'integer :group 'bitbucket)
 
-(defcustom gp-helm-repo-width 22
-  "Column width for the repository slug in the Helm list."
+(defcustom gp-helm-repo-width 38
+  "Column width for the repository slug in the Helm list.
+
+Wide enough for the descriptive, prefixed names real workspaces use
+\(`lambda-datasource-batch-jobs-mutations\' is 38) rather than for a
+short one-word slug.  The title is the column that auto-grows
+\(`gp-helm--title-width\'), so on a wide window every spare column used
+to land there -- leaving the title far longer than any real title while
+the repo beside it was cut mid-word.  This spends some of that surplus
+on the column that was actually short.
+
+The cost is paid by the title, which shrinks by the same amount and
+stops at `gp-helm-title-min-width\'; on a narrow window that floor is
+reached sooner than before.  Lower it if you would rather have the
+title back."
   :type 'integer :group 'bitbucket)
 
 (defcustom gp-helm-labels-width 18

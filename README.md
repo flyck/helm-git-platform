@@ -232,6 +232,10 @@ detail header, each in the colour GitHub gives it. `L` on an open PR edits the s
 repo's labels. Bitbucket has none, so nothing label-shaped is drawn there. Tunables:
 `gp-helm-labels-width` (0 hides the column) and `gp-label-colors` (nil for one uniform face).
 
+The title column is the one that auto-grows, so on a wide window every spare column lands there;
+`gp-helm-repo-width` (38) is sized for the descriptive, prefixed slugs real workspaces use rather
+than a short one-word name. Lower it to hand those columns back to the title.
+
 Every buffer the package opens is tagged `*gp: …*` (`*gp: PRs*`, `*gp: PR #101 …*`,
 `*gp: reviewers #101*`, `*gp: log*`, …) so one filter finds them all; retag with
 `gp-buffer-name-prefix`.

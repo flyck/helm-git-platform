@@ -426,6 +426,34 @@ when the column truncated it away."
         (should (string-match-p "bug" tail))
         (should (string-match-p "ui" tail))))))
 
+(ert-deftest gp-test-helm-repo-column-fits-a-real-repo-name ()
+  "Real workspaces use descriptive, prefixed slugs; the column has to fit
+one rather than a short one-word name, or every row is cut mid-word."
+  (should (>= gp-helm-repo-width
+              (length "lambda-datasource-batch-jobs-mutations")))
+  ;; and a name that fits is not truncated
+  (let ((cell (gp-helm--pad "lambda-datasource-batch-jobs-mutations"
+                            gp-helm-repo-width)))
+    (should (string-match-p "lambda-datasource-batch-jobs-mutations" cell))
+    (should-not (string-match-p "…" cell))))
+
+(ert-deftest gp-test-helm-repo-column-is-paid-for-by-the-title ()
+  "The title is the column that auto-grows, so widening the repo takes
+from it -- but on any normal window it keeps far more than a title needs."
+  (let ((buf (get-buffer-create gp-helm-buffer)))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer (selected-window) buf)
+          (let* ((win (window-body-width (selected-window)))
+                 (wide (let ((gp-helm-repo-width 38)) (gp-helm--title-width)))
+                 (narrow (let ((gp-helm-repo-width 22)) (gp-helm--title-width))))
+            ;; the 16 columns the repo gained come off the title...
+            (when (> narrow gp-helm-title-min-width)
+              (should (= (- narrow wide) 16)))
+            ;; ...and both still fit inside the window
+            (should (<= (+ wide 38) win))))
+      (kill-buffer buf))))
+
 (ert-deftest gp-test-helm-title-width-reserves-the-label-column ()
   "The auto-growing title column shrinks by the label column's width,
 and gets that space back where labels are unsupported."
