@@ -100,6 +100,35 @@ the badge has no natural neutral symbol)."
       (should (equal (gethash 1 gp-helm--review-tally-cache)
                      '(:approved 2 :changes 0 :pending 0))))))
 
+(ert-deftest gp-test-helm-scan-review-tallies-async-always-refetches ()
+  "A PR id already in the cache must still be refetched, not skipped --
+approvals can change out from under a cached PR-list entry (e.g. someone
+else votes in the web UI) well before the id-keyed cache would ever be
+cleared, so this scan must not treat a prior entry as fresh forever."
+  (let ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
+        (pr '((id . 1))))
+    (puthash 1 '(:approved 0 :changes 0 :pending 1) gp-helm--review-tally-cache)
+    (cl-letf (((symbol-function 'gp-pr-review-tally-async)
+               (lambda (_pr callback) (funcall callback '(:approved 1 :changes 0 :pending 0))))
+              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+      (gp-helm--scan-review-tallies-async (list pr))
+      (should (equal (gethash 1 gp-helm--review-tally-cache)
+                     '(:approved 1 :changes 0 :pending 0))))))
+
+(ert-deftest gp-test-helm-scan-reviewers-async-always-refetches ()
+  "Mirrors `gp-test-helm-scan-review-tallies-async-always-refetches' --
+the per-reviewer cache backing `gp-helm--covered-by-others-p' must not
+treat a prior id-keyed entry as fresh forever either."
+  (let ((gp-helm--reviewers-cache (make-hash-table :test 'eql))
+        (pr '((id . 1))))
+    (puthash 1 '((:name "a" :state pending)) gp-helm--reviewers-cache)
+    (cl-letf (((symbol-function 'gp-pr-reviewers-async)
+               (lambda (_pr callback) (funcall callback '((:name "a" :state approved)))))
+              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+      (gp-helm--scan-reviewers-async (list pr))
+      (should (equal (gethash 1 gp-helm--reviewers-cache)
+                     '((:name "a" :state approved)))))))
+
 (ert-deftest gp-test-build-states-summary ()
   (should (null (gp-build-states-summary nil)))
   (should (eq (gp-build-states-summary '("SUCCESSFUL" "FAILED")) 'failed))
@@ -425,6 +454,34 @@ when the column truncated it away."
                    (gp-helm--pr-search-tail github-mock--pr-1))))
         (should (string-match-p "bug" tail))
         (should (string-match-p "ui" tail))))))
+
+(ert-deftest gp-test-helm-repo-column-fits-a-real-repo-name ()
+  "Real workspaces use descriptive, prefixed slugs; the column has to fit
+one rather than a short one-word name, or every row is cut mid-word."
+  (should (>= gp-helm-repo-width
+              (length "lambda-datasource-batch-jobs-mutations")))
+  ;; and a name that fits is not truncated
+  (let ((cell (gp-helm--pad "lambda-datasource-batch-jobs-mutations"
+                            gp-helm-repo-width)))
+    (should (string-match-p "lambda-datasource-batch-jobs-mutations" cell))
+    (should-not (string-match-p "…" cell))))
+
+(ert-deftest gp-test-helm-repo-column-is-paid-for-by-the-title ()
+  "The title is the column that auto-grows, so widening the repo takes
+from it -- but on any normal window it keeps far more than a title needs."
+  (let ((buf (get-buffer-create gp-helm-buffer)))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer (selected-window) buf)
+          (let* ((win (window-body-width (selected-window)))
+                 (wide (let ((gp-helm-repo-width 38)) (gp-helm--title-width)))
+                 (narrow (let ((gp-helm-repo-width 22)) (gp-helm--title-width))))
+            ;; the 16 columns the repo gained come off the title...
+            (when (> narrow gp-helm-title-min-width)
+              (should (= (- narrow wide) 16)))
+            ;; ...and both still fit inside the window
+            (should (<= (+ wide 38) win))))
+      (kill-buffer buf))))
 
 (ert-deftest gp-test-helm-title-width-reserves-the-label-column ()
   "The auto-growing title column shrinks by the label column's width,

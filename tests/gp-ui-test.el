@@ -899,6 +899,253 @@ a stray double space where they would have gone."
            (h (substring-no-properties (gp--pr-heading github-mock--pr-2))))
       (should (string-match-p (regexp-quote "Fix the flaky test  [web]") h)))))
 
+(ert-deftest gp-test-detail-shows-the-repo-above-the-branches ()
+  "A detail buffer reached from a workspace-wide list has to say which
+repo it is for -- the branch line answers where-to-where, not in-what."
+  (bitbucket-mock-with-service
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail (car (gp-test--mock-prs)) nil))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "acme/web-frontend" text))
+            ;; above the branch line, below the title
+            (should (< (string-match "acme/web-frontend" text)
+                       (string-match "🔀" text)))))))))
+
+(ert-deftest gp-test-detail-repo-uses-the-owner-qualified-name ()
+  "The owner is what tells two same-named repos apart, so the full name
+is shown rather than the bare slug."
+  (github-mock-with-service
+    (let ((git-platform-current-backend (git-platform-github)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail github-mock--pr-1 nil))
+          (should (string-match-p "acme/web"
+                                  (substring-no-properties (buffer-string)))))))))
+
+(ert-deftest gp-test-detail-omits-the-repo-line-when-unreadable ()
+  "A PR whose repo cannot be read shows no line at all, rather than a
+`?' standing in for information nobody has."
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "no repo")) nil))
+      (should-not (string-match-p "📁" (substring-no-properties (buffer-string)))))))
+
+(ert-deftest gp-test-detail-repo-glyph-is-not-reused-in-the-header ()
+  "Two different things wearing one glyph defeats the scanning it is for:
+the checkout button already owns 📦."
+  (bitbucket-mock-with-service
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail (car (gp-test--mock-prs)) nil))
+          (let* ((text (substring-no-properties (buffer-string)))
+                 (repo-line (car (seq-filter
+                                  (lambda (l) (string-match-p "web-frontend" l))
+                                  (split-string text "\n")))))
+            (should (string-prefix-p "📁" repo-line))))))))
+
+(ert-deftest gp-test-detail-warns-about-uncommitted-local-changes ()
+  "The notice fires from `gp--detail-local-dirty' alone, and names how
+many files and which branch they are sitting on."
+  (bitbucket-mock-with-service
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (setq gp--detail-local-dirty
+                (list :dir "/repo" :branch "feat/x" :count 3))
+          (let ((inhibit-read-only t))
+            (gp--render-detail (car (gp-test--mock-prs)) nil))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "⚠ Uncommitted local changes" text))
+            (should (string-match-p "3 files on feat/x" text))))))))
+
+(ert-deftest gp-test-detail-dirty-warning-sits-near-the-top ()
+  "It has to land above the description and the file list: its whole job
+is to be read BEFORE the checkout buttons a few lines up get pressed."
+  (bitbucket-mock-with-service
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
+          (let ((inhibit-read-only t))
+            (gp--render-detail (car (gp-test--mock-prs)) nil))
+          (let* ((text (substring-no-properties (buffer-string)))
+                 (warn (string-match "Uncommitted local changes" text))
+                 (comments (string-match "Comments (" text)))
+            (should warn)
+            (should comments)
+            (should (< warn comments))
+            ;; and below the header block it is warning you about
+            (should (< (string-match "🔀" text) warn))))))))
+
+(ert-deftest gp-test-detail-dirty-warning-singular-file ()
+  "One file does not read as \"1 files\"."
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "t")) nil))
+      (should (string-match-p "1 file on main"
+                              (substring-no-properties (buffer-string)))))))
+
+(ert-deftest gp-test-detail-dirty-warning-absent-when-tree-is-clean ()
+  "A clean tree (or no clone, or not yet checked) draws nothing at all --
+the state is nil in every one of those cases."
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty nil)
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "t")) nil))
+      (should-not (string-match-p "Uncommitted"
+                                  (substring-no-properties (buffer-string)))))))
+
+(ert-deftest gp-test-detail-dirty-warning-survives-a-missing-branch ()
+  "A detached HEAD gives no branch name; the count still says the useful
+part rather than the whole notice disappearing."
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty (list :dir "/repo" :branch nil :count 2))
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "t")) nil))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "Uncommitted local changes" text))
+        (should (string-match-p "(2 files)" text))))))
+
+(ert-deftest gp-test-detail-dirty-render-never-shells-out-to-git ()
+  "The renderer reads the cached plist only.  A `git status' during
+redisplay would block Emacs and re-enter the renderer -- the same rule
+the mergeability fetch follows."
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+            ((symbol-function 'gp-checkout-dirty-count)
+             (lambda (&rest _) (error "render asked git")))
+            ((symbol-function 'gp-local-find-checkout)
+             (lambda (&rest _) (error "render resolved a checkout"))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "t")) nil))
+      (should (string-match-p "Uncommitted"
+                              (substring-no-properties (buffer-string)))))))
+
+(ert-deftest gp-test-detail-load-local-dirty-fills-the-state ()
+  "The loader resolves the checkout, counts, and stores the plist."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((pr '((id . 9) (title . "t")
+                (source (branch (name . "feat/x")))
+                (destination (branch (name . "main"))))))
+      (setq gp--pr pr)
+      (cl-letf (((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/web"))
+                ((symbol-function 'gp-local-find-checkout) (lambda (_fn) "/repo"))
+                ((symbol-function 'gp-checkout-dirty-count) (lambda (_dir) 4))
+                ((symbol-function 'gp-checkout-current-branch) (lambda (_dir) "feat/x"))
+                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
+                ((symbol-function 'gp--detail-rerender) (lambda (&rest _) nil))
+                ;; run the deferred body immediately
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _rep fn &rest args) (apply fn args))))
+        (gp--detail-load-local-dirty (current-buffer) pr)
+        (should (equal gp--detail-local-dirty
+                       (list :dir "/repo" :branch "feat/x" :count 4)))))))
+
+(ert-deftest gp-test-detail-load-local-dirty-clean-tree-stays-nil ()
+  "Zero changed files must not produce a state -- the renderer keys the
+whole notice off non-nil."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((pr '((id . 9))))
+      (setq gp--pr pr)
+      (cl-letf (((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/web"))
+                ((symbol-function 'gp-local-find-checkout) (lambda (_fn) "/repo"))
+                ((symbol-function 'gp-checkout-dirty-count) (lambda (_dir) 0))
+                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
+                ((symbol-function 'gp--detail-rerender) (lambda (&rest _) nil))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _rep fn &rest args) (apply fn args))))
+        (gp--detail-load-local-dirty (current-buffer) pr)
+        (should-not gp--detail-local-dirty)))))
+
+(ert-deftest gp-test-detail-load-local-dirty-never-clones ()
+  "Painting a warning must not clone a repo or switch a branch: with no
+local checkout the loader resolves nothing and stores nothing."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((pr '((id . 9)))
+          (ensured nil))
+      (setq gp--pr pr)
+      (cl-letf (((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/web"))
+                ((symbol-function 'gp-local-find-checkout) (lambda (_fn) nil))
+                ((symbol-function 'gp-local-ensure-checkout)
+                 (lambda (&rest _) (setq ensured t) "/repo"))
+                ((symbol-function 'gp-checkout-dirty-count)
+                 (lambda (_dir) (error "counted without a checkout")))
+                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
+                ((symbol-function 'gp--detail-rerender) (lambda (&rest _) nil))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _rep fn &rest args) (apply fn args))))
+        (gp--detail-load-local-dirty (current-buffer) pr)
+        (should-not gp--detail-local-dirty)
+        (should-not ensured)))))
+
+(ert-deftest gp-test-detail-load-local-dirty-skips-redraw-when-unchanged ()
+  "A clean tree is the common case; re-rendering the buffer to draw
+nothing would throw away point and section visibility on every refresh."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((pr '((id . 9)))
+          (renders 0))
+      (setq gp--pr pr
+            gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 2))
+      (cl-letf (((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/web"))
+                ((symbol-function 'gp-local-find-checkout) (lambda (_fn) "/repo"))
+                ((symbol-function 'gp-checkout-dirty-count) (lambda (_dir) 2))
+                ((symbol-function 'gp-checkout-current-branch) (lambda (_dir) "main"))
+                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
+                ((symbol-function 'gp--detail-rerender)
+                 (lambda (&rest _) (cl-incf renders)))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _rep fn &rest args) (apply fn args))))
+        ;; same answer as what is already stored -> no redraw
+        (gp--detail-load-local-dirty (current-buffer) pr)
+        (should (= renders 0))
+        ;; a real change does redraw
+        (cl-letf (((symbol-function 'gp-checkout-dirty-count) (lambda (_dir) 5)))
+          (gp--detail-load-local-dirty (current-buffer) pr))
+        (should (= renders 1))))))
+
+(ert-deftest gp-test-detail-load-local-dirty-survives-a-git-failure ()
+  "A git error is logged, not signalled: a broken status check must not
+take down the rest of the detail load."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (let ((pr '((id . 9))))
+      (setq gp--pr pr)
+      (cl-letf (((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/web"))
+                ((symbol-function 'gp-local-find-checkout)
+                 (lambda (_fn) (error "boom")))
+                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
+                ((symbol-function 'gp--detail-rerender) (lambda (&rest _) nil))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _rep fn &rest args) (apply fn args))))
+        (should-not (gp--detail-load-local-dirty (current-buffer) pr))
+        (should-not gp--detail-local-dirty)))))
+
 (ert-deftest gp-test-labels-hidden-entirely-on-bitbucket ()
   "Bitbucket has no labels, so nothing label-shaped is rendered at all --
 not the list segment, and not a \"no labels\" placeholder in the detail

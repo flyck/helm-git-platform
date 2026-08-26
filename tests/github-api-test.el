@@ -495,6 +495,38 @@ nil and the detail view showed \"(no steps)\" for every run."
     (should-not (gp-pipeline-id '((uuid . "{bitbucket-shaped}"))))
     (should (equal (gp-pipeline-step-id '((id . 95878412069))) 95878412069))))
 
+;;;; Pipeline step log line classification --------------------------------------
+
+(ert-deftest github-test-pipeline-step-log-classify-line-group ()
+  (should (equal (github-pipeline-step-log-classify-line
+                  "2026-08-26T13:49:56.1234567Z ##[group]Run npm test")
+                 '(group . "Run npm test")))
+  (should (equal (github-pipeline-step-log-classify-line
+                  "2026-08-26T13:50:14.7654321Z ##[endgroup]")
+                 '(group . ""))))
+
+(ert-deftest github-test-pipeline-step-log-classify-line-error-and-warning ()
+  (should (equal (github-pipeline-step-log-classify-line
+                  "2026-08-26T13:50:15.0000000Z ##[error]Process completed with exit code 1.")
+                 '(error . "Process completed with exit code 1.")))
+  (should (equal (car (github-pipeline-step-log-classify-line
+                       "2026-08-26T13:50:15.0000000Z ##[warning]deprecated action version"))
+                 'warning))
+  (should (equal (car (github-pipeline-step-log-classify-line
+                       "2026-08-26T13:50:15.0000000Z ##[notice]using cache"))
+                 'warning)))
+
+(ert-deftest github-test-pipeline-step-log-classify-line-strips-timestamp-only ()
+  "An ordinary output line just loses its timestamp prefix, no marker."
+  (should (equal (github-pipeline-step-log-classify-line
+                  "2026-08-26T13:49:56.2345678Z hello from the job")
+                 '(nil . "hello from the job"))))
+
+(ert-deftest github-test-pipeline-step-log-classify-line-tolerates-no-timestamp ()
+  "A line without the expected timestamp prefix still classifies, unmangled."
+  (should (equal (github-pipeline-step-log-classify-line "plain line, no prefix")
+                 '(nil . "plain line, no prefix"))))
+
 ;;;; Reactions ----------------------------------------------------------------
 
 (ert-deftest github-test-reaction-base-differs-per-comment-kind ()

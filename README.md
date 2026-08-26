@@ -232,6 +232,10 @@ detail header, each in the colour GitHub gives it. `L` on an open PR edits the s
 repo's labels. Bitbucket has none, so nothing label-shaped is drawn there. Tunables:
 `gp-helm-labels-width` (0 hides the column) and `gp-label-colors` (nil for one uniform face).
 
+The title column is the one that auto-grows, so on a wide window every spare column lands there;
+`gp-helm-repo-width` (38) is sized for the descriptive, prefixed slugs real workspaces use rather
+than a short one-word name. Lower it to hand those columns back to the title.
+
 Every buffer the package opens is tagged `*gp: …*` (`*gp: PRs*`, `*gp: PR #101 …*`,
 `*gp: reviewers #101*`, `*gp: log*`, …) so one filter finds them all; retag with
 `gp-buffer-name-prefix`.
@@ -241,6 +245,39 @@ finished pipelines start collapsed, `TAB` expands). On a pipeline or step: `s` s
 pipeline, `T` triggers/re-runs it (and starts a waiting *manual* step), `P` re-runs a single
 finished step where the platform supports it, and `l` opens a step's log in a buffer (tailed live
 while it runs, historical once finished).
+
+**Deploy when the build gets there.** A manual step usually means waiting: you cannot start
+`deploy-dev` until the steps before it pass, so you sit and watch the pipeline to press `T` at the
+right moment. `A` on a manual step arms a **deploy watcher** that does the sitting -- it polls in the
+background and fires the step the moment the backend reports its gate genuinely open. Step order is
+the pipeline's business, not ours: the watcher never models the dependency graph, it just refuses to
+act until the gate is actually open, so it cannot fire early.
+
+Only *triggerable* steps can be scheduled -- waiting for a step that runs itself would be waiting for
+nothing to happen.
+
+Arming a step also **auto-approves any earlier gates in its way**. Schedule `deploy-live` on a
+pipeline that gates `deploy-dev` first, and the watcher waits for lint and build, presses `deploy-dev`
+when that gate opens, waits again, then fires `deploy-live` -- each gate pressed once, in order.
+Getting to live is what you asked for, so it does not stop to ask again on the way. If a step ahead
+of the target fails, the target is unreachable: the watcher stops immediately and names the step that
+broke, rather than waiting out its timeout. Every outcome raises a desktop notification (🟢 deployed,
+🔴 blocked) -- you armed it so you could stop watching, so the result has to find you.
+
+Watchers are global, not tied to the PR buffer -- closing it (or wandering off to another PR) will
+not silently cancel a deploy you are waiting on. Each keeps an in-memory event log. `A` again
+disarms; `C-c A` lists every watcher, where `RET` opens one's log, `k` cancels, and `C` clears the
+finished ones. The armed state also shows inline on the step line. Nothing is persisted: a watcher
+does not survive Emacs exiting.
+
+How it fires depends on what the backend can do. With `gp-pipeline-deploy-script` set, that script
+runs -- the only route that advances *this* build's gate in place. Without one it falls back to the
+backend's manual-step API, which on Bitbucket means re-triggering the pipeline (Cloud exposes no
+per-step run endpoint, BCLOUD-20050) and therefore **re-runs the steps before the gate** -- the
+watcher says so in its log and state rather than reporting a plain success. GitHub Actions has no
+per-job gate in this model, so nothing reports as manual there and arming tells you as much. Tunables:
+`gp-deploy-watch-interval` (poll seconds), `gp-deploy-watch-timeout` (give-up limit, nil for none),
+`gp-deploy-watch-confirm` (nil to arm without asking) and `gp-deploy-watch-log-max`.
 
 > The platform allows stop and trigger only at the **whole-pipeline** level —
 > there is no per-step stop/trigger API — and step logs are fetched, not

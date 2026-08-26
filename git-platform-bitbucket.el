@@ -165,6 +165,8 @@
   (bitbucket-pipeline-web-url full-name pipeline step))
 (cl-defmethod gp--pipeline-step-log ((_ git-platform-bitbucket) full-name pipeline-uuid step-uuid)
   (bitbucket-pipeline-step-log full-name pipeline-uuid step-uuid))
+(cl-defmethod gp--pipeline-step-log-classify-line ((_ git-platform-bitbucket) line)
+  (bitbucket-pipeline-step-log-classify-line line))
 
 ;;;; Field accessors ----------------------------------------------------------
 

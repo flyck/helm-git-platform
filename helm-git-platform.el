@@ -58,6 +58,7 @@
 (require 'gp-reviewers)
 (require 'gp-helm-terminal)
 (require 'gp-pipeline)
+(require 'gp-deploy-watch)
 (require 'gp-overlay)
 (require 'gp-watch)
 (require 'gp-ui)

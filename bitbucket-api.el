@@ -1446,6 +1446,15 @@ diff endpoint) rather than parsing JSON."
                  (buffer-substring-no-properties (point) (point-max)) 'utf-8)))
           (kill-buffer buf))))))
 
+(defun bitbucket-pipeline-step-log-classify-line (line)
+  "Classify LINE for `gp-pipeline-step-log-classify-line'.
+Bitbucket's captured log echoes each shell command with a leading
+\"+ \" (the pipe container runs the script with `set -x'-style
+tracing); everything else is ordinary step output verbatim."
+  (if (string-prefix-p "+ " line)
+      (cons 'command (substring line 2))
+    (cons nil line)))
+
 ;;;; Pipeline pure helpers (shape-aware, no network) ---------------------------
 
 (defun bitbucket-pipeline-state (pipeline)

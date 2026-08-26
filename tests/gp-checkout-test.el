@@ -39,6 +39,28 @@
                        "-m" "gp-auto: WIP on main")))
       (should (= (length plan) 4)))))
 
+(ert-deftest gp-test-dirty-count-counts-porcelain-lines ()
+  "One line per path, whatever the status codes on it -- a staged AND
+modified file is still one file to the user."
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (lambda (_dir &rest _args)
+               (cons 0 " M lib/a.el\nMM lib/b.el\n?? scratch.txt\n"))))
+    (should (= (gp-checkout-dirty-count "/repo") 3))))
+
+(ert-deftest gp-test-dirty-count-clean-tree-is-zero ()
+  "A clean tree reports zero, not nil -- callers do arithmetic on it."
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (lambda (_dir &rest _args) (cons 0 ""))))
+    (should (= (gp-checkout-dirty-count "/repo") 0))))
+
+(ert-deftest gp-test-dirty-count-unreadable-repo-is-zero ()
+  "Git refusing to answer is not evidence of unsaved work: a warning
+built on a failed command would fire on every non-repo directory."
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (lambda (_dir &rest _args)
+               (cons 128 "fatal: not a git repository"))))
+    (should (= (gp-checkout-dirty-count "/nope") 0))))
+
 (ert-deftest gp-test-clone-command-requires-base ()
   (let ((gp-checkout-clone-base nil))
     (should-error (gp-checkout--clone-command "ws/slug" "/tmp/slug")
