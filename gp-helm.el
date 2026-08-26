@@ -295,15 +295,22 @@ until the status arrives (see `gp-helm--scan-review-tallies-async')."
 Mirrors `gp-helm--scan-pipelines-async''s pattern.  Bitbucket's
 `gp-pr-review-tally-async' calls back immediately with its already-free
 result, so this costs nothing extra there; GitHub's does a real
-per-PR fetch."
+per-PR fetch.
+
+Always refetches, even when this PR's id is already cached: approvals
+can change out from under a cached PR-list entry (someone else votes
+in the web UI) well before `gp-cache-ttl' would force a relist, and
+titles/PR existence being safe to cache for minutes does not make
+approval state safe to cache that long too.  Every call site here
+already runs on each list open/refresh, so this keeps the badge
+current without a dedicated poll."
   (dolist (pr prs)
     (let ((id (alist-get 'id pr)))
-      (unless (gethash id gp-helm--review-tally-cache)
-        (gp-pr-review-tally-async
-         pr
-         (lambda (tally)
-           (puthash id tally gp-helm--review-tally-cache)
-           (gp-helm--refresh-if-alive)))))))
+      (gp-pr-review-tally-async
+       pr
+       (lambda (tally)
+         (puthash id tally gp-helm--review-tally-cache)
+         (gp-helm--refresh-if-alive))))))
 
 (defvar gp-helm--reviewers-cache (make-hash-table :test 'eql)
   "PR id -> per-reviewer plists (see `gp-pr-reviewers-async').
@@ -315,18 +322,18 @@ GitHub does a real per-PR fetch, exactly as the tally scan does.")
 
 (defun gp-helm--scan-reviewers-async (prs)
   "Fetch each PR's per-reviewer breakdown in parallel, caching by id.
-Mirrors `gp-helm--scan-review-tallies-async'; feeds
-`gp-helm--covered-by-others-p'."
+Mirrors `gp-helm--scan-review-tallies-async', including always
+refetching rather than trusting a stale cached entry -- same
+reasoning: feeds `gp-helm--covered-by-others-p'."
   (dolist (pr prs)
     (let ((id (alist-get 'id pr)))
-      (unless (gethash id gp-helm--reviewers-cache)
-        (gp-pr-reviewers-async
-         pr
-         (lambda (reviewers)
-           ;; cache the empty list as an empty list, not nil: nil reads as
-           ;; "not fetched yet" and would refetch on every redraw
-           (puthash id (or reviewers 'none) gp-helm--reviewers-cache)
-           (gp-helm--refresh-if-alive)))))))
+      (gp-pr-reviewers-async
+       pr
+       (lambda (reviewers)
+         ;; cache the empty list as an empty list, not nil: nil reads as
+         ;; "not fetched yet" elsewhere that checks this table
+         (puthash id (or reviewers 'none) gp-helm--reviewers-cache)
+         (gp-helm--refresh-if-alive))))))
 
 (defun gp-helm--pr-search-tail (pr)
   "Return an invisible, searchable suffix of PR's full untruncated fields.
@@ -915,7 +922,10 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                       0.1 nil
                       (lambda ()
                         (gp-helm--scan-pipelines-async cached)
-                        (gp-helm--scan-review-tallies-async cached))))
+                        (gp-helm--scan-review-tallies-async cached)
+                        ;; per-reviewer data too, else "Covered by others"
+                        ;; only ever refreshes after a cold relist
+                        (gp-helm--scan-reviewers-async cached))))
                    (run-with-idle-timer 0.1 nil #'gp-helm--refresh-if-alive))
           (run-with-idle-timer
            0.1 nil

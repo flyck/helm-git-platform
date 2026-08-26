@@ -100,6 +100,35 @@ the badge has no natural neutral symbol)."
       (should (equal (gethash 1 gp-helm--review-tally-cache)
                      '(:approved 2 :changes 0 :pending 0))))))
 
+(ert-deftest gp-test-helm-scan-review-tallies-async-always-refetches ()
+  "A PR id already in the cache must still be refetched, not skipped --
+approvals can change out from under a cached PR-list entry (e.g. someone
+else votes in the web UI) well before the id-keyed cache would ever be
+cleared, so this scan must not treat a prior entry as fresh forever."
+  (let ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
+        (pr '((id . 1))))
+    (puthash 1 '(:approved 0 :changes 0 :pending 1) gp-helm--review-tally-cache)
+    (cl-letf (((symbol-function 'gp-pr-review-tally-async)
+               (lambda (_pr callback) (funcall callback '(:approved 1 :changes 0 :pending 0))))
+              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+      (gp-helm--scan-review-tallies-async (list pr))
+      (should (equal (gethash 1 gp-helm--review-tally-cache)
+                     '(:approved 1 :changes 0 :pending 0))))))
+
+(ert-deftest gp-test-helm-scan-reviewers-async-always-refetches ()
+  "Mirrors `gp-test-helm-scan-review-tallies-async-always-refetches' --
+the per-reviewer cache backing `gp-helm--covered-by-others-p' must not
+treat a prior id-keyed entry as fresh forever either."
+  (let ((gp-helm--reviewers-cache (make-hash-table :test 'eql))
+        (pr '((id . 1))))
+    (puthash 1 '((:name "a" :state pending)) gp-helm--reviewers-cache)
+    (cl-letf (((symbol-function 'gp-pr-reviewers-async)
+               (lambda (_pr callback) (funcall callback '((:name "a" :state approved)))))
+              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+      (gp-helm--scan-reviewers-async (list pr))
+      (should (equal (gethash 1 gp-helm--reviewers-cache)
+                     '((:name "a" :state approved)))))))
+
 (ert-deftest gp-test-build-states-summary ()
   (should (null (gp-build-states-summary nil)))
   (should (eq (gp-build-states-summary '("SUCCESSFUL" "FAILED")) 'failed))
