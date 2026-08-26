@@ -2084,5 +2084,97 @@ failed\", not \"the PR has no stats\"."
         (gp--detail-load-stats-diff (current-buffer) pr 0))
       (should-not gp--detail-stats))))
 
+;;;; Async overview refresh --------------------------------------------------
+;;
+;; Regression coverage for a real bug: `gp-refresh' fetched the PR list
+;; synchronously, so pressing `g' in the overview froze Emacs for the whole
+;; round trip -- and the spinner only appeared once the fetch had already
+;; returned.  These assert the ordering the fix depends on: the spinner is
+;; painted BEFORE the fetch is dispatched, the old content survives the
+;; in-flight window, and a slow earlier refresh cannot redraw over a newer one.
+
+(defconst gp-test--list-fetch-uuid "{21d7839d-779f-44b2-8c40-6f43ac90be06}"
+  "The fixture PRs' author uuid, so a rendered list partitions as \"mine\".")
+
+(defmacro gp-test--with-stubbed-list-fetch (captured &rest body)
+  "Run BODY with `gp-workspace-pull-requests-async' captured, not dispatched.
+CAPTURED is a variable bound to a list the callback is pushed onto, so the
+test controls exactly when, and whether, the fetch completes."
+  (declare (indent 1))
+  `(let ((,captured '()))
+     (cl-letf (((symbol-function 'gp-workspace-pull-requests-async)
+                (lambda (callback &optional _uuid &rest _)
+                  (push callback ,captured)))
+               ((symbol-function 'gp-user-uuid)
+                (lambda () gp-test--list-fetch-uuid)))
+       ,@body)))
+
+(ert-deftest gp-test-refresh-shows-spinner-before-fetching ()
+  "The ⏳ marker is on screen while the fetch is still in flight."
+  (gp-test--with-stubbed-list-fetch calls
+    (with-temp-buffer
+      (gp-list-mode)
+      (gp-refresh)
+      ;; the fetch was dispatched but has NOT called back yet
+      (should (= (length calls) 1))
+      ;; a fresh (blank) buffer gets the inline loading line
+      (should (string-match-p "⏳" (substring-no-properties (buffer-string)))))))
+
+(ert-deftest gp-test-refresh-keeps-old-list-visible-while-loading ()
+  "An in-flight refresh leaves the previously rendered PRs readable."
+  (gp-test--with-stubbed-list-fetch calls
+    (with-temp-buffer
+      (gp-list-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-list (gp-test--mock-prs) gp-test--list-fetch-uuid))
+      (gp-refresh)
+      ;; still the old content, plus a spinner overlay rather than a wipe
+      (should (string-match-p "#239" (substring-no-properties (buffer-string))))
+      (should gp--list-loading)
+      (should (string-match-p "refreshing"
+                              (overlay-get gp--list-loading 'after-string))))))
+
+(ert-deftest gp-test-refresh-renders-and-clears-spinner-on-completion ()
+  "When the fetch lands, the list is drawn and the spinner goes away."
+  (gp-test--with-stubbed-list-fetch calls
+    (with-temp-buffer
+      (gp-list-mode)
+      (gp-refresh)
+      (funcall (car calls) t (gp-test--mock-prs))
+      (should-not gp--list-loading)
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "My pull requests (10)" text))
+        (should-not (string-match-p "⏳" text)))
+      (should (= (length gp--prs) 10)))))
+
+(ert-deftest gp-test-refresh-ignores-stale-callback ()
+  "A slow earlier refresh must not redraw over a newer one's result."
+  (gp-test--with-stubbed-list-fetch calls
+    (with-temp-buffer
+      (gp-list-mode)
+      (gp-refresh)                      ; first (will finish LAST)
+      (gp-refresh)                      ; second, supersedes it
+      (should (= (length calls) 2))
+      ;; newest callback lands first and renders the real list
+      (funcall (car calls) t (gp-test--mock-prs))
+      (should (= (length gp--prs) 10))
+      ;; the stale one then reports an empty list and must be dropped
+      (funcall (cadr calls) t '())
+      (should (= (length gp--prs) 10))
+      (should (string-match-p "My pull requests (10)"
+                              (substring-no-properties (buffer-string)))))))
+
+(ert-deftest gp-test-refresh-failure-keeps-previous-list ()
+  "A failed fetch clears the spinner but does not blank the buffer."
+  (gp-test--with-stubbed-list-fetch calls
+    (with-temp-buffer
+      (gp-list-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-list (gp-test--mock-prs) gp-test--list-fetch-uuid))
+      (gp-refresh)
+      (funcall (car calls) nil nil)
+      (should-not gp--list-loading)
+      (should (string-match-p "#239" (substring-no-properties (buffer-string)))))))
+
 (provide 'gp-ui-test)
 ;;; gp-ui-test.el ends here

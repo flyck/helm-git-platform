@@ -196,6 +196,10 @@ nil so callers can `concat' it unconditionally."
 
 (defvar-local gp--prs nil
   "PR list backing the current list buffer.")
+(defvar-local gp--list-loading nil
+  "Overlay showing a loading spinner near the top of the list buffer, or nil.")
+(defvar-local gp--list-refresh-token 0
+  "Monotonic token used to ignore stale async list refresh callbacks.")
 (defvar-local gp--pr nil
   "PR alist backing the current detail buffer.")
 (defvar-local gp--detail-stats nil
@@ -2048,27 +2052,97 @@ Includes the title and repo so buffers are easy to tell apart, e.g.
 
 ;;;###autoload
 (defun gp-list ()
-  "Open (or refresh) the pull-request list."
+  "Open (or refresh) the pull-request list.
+The buffer is displayed BEFORE the refresh is kicked off, so the
+⏳ spinner and any previously fetched PRs are on screen while the
+new list is fetched in the background (see `gp-refresh')."
   (interactive)
   (let ((buf (get-buffer-create gp-list-buffer-name)))
     (with-current-buffer buf
-      (gp-list-mode)
+      ;; Only (re)initialise the mode on a fresh buffer: `gp-list-mode' is a
+      ;; `define-derived-mode', so re-running it on an open buffer would wipe
+      ;; the buffer-local `gp--prs'/refresh token and lose the list that is
+      ;; keeping the view useful during the refresh.
+      (unless (derived-mode-p 'gp-list-mode)
+        (gp-list-mode)))
+    (pop-to-buffer buf)
+    (with-current-buffer buf
       (gp-refresh))
-    (pop-to-buffer buf)))
+    buf))
 
-(defun gp-refresh ()
-  "Fetch and redraw the PR list, restoring point to the last-visited PR."
-  (interactive)
-  (let* ((uuid (gp-user-uuid))
-         (prs (gp-workspace-pull-requests))
-         (last-id (and (boundp 'gp-helm--last-visited-pr-id)
-                       gp-helm--last-visited-pr-id)))
+(defun gp--list-show-loading ()
+  "Mark the current list buffer as loading with a ⏳ near the top.
+Leaves existing content intact so a refresh keeps showing the old PRs
+while the new ones are in flight; only a fresh buffer is blank, and
+gets a single minimal line rather than a full-screen banner.
+Mirrors `gp--detail-show-loading'."
+  (when gp--list-loading
+    (delete-overlay gp--list-loading))
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-min))
+      (if (= (point-min) (point-max))
+          (insert (propertize "⏳ loading pull requests…\n" 'face 'shadow))
+        (end-of-line)
+        (let ((ov (make-overlay (point) (point))))
+          (overlay-put ov 'after-string
+                       (propertize "  ⏳ refreshing…" 'face 'shadow))
+          (setq gp--list-loading ov))))))
+
+(defun gp--list-clear-loading ()
+  "Remove the list buffer's loading spinner overlay, if any."
+  (when gp--list-loading
+    (delete-overlay gp--list-loading)
+    (setq gp--list-loading nil)))
+
+(defun gp--list-render (prs uuid)
+  "Redraw the current list buffer from PRS and UUID, restoring point.
+Point returns to the last-visited PR when it is still in the list."
+  (let ((last-id (and (boundp 'gp-helm--last-visited-pr-id)
+                      gp-helm--last-visited-pr-id)))
     (setq gp--prs prs)
     (let ((inhibit-read-only t))
       (erase-buffer)
       (gp--render-list prs uuid))
     (goto-char (or (and last-id (gp--list-find-pr-point last-id))
                    (point-min)))))
+
+(defun gp-refresh ()
+  "Fetch and redraw the PR list asynchronously, never freezing the buffer.
+
+A ⏳ spinner is painted FIRST -- before any network call -- and the PR
+list is then fetched in the background, so the buffer stays responsive
+and any previously shown PRs remain readable and navigable while the
+fetch is in flight.  A monotonic token (`gp--list-refresh-token')
+guards against a slow earlier refresh redrawing over a newer one.
+
+On failure the buffer keeps whatever it was already showing rather
+than blanking, and the error is logged."
+  (interactive)
+  (let ((buf (current-buffer)))
+    (cl-incf gp--list-refresh-token)
+    (let ((token gp--list-refresh-token))
+      (gp--list-show-loading)
+      ;; Force the spinner onto the screen before anything can block.  The
+      ;; identity lookup below is cached after the first call, so `g' on an
+      ;; open buffer never blocks -- but a cold buffer (or a `G' that just
+      ;; cleared the cache) does one identity request, and without this the
+      ;; freeze would happen before the paint the user is meant to see.
+      (redisplay)
+      ;; Resolve the identity before handing off: passing it in keeps the
+      ;; async fetch from blocking on an identity request of its own (see
+      ;; `bitbucket-workspace-pull-requests-async').
+      (let ((uuid (gp-user-uuid)))
+        (gp-workspace-pull-requests-async
+         (lambda (ok prs)
+           (when (and (buffer-live-p buf)
+                      (= token (buffer-local-value 'gp--list-refresh-token buf)))
+             (with-current-buffer buf
+               (gp--list-clear-loading)
+               (if ok
+                   (gp--list-render prs uuid)
+                 (gp-log-error "PR list refresh failed; keeping the previous list")))))
+         uuid)))))
 
 (defun gp-reset-caches ()
   "Clear every cache across the API, watch, helm, overlay and local layers.

@@ -265,6 +265,13 @@ CREATE TABLE IF NOT EXISTS participants (
                (if state (list uuid uuid state) (list uuid uuid)))))
     (if max-items (seq-take prs max-items) prs)))
 
+(cl-defmethod gp--workspace-pull-requests-async ((backend git-platform-mock) callback
+                                                 &optional uuid state max-items)
+  ;; a small delay keeps the overview's "⏳ refreshing…" visible for a beat,
+  ;; like live, and exercises the async redraw path in the mock UI
+  (let ((prs (gp--workspace-pull-requests backend uuid state max-items)))
+    (run-at-time 0.4 nil callback t prs)))
+
 (defun gp-mock--reviewing (uuid states)
   "Return PRs where UUID reviews someone else's work, filtered to STATES."
   (gp-mock--select-prs
@@ -588,6 +595,16 @@ discard an approval."
           :removed (apply #'+ (mapcar (lambda (f) (plist-get f :removed)) files))
           :commits (or (cadr row) 0)
           :file-list files)))
+
+(cl-defmethod gp--pull-request-stats-async ((backend git-platform-mock) full-name id pr callback)
+  ;; local sqlite, so there is nothing to wait on -- a short timer keeps the
+  ;; detail view's async ordering (spinner, then fold-in) exercised
+  (let ((stats (gp--pull-request-stats backend full-name id pr)))
+    (run-at-time 0.2 nil callback stats)))
+
+(cl-defmethod gp--pull-request-diff-async ((backend git-platform-mock) full-name id commit _pr callback)
+  (let ((diff (gp--pull-request-diff backend full-name id commit)))
+    (run-at-time 0.2 nil callback diff)))
 
 ;;;; Simulated pipelines -----------------------------------------------------------
 

@@ -451,25 +451,53 @@ over individual repositories.
 
 UUID defaults to the authenticated user.  STATE defaults to
 \"OPEN\".  MAX-ITEMS caps the number of PRs fetched."
-  (let* ((uuid (or uuid (bitbucket-user-uuid)))
-         (path (format "/workspaces/%s/pullrequests/%s"
-                       (bitbucket-workspace-value) uuid)))
-    (bitbucket-api-paged
-     path
-     `(("state" . ,(or state "OPEN"))
-       ("fields" . ,(concat
-                     "values.id,values.title,values.state,values.draft,"
-                     "values.author.uuid,values.author.display_name,"
-                     "values.author.links.avatar.href,"
-                     "values.source.branch.name,values.source.commit.hash,"
-                     "values.destination.branch.name,"
-                     "values.destination.repository.full_name,"
-                     "values.destination.repository.slug,"
-                     "values.comment_count,values.created_on,values.updated_on,"
-                     "values.participants.role,values.participants.approved,"
-                     "values.participants.state,values.participants.user.uuid,"
-                     "values.links.html.href,next")))
-     max-items)))
+  (bitbucket-api-paged
+   (bitbucket--workspace-pull-requests-path uuid)
+   (bitbucket--workspace-pull-requests-params state)
+   max-items))
+
+(defun bitbucket--workspace-pull-requests-path (uuid)
+  "Return the workspace pull-request endpoint path for UUID.
+UUID defaults to the authenticated user -- note that resolving that
+default is itself a blocking request, so async callers must pass a
+UUID they already hold."
+  (format "/workspaces/%s/pullrequests/%s"
+          (bitbucket-workspace-value) (or uuid (bitbucket-user-uuid))))
+
+(defun bitbucket--workspace-pull-requests-params (state)
+  "Return the query alist for a workspace pull-request listing in STATE.
+Shared by the sync and async variants so the two never drift on the
+`fields' projection -- a field missing from one but not the other
+shows up as a silently blank column in the overview."
+  `(("state" . ,(or state "OPEN"))
+    ("fields" . ,(concat
+                  "values.id,values.title,values.state,values.draft,"
+                  "values.author.uuid,values.author.display_name,"
+                  "values.author.links.avatar.href,"
+                  "values.source.branch.name,values.source.commit.hash,"
+                  "values.destination.branch.name,"
+                  "values.destination.repository.full_name,"
+                  "values.destination.repository.slug,"
+                  "values.comment_count,values.created_on,values.updated_on,"
+                  "values.participants.role,values.participants.approved,"
+                  "values.participants.state,values.participants.user.uuid,"
+                  "values.links.html.href,next"))))
+
+(defun bitbucket-workspace-pull-requests-async (callback &optional uuid state max-items)
+  "Async twin of `bitbucket-workspace-pull-requests'; CALLBACK gets (OK PRS).
+Truly non-blocking: the workspace endpoint is a single paginated
+query, so this is `bitbucket-api-paged-async' over the same path and
+`fields' projection the synchronous variant uses.
+
+UUID must be supplied by the caller when it is known; falling back to
+`bitbucket-user-uuid' here would block on an identity request before
+the first page is even requested, which is exactly what the async
+path exists to avoid."
+  (bitbucket-api-paged-async
+   (bitbucket--workspace-pull-requests-path uuid)
+   (bitbucket--workspace-pull-requests-params state)
+   callback
+   max-items))
 
 (defun bitbucket-pr-draft-p (pr)
   "Return non-nil if PR is a draft pull request."

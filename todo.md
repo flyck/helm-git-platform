@@ -78,3 +78,40 @@ which is a different question.
 up for GitHub Actions: step-level state, logs, re-running a single job, and
 the manual-gate handoff (Actions uses environment approvals, which has no
 direct equivalent to Bitbucket's halted manual step).
+
+## Rebase the PR branch onto its target
+
+Most platforms expose rebasing as an API action (GitHub has an "update
+branch" / rebase merge-method; Bitbucket Cloud offers a similar update on
+the PR), so this should be a `gp-defop` with a per-backend implementation
+rather than a local git operation.
+
+- Add a rebase action (button in the detail view, plus a key binding) that
+  asks the platform to rebase the PR's source branch onto its destination.
+- After the remote rebase succeeds, reset the LOCAL branch onto the new
+  remote head -- the remote rewrite leaves the local checkout behind, so
+  without this the working copy silently diverges from the PR.
+- Disable the button when the checkout has pending local changes: a reset
+  onto a rewritten head would discard them. It should be visibly disabled
+  with a reason, not silently fail once pressed (see
+  `gp--insert-action-button' and `gp-local-*' for the checkout state).
+
+## Trim over-chatty comments across the codebase
+
+Comment density has crept up, especially around the async paths: several
+comments run to whole paragraphs re-explaining a bug that no longer exists,
+or restating what the code plainly says. It buries the few notes that are
+genuinely load-bearing.
+
+- Keep comments that record a non-obvious constraint or a real trap: the
+  signed-href quirks (`links.diff.href`/`links.diffstat.href` -- the
+  constructed paths 404), why wall-clock `run-at-time' is used instead of
+  `run-with-idle-timer', why reshaping happens after all responses settle,
+  why relevance is keyed on PR id rather than a refresh token.
+- Cut the rest: multi-paragraph post-mortems, "this used to be broken"
+  narration, and comments that just paraphrase the next line.
+- Prefer one short sentence at the point of surprise over a preamble above
+  the function. If a comment only makes sense as history, it belongs in the
+  commit message, not the source.
+- Worst offenders to start with: `gp-ui.el' (detail/list loaders),
+  `github-api.el' and `bitbucket-api.el' (the async twins).
