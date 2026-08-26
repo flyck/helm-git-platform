@@ -931,11 +931,12 @@ is shown rather than the bare slug."
 (ert-deftest gp-test-detail-omits-the-repo-line-when-unreadable ()
   "A PR whose repo cannot be read shows no line at all, rather than a
 `?' standing in for information nobody has."
-  (with-temp-buffer
-    (gp-detail-mode)
-    (let ((inhibit-read-only t))
-      (gp--render-detail '((id . 9) (title . "no repo")) nil))
-    (should-not (string-match-p "📁" (substring-no-properties (buffer-string))))))
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "no repo")) nil))
+      (should-not (string-match-p "📁" (substring-no-properties (buffer-string)))))))
 
 (ert-deftest gp-test-detail-repo-glyph-is-not-reused-in-the-header ()
   "Two different things wearing one glyph defeats the scanning it is for:
@@ -991,48 +992,52 @@ is to be read BEFORE the checkout buttons a few lines up get pressed."
 
 (ert-deftest gp-test-detail-dirty-warning-singular-file ()
   "One file does not read as \"1 files\"."
-  (with-temp-buffer
-    (gp-detail-mode)
-    (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
-    (let ((inhibit-read-only t))
-      (gp--render-detail '((id . 9) (title . "t")) nil))
-    (should (string-match-p "1 file on main"
-                            (substring-no-properties (buffer-string))))))
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "t")) nil))
+      (should (string-match-p "1 file on main"
+                              (substring-no-properties (buffer-string)))))))
 
 (ert-deftest gp-test-detail-dirty-warning-absent-when-tree-is-clean ()
   "A clean tree (or no clone, or not yet checked) draws nothing at all --
 the state is nil in every one of those cases."
-  (with-temp-buffer
-    (gp-detail-mode)
-    (setq gp--detail-local-dirty nil)
-    (let ((inhibit-read-only t))
-      (gp--render-detail '((id . 9) (title . "t")) nil))
-    (should-not (string-match-p "Uncommitted"
-                                (substring-no-properties (buffer-string))))))
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty nil)
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "t")) nil))
+      (should-not (string-match-p "Uncommitted"
+                                  (substring-no-properties (buffer-string)))))))
 
 (ert-deftest gp-test-detail-dirty-warning-survives-a-missing-branch ()
   "A detached HEAD gives no branch name; the count still says the useful
 part rather than the whole notice disappearing."
-  (with-temp-buffer
-    (gp-detail-mode)
-    (setq gp--detail-local-dirty (list :dir "/repo" :branch nil :count 2))
-    (let ((inhibit-read-only t))
-      (gp--render-detail '((id . 9) (title . "t")) nil))
-    (let ((text (substring-no-properties (buffer-string))))
-      (should (string-match-p "Uncommitted local changes" text))
-      (should (string-match-p "(2 files)" text)))))
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty (list :dir "/repo" :branch nil :count 2))
+      (let ((inhibit-read-only t))
+        (gp--render-detail '((id . 9) (title . "t")) nil))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "Uncommitted local changes" text))
+        (should (string-match-p "(2 files)" text))))))
 
 (ert-deftest gp-test-detail-dirty-render-never-shells-out-to-git ()
   "The renderer reads the cached plist only.  A `git status' during
 redisplay would block Emacs and re-enter the renderer -- the same rule
 the mergeability fetch follows."
-  (with-temp-buffer
-    (gp-detail-mode)
-    (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
-    (cl-letf (((symbol-function 'gp-checkout-dirty-count)
-               (lambda (&rest _) (error "render asked git")))
-              ((symbol-function 'gp-local-find-checkout)
-               (lambda (&rest _) (error "render resolved a checkout"))))
+  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+            ((symbol-function 'gp-checkout-dirty-count)
+             (lambda (&rest _) (error "render asked git")))
+            ((symbol-function 'gp-local-find-checkout)
+             (lambda (&rest _) (error "render resolved a checkout"))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
       (let ((inhibit-read-only t))
         (gp--render-detail '((id . 9) (title . "t")) nil))
       (should (string-match-p "Uncommitted"

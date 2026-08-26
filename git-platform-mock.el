@@ -802,6 +802,14 @@ discard an approval."
               (max 1 (floor (/ (- (gp-mock--elapsed) 35) 3.5))))))
     (string-join (seq-take gp-mock--test-log-lines n) "\n")))
 
+(cl-defmethod gp--pipeline-step-log-classify-line ((_ git-platform-mock) line)
+  ;; Mock logs use a "$ " command echo (distinct from Bitbucket's "+ ", so a
+  ;; test asserting on the real backend's prefix can't pass against the mock
+  ;; by accident).
+  (if (string-prefix-p "$ " line)
+      (cons 'command (substring line 2))
+    (cons nil line)))
+
 (cl-defmethod gp--pipeline-step-log ((_ git-platform-mock) _full-name
                                      _pipeline-uuid step-uuid)
   (pcase step-uuid

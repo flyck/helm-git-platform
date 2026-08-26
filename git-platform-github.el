@@ -163,6 +163,8 @@
   (github-pipeline-web-url full-name pipeline step))
 (cl-defmethod gp--pipeline-step-log ((_ git-platform-github) full-name pipeline-uuid step-uuid)
   (github-pipeline-step-log full-name pipeline-uuid step-uuid))
+(cl-defmethod gp--pipeline-step-log-classify-line ((_ git-platform-github) line)
+  (github-pipeline-step-log-classify-line line))
 
 ;;;; Field accessors ----------------------------------------------------------
 

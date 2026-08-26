@@ -23,6 +23,16 @@
     (should-not (bitbucket-pipeline-finished-p running))
     (should (bitbucket-pipeline-finished-p done))))
 
+(ert-deftest bitbucket-test-pipeline-step-log-classify-line ()
+  (should (equal (bitbucket-pipeline-step-log-classify-line "+ rm -f /tmp/tmp.BxzQhwjgtv")
+                 '(command . "rm -f /tmp/tmp.BxzQhwjgtv")))
+  (should (equal (bitbucket-pipeline-step-log-classify-line "ldd (Debian GLIBC 2.41-12+deb13u3) 2.41")
+                 '(nil . "ldd (Debian GLIBC 2.41-12+deb13u3) 2.41")))
+  ;; a "+" appearing mid-line (as in the GLIBC example above) must not be
+  ;; mistaken for the leading command-echo marker
+  (should-not (eq (car (bitbucket-pipeline-step-log-classify-line "Skipping cache upload for failed step"))
+                   'command)))
+
 (ert-deftest bitbucket-test-pipeline-step-helpers ()
   (let ((running '((state (name . "IN_PROGRESS"))))
         (done '((state (name . "COMPLETED") (result (name . "FAILED")))))

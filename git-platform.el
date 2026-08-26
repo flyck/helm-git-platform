@@ -279,6 +279,17 @@ clear `user-error' instead of silently no-oping.")
   "Return the web-UI URL for PIPELINE in FULL-NAME (deep-linked to STEP).")
 (gp-defop pipeline-step-log (full-name pipeline-uuid step-uuid)
   "Return the captured log text for STEP-UUID of PIPELINE-UUID.")
+(gp-defop pipeline-step-log-classify-line (line)
+  "Classify one raw LINE of a step log, for display in the log buffer.
+Returns a cons (KIND . TEXT): KIND is `command' (the platform is
+echoing a shell command it is about to run), `group' (a named section
+header/footer), `error', `warning', or nil for an ordinary output
+line; TEXT is LINE with that platform's own marker/prefix stripped
+\(unchanged for nil).  Purely a text classifier -- no network, no
+state -- so each backend can differ on its own step-log conventions
+\(Bitbucket's leading \"+ \" shell echo vs. GitHub's timestamp prefix
+plus \"##[group]\"/\"##[endgroup]\"/\"##[error]\"/\"##[warning]\" markers)
+without the caller needing to know which platform it's rendering.")
 
 ;;;; Field accessors (JSON shape differs per platform) ------------------------
 

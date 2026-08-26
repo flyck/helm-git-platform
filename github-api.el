@@ -1754,6 +1754,33 @@ follows redirects transparently, so this reads the final body as text."
   (when (and full-name job-id)
     (github-api-request-raw "GET" (format "/repos/%s/actions/jobs/%s/logs" full-name job-id))))
 
+(defconst github--log-timestamp-re
+  "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\.[0-9]+Z "
+  "Matches the RFC3339 timestamp GitHub Actions prefixes every log line with.")
+
+(defun github-pipeline-step-log-classify-line (line)
+  "Classify LINE for `gp-pipeline-step-log-classify-line'.
+GitHub prefixes every raw log line with an RFC3339 timestamp, then
+uses \"##[group]\"/\"##[endgroup]\"/\"##[error]\"/\"##[warning]\"/
+\"##[notice]\" workflow-command markers for structure -- there is no
+Bitbucket-style command echo, since Actions logs the *step name*, not
+each shell line, and that already renders as its own log section."
+  (let* ((rest (if (string-match github--log-timestamp-re line)
+                    (substring line (match-end 0))
+                  line)))
+    (cond
+     ((string-prefix-p "##[group]" rest)
+      (cons 'group (substring rest (length "##[group]"))))
+     ((string-prefix-p "##[endgroup]" rest)
+      (cons 'group ""))
+     ((string-prefix-p "##[error]" rest)
+      (cons 'error (substring rest (length "##[error]"))))
+     ((string-prefix-p "##[warning]" rest)
+      (cons 'warning (substring rest (length "##[warning]"))))
+     ((string-prefix-p "##[notice]" rest)
+      (cons 'warning (substring rest (length "##[notice]"))))
+     (t (cons nil rest)))))
+
 ;;;; Pipeline pure helpers (shape-aware, no network) ---------------------------
 
 (defun github-pipeline-commit (pipeline)

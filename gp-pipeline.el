@@ -25,6 +25,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'ansi-color)
 (require 'magit-section)
 (require 'git-platform)
 (require 'gp-local)
@@ -36,6 +37,7 @@
 (declare-function gp-pipelines-for-branch-async "git-platform")
 (declare-function gp-pipeline-steps-async "git-platform")
 (declare-function gp-commit-message-async "git-platform")
+(declare-function gp-pipeline-step-log-classify-line "git-platform")
 
 (defvar gp--pr)                         ;; the detail buffer's PR (gp-ui.el)
 (declare-function gp-detail-refresh "gp-ui")
@@ -59,6 +61,13 @@ spinner picks up whatever blue/accent hue the active theme uses."
   "Face for a stopped/halted pipeline/step." :group 'bitbucket-faces)
 (defface gp-pipeline-paused-face '((t :inherit warning :weight bold))
   "Face for a pipeline paused at an open manual gate." :group 'bitbucket-faces)
+(defface gp-pipeline-log-command-face '((t :inherit font-lock-comment-face :weight bold))
+  "Face for a step-log line that echoes the command being run
+\(e.g. Bitbucket's leading \"+ \"\), so it stands out from the
+command's own output." :group 'bitbucket-faces)
+(defface gp-pipeline-log-group-face '((t :inherit magit-section-heading))
+  "Face for a step-log line that marks a named section
+\(e.g. GitHub's \"##[group]\"/\"##[endgroup]\")." :group 'bitbucket-faces)
 
 (defcustom gp-pipeline-max 20
   "How many recent branch pipelines to fetch before partitioning by commit."
@@ -896,12 +905,43 @@ there).  Only offered when the backend reports the step rerunnable."
     (cancel-timer gp-pipeline-log--timer)
     (setq gp-pipeline-log--timer nil)))
 
+(defun gp-pipeline-log--insert-classified (text)
+  "Insert TEXT into the current buffer, one line at a time, applying
+each line's platform classification (see
+`gp-pipeline-step-log-classify-line') as a face on top of whatever
+`ansi-color-apply-on-region' later derives from any SGR codes in it.
+Splitting per line -- rather than classifying the raw TEXT wholesale
+-- is what lets a `group' marker line be replaced by its own (often
+empty) label while ordinary output lines around it pass through
+untouched."
+  (dolist (line (split-string (or text "") "\n"))
+    (pcase-let ((`(,kind . ,shown) (gp-pipeline-step-log-classify-line line)))
+      (insert (pcase kind
+                ('command (propertize shown 'face 'gp-pipeline-log-command-face))
+                ('group   (propertize shown 'face 'gp-pipeline-log-group-face))
+                ('error   (propertize shown 'face 'gp-pipeline-failed-face))
+                ('warning (propertize shown 'face 'gp-pipeline-running-face))
+                (_ shown)))
+      (insert "\n")))
+  ;; the loop always adds a trailing newline; undo it so callers appending
+  ;; after this (the "running" banner) don't get a blank line first
+  (when (> (point) (point-min))
+    (delete-char -1)))
+
 (defun gp-pipeline-log--render (text running)
-  "Replace the log buffer's contents with TEXT; note RUNNING state."
+  "Replace the log buffer's contents with TEXT; note RUNNING state.
+TEXT is the platform's raw captured log: real ANSI SGR escapes (colour,
+bold, dim, …) are decoded into faces via `ansi-color-apply-on-region'
+rather than shown as literal \"[90m\"-style codes, and each line gets
+its platform-specific classification (see
+`gp-pipeline-step-log-classify-line') -- e.g. Bitbucket's leading
+\"+ \" command echo, or GitHub's \"##[group]\"/timestamp convention --
+applied as a distinct face."
   (let ((inhibit-read-only t)
         (at-end (eobp)))
     (erase-buffer)
-    (insert (or text ""))
+    (gp-pipeline-log--insert-classified text)
+    (ansi-color-apply-on-region (point-min) (point-max))
     (when running
       (insert (propertize "\n⏳ running — tailing…\n" 'face 'shadow)))
     (when at-end (goto-char (point-max)))))

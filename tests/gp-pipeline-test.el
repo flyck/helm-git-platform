@@ -11,6 +11,9 @@
 (require 'gp-pipeline)
 (require 'gp-ui)
 (require 'bitbucket-mock)
+(require 'git-platform-bitbucket)
+(require 'git-platform-github)
+(require 'git-platform-mock)
 
 ;;;; Pure formatting -----------------------------------------------------------
 
@@ -383,6 +386,53 @@ the counter sat frozen until a manual `g'."
     (let ((before (buffer-string)))
       (should-not (gp-pipeline--elapsed-repaint-buffer))
       (should (equal before (buffer-string))))))
+
+;;;; Step log rendering ---------------------------------------------------------
+
+(ert-deftest gp-test-pipeline-log-render-decodes-ansi-instead-of-literal-codes ()
+  "Real SGR escapes become a coloured overlay, not literal \"[31m\"-style text.
+Regression: the raw captured log (Bitbucket or GitHub) was inserted
+verbatim, so a viewer saw the escape codes as text instead of colour.
+`ansi-color-apply-on-region' works via overlays, not text properties,
+so this checks the buffer's overlays rather than `face' text props."
+  (let ((git-platform-current-backend (git-platform-mock)))
+    (with-temp-buffer
+      (gp-pipeline-log-mode)
+      (gp-pipeline-log--render "\x1b[31mred text\x1b[0m" nil)
+      (should (equal (buffer-string) "red text"))
+      (let ((ov (car (overlays-at (point-min)))))
+        (should ov)
+        (should (equal (overlay-get ov 'face) '(:foreground "red3")))))))
+
+(ert-deftest gp-test-pipeline-log-render-highlights-bitbucket-command-echo ()
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (with-temp-buffer
+      (gp-pipeline-log-mode)
+      (gp-pipeline-log--render "+ rm -f /tmp/x\nordinary output" nil)
+      (should (equal (buffer-string) "rm -f /tmp/x\nordinary output"))
+      (should (eq (get-text-property (point-min) 'face)
+                  'gp-pipeline-log-command-face))
+      (should-not (get-text-property (1+ (length "rm -f /tmp/x\n")) 'face)))))
+
+(ert-deftest gp-test-pipeline-log-render-highlights-github-group-and-strips-timestamp ()
+  (let ((git-platform-current-backend (git-platform-github)))
+    (with-temp-buffer
+      (gp-pipeline-log-mode)
+      (gp-pipeline-log--render
+       (concat "2026-08-26T13:49:56.1234567Z ##[group]Run npm test\n"
+               "2026-08-26T13:49:57.0000000Z npm test")
+       nil)
+      (should (equal (buffer-string) "Run npm test\nnpm test"))
+      (should (eq (get-text-property (point-min) 'face)
+                  'gp-pipeline-log-group-face)))))
+
+(ert-deftest gp-test-pipeline-log-render-running-banner-follows-last-line ()
+  "The \"tailing…\" banner must not gain a spurious blank line above it."
+  (let ((git-platform-current-backend (git-platform-mock)))
+    (with-temp-buffer
+      (gp-pipeline-log-mode)
+      (gp-pipeline-log--render "one\ntwo" t)
+      (should (string-prefix-p "one\ntwo\n⏳" (buffer-string))))))
 
 ;;;; Manual-step deploy hook ----------------------------------------------------
 
