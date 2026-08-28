@@ -63,8 +63,6 @@ PR you came from.")
   "Face for the author column." :group 'bitbucket-faces)
 (defface gp-helm-draft-face '((t :inherit shadow :slant italic))
   "Face for draft PR rows." :group 'bitbucket-faces)
-(defface gp-helm-comments-face '((t :inherit warning))
-  "Face for the comment-count badge." :group 'bitbucket-faces)
 
 ;;;; Helm buffer names --------------------------------------------------------
 
@@ -279,11 +277,7 @@ shown on graphical displays."
                                       'gp-helm-repo-face))
            (author (gp-helm--pad (gp-pr-author-name pr) 16
                                         'gp-helm-author-face))
-           (count (gp-pr-comment-count pr))
-           (badge (if (and count (> count 0))
-                      (propertize (format " 💬%d" count)
-                                  'face 'gp-helm-comments-face)
-                    ""))
+           (badge (gp-helm--comment-badge pr))
            (reviews (gp-helm--review-badge pr))
            (deploy (gp-helm--deploy-badge pr))
            ;; already padded to its column width, and "" when unsupported --
@@ -388,6 +382,67 @@ reasoning: feeds `gp-helm--covered-by-others-p'."
          ;; "not fetched yet" elsewhere that checks this table
          (puthash id (or reviewers 'none) gp-helm--reviewers-cache)
          (gp-helm--refresh-if-alive))))))
+
+(defvar gp-helm--comment-resolution-cache (make-hash-table :test 'eql)
+  "PR id -> (UNRESOLVED . RESOLVED) counts of resolvable comments.
+Unlike the flat `comment_count'/`comments'+`review_comments' totals
+embedded on the PR object (free, no network), resolution status only
+exists on the full comment thread, so this needs a per-PR fetch --
+same tier of cost as the review tally, and populated the same way.
+A comment with no resolve concept at all (GitHub's plain issue
+comments -- see `gp-comment-resolvable-p') counts toward neither: the
+badge tracks \"things to look at\", not every comment ever posted.  A
+reply counts under its thread root's resolution, not its own --
+`gp--comment-thread-resolved-p' -- since Bitbucket/GitHub set
+`resolution' on the root a reply rarely carries it directly.")
+
+(defun gp-helm--format-comment-resolution (counts)
+  "Return the comment badge string for COUNTS, a (UNRESOLVED . RESOLVED) cons.
+One 💬, then \"unresolved(total)\" (e.g. \"💬1(10)\"), plain text --
+no distinct face on the unresolved count: Helm's selection overlay
+paints its own foreground over any text-property face on the
+highlighted row anyway, so a colour there was never reliable."
+  (let* ((u (car counts)) (r (cdr counts)) (total (+ u r)))
+    (if (zerop total)
+        ""
+      (format " 💬%d(%d)" u total))))
+
+(defun gp-helm--comment-badge (pr)
+  "Return the comment-resolution badge string for PR.
+Reads the async `gp-helm--comment-resolution-cache'; a blank badge
+shows until it arrives (see `gp-helm--scan-comment-resolution-async')."
+  (let* ((id (alist-get 'id pr))
+         (cached (gethash id gp-helm--comment-resolution-cache)))
+    (if (consp cached)
+        (gp-helm--format-comment-resolution cached)
+      "")))
+
+(defun gp-helm--comment-resolution-counts (comments)
+  "Return (UNRESOLVED . RESOLVED) over resolvable comments in COMMENTS."
+  (let ((by-id (gp--comments-by-id comments))
+        (unresolved 0) (resolved 0))
+    (dolist (c comments)
+      (when (gp-comment-resolvable-p c)
+        (if (gp--comment-thread-resolved-p c by-id)
+            (setq resolved (1+ resolved))
+          (setq unresolved (1+ unresolved)))))
+    (cons unresolved resolved)))
+
+(defun gp-helm--scan-comment-resolution-async (prs)
+  "Fetch each PR's comments in parallel and cache resolution counts by id.
+Mirrors `gp-helm--scan-review-tallies-async', including always
+refetching: a comment resolved from the detail view or the web UI
+must show up here well before `gp-cache-ttl' would force a relist."
+  (dolist (pr prs)
+    (let ((id (alist-get 'id pr))
+          (full-name (gp-pr-full-name pr)))
+      (gp-pull-request-comments-async
+       full-name id
+       (lambda (ok comments)
+         (when ok
+           (puthash id (gp-helm--comment-resolution-counts comments)
+                    gp-helm--comment-resolution-cache)
+           (gp-helm--refresh-if-alive)))))))
 
 (defun gp-helm--pr-search-tail (pr)
   "Return an invisible, searchable suffix of PR's full untruncated fields.
@@ -756,9 +811,11 @@ renders no candidates and helm hides it by itself."
               "   (C-c g reload · C-c G refresh · C-c m merged)"))))
 
 (defun gp-helm--scan-mine-badges (prs)
-  "Fetch pipeline states, review tallies and deploy status for PRS."
+  "Fetch pipeline states, review tallies, comment resolution and deploy
+status for PRS."
   (gp-helm--scan-pipelines-async prs)
   (gp-helm--scan-review-tallies-async prs)
+  (gp-helm--scan-comment-resolution-async prs)
   (gp-helm--scan-deploys-async prs))
 
 (defun gp-helm--fetch-mine-async (uuid include-merged)
@@ -1119,6 +1176,7 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                         ;; per-reviewer data too, else "Covered by others"
                         ;; only ever refreshes after a cold relist
                         (gp-helm--scan-reviewers-async cached)
+                        (gp-helm--scan-comment-resolution-async cached)
                         (gp-helm--scan-deploys-async cached))))
                    (run-with-idle-timer 0.1 nil #'gp-helm--refresh-if-alive))
           (run-with-idle-timer
@@ -1261,6 +1319,7 @@ others have since piled on."
          ;; per-reviewer data too: the quorum split needs to know WHO
          ;; voted, which the aggregate tally cannot say
          (gp-helm--scan-reviewers-async final)
+         (gp-helm--scan-comment-resolution-async final)
          (gp-helm--scan-deploys-async final))
        (gp-helm--refresh-if-alive)))))
 

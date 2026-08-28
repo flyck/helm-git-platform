@@ -30,15 +30,13 @@
   "The display line has id, title, repo and author as distinct columns."
   (let* ((pr '((id . 42) (title . "Add a thing")
                (destination (repository (slug . "my-repo")))
-               (author (display_name . "Ann Smith"))
-               (comment_count . 3)))
+               (author (display_name . "Ann Smith"))))
          (line (gp-helm--pr-display pr))
          (plain (substring-no-properties line)))
     (should (string-match-p "#42" plain))
     (should (string-match-p "Add a thing" plain))
     (should (string-match-p "my-repo" plain))
     (should (string-match-p "Ann Smith" plain))
-    (should (string-match-p "💬3" plain))
     ;; the id column is faced distinctly (found at the "#42" position)
     (should (eq (get-text-property (string-match "#42" line) 'face line)
                 'gp-helm-id-face))))
@@ -128,6 +126,78 @@ treat a prior id-keyed entry as fresh forever either."
       (gp-helm--scan-reviewers-async (list pr))
       (should (equal (gethash 1 gp-helm--reviewers-cache)
                      '((:name "a" :state approved)))))))
+
+;;;; Comment resolution badge ----------------------------------------------------
+
+(ert-deftest gp-test-helm-comment-resolution-counts-splits-by-thread-root ()
+  "A reply counts under its thread ROOT's resolution, not its own --
+Bitbucket/GitHub set `resolution' on the root a reply rarely carries
+it directly (see `gp--comment-thread-resolved-p')."
+  (let ((root-open '((id . 1)))
+        (root-resolved '((id . 2) (resolution . t)))
+        (reply-of-resolved '((id . 3) (parent (id . 2)))))
+    (cl-letf (((symbol-function 'gp-comment-resolvable-p) (lambda (_) t))
+              ((symbol-function 'gp-comment-resolved-p)
+               (lambda (c) (and (alist-get 'resolution c) t))))
+      (should (equal (gp-helm--comment-resolution-counts
+                      (list root-open root-resolved reply-of-resolved))
+                     '(1 . 2))))))
+
+(ert-deftest gp-test-helm-comment-resolution-counts-excludes-unresolvable ()
+  "A comment with no resolve concept at all (GitHub general/issue
+comments) counts toward neither side -- the badge tracks \"things to
+look at\", not every comment ever posted."
+  (let ((resolvable-open '((id . 1)))
+        (unresolvable '((id . 2))))
+    (cl-letf (((symbol-function 'gp-comment-resolvable-p)
+               (lambda (c) (= (alist-get 'id c) 1)))
+              ((symbol-function 'gp-comment-resolved-p) (lambda (_) nil)))
+      (should (equal (gp-helm--comment-resolution-counts
+                      (list resolvable-open unresolvable))
+                     '(1 . 0))))))
+
+(ert-deftest gp-test-helm-format-comment-resolution-shows-unresolved-over-total ()
+  "One emoji, then \"unresolved(total)\", plain text -- not two
+separately-faced counts: Helm's selection overlay paints its own
+foreground over any text-property face on the highlighted row, so a
+colour there was never reliable."
+  (should (equal (gp-helm--format-comment-resolution '(2 . 1)) " 💬2(3)"))
+  (should (equal (gp-helm--format-comment-resolution '(0 . 0)) ""))
+  (should (equal (gp-helm--format-comment-resolution '(3 . 0)) " 💬3(3)"))
+  ;; all resolved still shows -- distinguishes "nothing pending" from
+  ;; "no comments at all", which a blank badge could not
+  (should (equal (gp-helm--format-comment-resolution '(0 . 3)) " 💬0(3)")))
+
+(ert-deftest gp-test-helm-comment-badge-blank-until-scanned ()
+  (let ((gp-helm--comment-resolution-cache (make-hash-table :test 'eql)))
+    (should (equal (gp-helm--comment-badge '((id . 1))) ""))))
+
+(ert-deftest gp-test-helm-scan-comment-resolution-async-always-refetches ()
+  "Mirrors the review-tally/reviewers scans: a comment resolved from the
+detail view or the web UI must show up here well before `gp-cache-ttl'
+would force a relist, so a prior id-keyed entry must not block a refetch."
+  (let ((gp-helm--comment-resolution-cache (make-hash-table :test 'eql))
+        (pr '((id . 1) (destination (repository (full_name . "acme/x"))))))
+    (puthash 1 '(1 . 0) gp-helm--comment-resolution-cache)
+    (cl-letf (((symbol-function 'gp-pull-request-comments-async)
+               (lambda (_fn _id callback) (funcall callback t '(((id . 9))))))
+              ((symbol-function 'gp-comment-resolvable-p) (lambda (_) t))
+              ((symbol-function 'gp-comment-resolved-p) (lambda (_) t))
+              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+      (gp-helm--scan-comment-resolution-async (list pr))
+      (should (equal (gethash 1 gp-helm--comment-resolution-cache) '(0 . 1))))))
+
+(ert-deftest gp-test-helm-scan-comment-resolution-async-ignores-failed-fetch ()
+  "A failed comments fetch leaves whatever was cached alone, rather than
+overwriting a good previous result with nothing."
+  (let ((gp-helm--comment-resolution-cache (make-hash-table :test 'eql))
+        (pr '((id . 1) (destination (repository (full_name . "acme/x"))))))
+    (puthash 1 '(2 . 1) gp-helm--comment-resolution-cache)
+    (cl-letf (((symbol-function 'gp-pull-request-comments-async)
+               (lambda (_fn _id callback) (funcall callback nil nil)))
+              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+      (gp-helm--scan-comment-resolution-async (list pr))
+      (should (equal (gethash 1 gp-helm--comment-resolution-cache) '(2 . 1))))))
 
 (ert-deftest gp-test-build-states-summary ()
   (should (null (gp-build-states-summary nil)))
@@ -480,21 +550,19 @@ A `format' arg/directive mismatch silently truncates the tail of the
 row, which is how the comment badge went missing once."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
-          (gp-helm-labels-width 18))
+          (gp-helm-labels-width 18)
+          (gp-helm--comment-resolution-cache (make-hash-table :test 'eql)))
+      ;; the badge reads the async resolution cache, keyed by id -- seed it
+      ;; directly rather than driving the real fetch
+      (puthash 42 '(2 . 1) gp-helm--comment-resolution-cache)
       (let ((plain (substring-no-properties
-                    (gp-helm--pr-display
-                     ;; reshaped, as callers hold it: `id' is the PR number.
-                     ;; GitHub counts general and review comments separately
-                     ;; (`gp-pr-comment-count' sums them), so the badge needs
-                     ;; those fields -- not Bitbucket's `comment_count'.
-                     (append '((comments . 2) (review_comments . 1))
-                             (github-pull-request "acme/web" 42))))))
+                    (gp-helm--pr-display (github-pull-request "acme/web" 42)))))
         (should (string-match-p "#42" plain))
         (should (string-match-p "Add the widget toggle" plain))
         (should (string-match-p "bug" plain))
         (should (string-match-p "web" plain))
         (should (string-match-p "ada" plain))
-        (should (string-match-p "💬3" plain))
+        (should (string-match-p "💬2(3)" plain))   ;; 2 unresolved of 3 total
         ;; labels sit between the title and the repo slug
         (should (< (string-match "Add the widget toggle" plain)
                    (string-match "bug" plain)))
