@@ -828,6 +828,34 @@ a visible stall once per interval in any open detail buffer."
         (should (equal gp--detail-stats '(:commits 1 :files 1 :added 0 :removed 0)))
         (should (equal gp--detail-diff '(("a" . "diff"))))))))
 
+(ert-deftest gp-test-detail-refresh-busts-deploy-cache-when-helm-loaded ()
+  "`gp-detail-refresh' forgets the overview's cached deploy verdict for
+this PR's commit -- but only when `gp-helm' is actually loaded
+(the fboundp guard), since this file does not require it."
+  (let* ((pr '((id . 7)
+               (source (commit (hash . "abc")))
+               (destination (repository (full_name . "acme/x")))))
+         (busted nil))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--pr pr
+            gp--detail-comments nil
+            gp--detail-stats nil
+            gp--detail-diff nil
+            gp--detail-pipelines '(:recent nil))
+      (cl-letf (((symbol-function 'gp-helm--deploy-cache-bust)
+                 (lambda (hash) (setq busted hash)))
+                ((symbol-function 'bitbucket-pull-request-async)
+                 (lambda (_full-name _id callback) (funcall callback t pr)))
+                ((symbol-function 'bitbucket-pull-request-comments-async)
+                 (lambda (_full-name _id callback &optional _max-items) (funcall callback t nil)))
+                ((symbol-function 'gp-pull-request-stats-async)
+                 (lambda (_fn _id _pr cb) (funcall cb nil)))
+                ((symbol-function 'gp-pull-request-diff-async)
+                 (lambda (_fn _id _c _pr cb) (funcall cb nil))))
+        (gp-detail-refresh)
+        (should (equal busted "abc"))))))
+
 (ert-deftest gp-test-every-buffer-name-is-tagged ()
   "No buffer this package opens may escape the shared prefix.
 Untagged buffers are the thing `gp-buffer-name-prefix' exists to

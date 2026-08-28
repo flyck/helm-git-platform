@@ -150,6 +150,61 @@ treat a prior id-keyed entry as fresh forever either."
     (puthash "abc" 'stopped gp-helm--pipeline-cache)
     (should (string-match-p "⚪" (gp-helm--pipeline-bubble pr)))))
 
+(ert-deftest gp-test-helm-pipeline-has-successful-deploy-p ()
+  "Matches a step by a case-insensitive \"deploy\" substring in its
+name, and only when that step's result is SUCCESSFUL -- a deploy step
+that is still running or failed must not light the badge."
+  (should (gp-helm--pipeline-has-successful-deploy-p
+           '(((name . "Deploy to LIVE") (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))))))
+  ;; case-insensitive
+  (should (gp-helm--pipeline-has-successful-deploy-p
+           '(((name . "DEPLOY") (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))))))
+  ;; a non-deploy successful step doesn't count
+  (should-not (gp-helm--pipeline-has-successful-deploy-p
+               '(((name . "Build and test") (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))))))
+  ;; a deploy step that hasn't succeeded yet doesn't count
+  (should-not (gp-helm--pipeline-has-successful-deploy-p
+               '(((name . "Deploy to DEV") (state (name . "IN_PROGRESS"))))))
+  (should-not (gp-helm--pipeline-has-successful-deploy-p
+               '(((name . "Deploy to DEV") (state (name . "COMPLETED") (result (name . "FAILED")))))))
+  (should-not (gp-helm--pipeline-has-successful-deploy-p nil)))
+
+(ert-deftest gp-test-helm-deploy-badge ()
+  (let ((gp-helm--deploy-cache (make-hash-table :test 'equal))
+        (pr '((source (commit (hash . "abc"))))))
+    ;; not yet scanned -> blank, same as the other async badges
+    (should (equal (gp-helm--deploy-badge pr) ""))
+    (puthash "abc" nil gp-helm--deploy-cache)
+    (should (equal (gp-helm--deploy-badge pr) ""))
+    (puthash "abc" t gp-helm--deploy-cache)
+    (should (string-match-p "🚀" (gp-helm--deploy-badge pr)))))
+
+(ert-deftest gp-test-helm-deploy-cache-bust ()
+  "Busting forgets a resolved verdict so the next scan re-fetches it."
+  (let ((gp-helm--deploy-cache (make-hash-table :test 'equal)))
+    (puthash "abc" t gp-helm--deploy-cache)
+    (gp-helm--deploy-cache-bust "abc")
+    (should (eq (gethash "abc" gp-helm--deploy-cache 'miss) 'miss))
+    ;; nil hash is a no-op, not an error
+    (gp-helm--deploy-cache-bust nil)))
+
+(ert-deftest gp-test-helm-scan-deploys-async-populates-cache ()
+  "End to end against the mock: a fixture with no successful deploy
+step yet caches nil, and a cached commit is never re-fetched."
+  (bitbucket-mock-with-service
+    (let* ((gp-helm--deploy-cache (make-hash-table :test 'equal))
+           (pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+           (hash (gp-pr-source-commit pr)))
+      (gp-helm--scan-deploys-async (list pr))
+      ;; resolved (to nil: the fixture's deploy steps aren't SUCCESSFUL yet),
+      ;; not left as a miss
+      (should (eq (gethash hash gp-helm--deploy-cache 'miss) nil))
+      (let ((calls 0))
+        (cl-letf (((symbol-function 'gp-pipeline-fetch-for-pr-async)
+                   (lambda (_pr _cb) (setq calls (1+ calls)))))
+          (gp-helm--scan-deploys-async (list pr))
+          (should (= calls 0)))))))
+
 (ert-deftest gp-test-helm-pad-truncates-and-faces ()
   (should (= (string-width (gp-helm--pad "abcdef" 4)) 4))
   (should (string-suffix-p "…" (gp-helm--pad "abcdef" 4)))

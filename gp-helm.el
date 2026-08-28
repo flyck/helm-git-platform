@@ -28,6 +28,7 @@
 (require 'git-platform)
 (require 'gp-local)
 (require 'gp-overlay)
+(require 'gp-pipeline)
 (require 'gp-ui)
 
 (declare-function helm "helm")
@@ -211,6 +212,58 @@ shows until the status arrives."
       ('nil        "  ")              ;; resolved: no pipeline ran
       (_           (propertize "⚫" 'help-echo "Pipeline status loading…")))))
 
+(defvar gp-helm--deploy-cache (make-hash-table :test 'equal)
+  "commit-hash -> t/nil: whether any step named \"deploy\" succeeded
+on that commit's current pipeline(s).  Absent means not yet scanned.
+
+Unlike `gp-helm--pipeline-cache', a resolved entry here is kept
+forever rather than expiring a non-terminal answer: walking every
+current pipeline's steps (one fetch per pipeline, not the single
+lightweight commit-statuses call the bubble uses) is too expensive to
+repeat on each list refresh.  A PR whose pipeline is still running
+when scanned stays cached nil until something explicitly busts it --
+`gp-helm--deploy-cache-bust' -- which `gp-detail-refresh' and running
+a manual step both call, since those are the moments a deploy step
+already known about this commit could newly have succeeded.")
+
+(defun gp-helm--deploy-cache-bust (hash)
+  "Forget any cached deploy verdict for commit HASH, if any."
+  (when hash (remhash hash gp-helm--deploy-cache)))
+
+(defun gp-helm--pipeline-has-successful-deploy-p (steps)
+  "Return non-nil if STEPS contains a successful step named \"deploy\"."
+  (cl-some (lambda (step)
+             (and (string-match-p "deploy" (downcase (or (alist-get 'name step) "")))
+                  (equal (gp-pipeline-step-result step) "SUCCESSFUL")))
+           steps))
+
+(defun gp-helm--scan-deploys-async (prs)
+  "Fetch each PR's current-commit pipeline steps, caching a deploy flag.
+Mirrors `gp-helm--scan-pipelines-async', but needs each pipeline's
+steps (not just its coarse build state) to see step names -- so it
+goes through `gp-pipeline-fetch-for-pr-async' instead of the lighter
+commit-statuses call the bubble uses.  Only ever called on a cache
+miss (see `gp-helm--deploy-cache'), so a settled answer is never
+re-fetched just by reopening the list."
+  (dolist (pr prs)
+    (let ((hash (gp-pr-source-commit pr)))
+      (when (and hash (eq (gethash hash gp-helm--deploy-cache 'miss) 'miss))
+        (gp-pipeline-fetch-for-pr-async
+         pr
+         (lambda (data)
+           (let ((deployed (cl-some (lambda (pp) (gp-helm--pipeline-has-successful-deploy-p (cdr pp)))
+                                     (plist-get data :current))))
+             (puthash hash (and deployed t) gp-helm--deploy-cache)
+             (gp-helm--refresh-if-alive))))))))
+
+(defun gp-helm--deploy-badge (pr)
+  "Return a 🚀 badge for PR if its current pipeline ran a deploy step
+successfully, else \"\".  Reads the async `gp-helm--deploy-cache';
+blank until the scan resolves (see `gp-helm--scan-deploys-async')."
+  (let* ((hash (gp-pr-source-commit pr))
+         (deployed (and hash (gethash hash gp-helm--deploy-cache))))
+    (if deployed (propertize " 🚀" 'help-echo "A deploy step succeeded") "")))
+
 (defun gp-helm--pr-display (pr &optional draft)
   "Return an aligned, multi-column, propertized Helm line for PR.
 DRAFT non-nil dims the whole row.  A leading author avatar is
@@ -232,13 +285,14 @@ shown on graphical displays."
                                   'face 'gp-helm-comments-face)
                     ""))
            (reviews (gp-helm--review-badge pr))
+           (deploy (gp-helm--deploy-badge pr))
            ;; already padded to its column width, and "" when unsupported --
            ;; so it carries its own trailing separator and the row collapses
            ;; back to the original layout on a platform without labels
            (labels (let ((cell (gp-helm--labels-cell pr)))
                      (if (string-empty-p cell) "" (concat cell "  "))))
-           (line (format "%s %s%s  %s  %s%s  %s%s%s"
-                         bubble avatar id title labels repo author reviews badge)))
+           (line (format "%s %s%s  %s  %s%s  %s%s%s%s"
+                         bubble avatar id title labels repo author reviews badge deploy)))
       ;; Drafts are dimmed as a whole row on purpose: one flat grey reads as
       ;; "not ready yet" at a glance, which is worth more than keeping the
       ;; label colours (and their exact column alignment) on those rows.
@@ -702,9 +756,10 @@ renders no candidates and helm hides it by itself."
               "   (C-c g reload · C-c G refresh · C-c m merged)"))))
 
 (defun gp-helm--scan-mine-badges (prs)
-  "Fetch pipeline states and review tallies for PRS in the background."
+  "Fetch pipeline states, review tallies and deploy status for PRS."
   (gp-helm--scan-pipelines-async prs)
-  (gp-helm--scan-review-tallies-async prs))
+  (gp-helm--scan-review-tallies-async prs)
+  (gp-helm--scan-deploys-async prs))
 
 (defun gp-helm--fetch-mine-async (uuid include-merged)
   "Fetch UUID's own PRs asynchronously, filling the live helm session.
@@ -1063,7 +1118,8 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
                         (gp-helm--scan-review-tallies-async cached)
                         ;; per-reviewer data too, else "Covered by others"
                         ;; only ever refreshes after a cold relist
-                        (gp-helm--scan-reviewers-async cached))))
+                        (gp-helm--scan-reviewers-async cached)
+                        (gp-helm--scan-deploys-async cached))))
                    (run-with-idle-timer 0.1 nil #'gp-helm--refresh-if-alive))
           (run-with-idle-timer
            0.1 nil
@@ -1195,7 +1251,7 @@ others have since piled on."
              (push pr acc))))
        (setq gp-helm--reviewing-cache (reverse acc))
        (gp-helm--refresh-if-alive))
-     ;; on-done: cache the final result for 5 min, fetch pipelines/reviews, refresh
+     ;; on-done: cache the final result for 5 min, fetch pipelines/reviews/deploys, refresh
      (lambda ()
        (let ((final (reverse acc)))
          (setq gp-helm--reviewing-cache final)
@@ -1204,7 +1260,8 @@ others have since piled on."
          (gp-helm--scan-review-tallies-async final)
          ;; per-reviewer data too: the quorum split needs to know WHO
          ;; voted, which the aggregate tally cannot say
-         (gp-helm--scan-reviewers-async final))
+         (gp-helm--scan-reviewers-async final)
+         (gp-helm--scan-deploys-async final))
        (gp-helm--refresh-if-alive)))))
 
 ;;;; Others' open PRs ---------------------------------------------------------

@@ -2170,6 +2170,8 @@ which optional layers (gp-watch, gp-helm) are in use."
     (clrhash gp--comment-outdated-cache))
   (when (boundp 'gp-helm--pipeline-cache)
     (clrhash gp-helm--pipeline-cache))
+  (when (boundp 'gp-helm--deploy-cache)
+    (clrhash gp-helm--deploy-cache))
   (when (boundp 'gp-helm--reviewing-cache)
     (setq gp-helm--reviewing-cache nil))
   (when (boundp 'gp-helm--others-cache)
@@ -2756,8 +2758,15 @@ deferred stats/diff fetch ignore the cache, so `g' always re-fetches."
     (gp--detail-load-async buf pr)))
 
 (defun gp-detail-refresh ()
-  "Re-fetch and redraw the current detail buffer (non-blocking, force-fresh)."
+  "Re-fetch and redraw the current detail buffer (non-blocking, force-fresh).
+Also busts the overview's cached deploy verdict for this PR's commit
+(see `gp-helm--deploy-cache'): every pipeline-mutating command here
+(trigger, stop, run/rerun a step) calls this on completion, which is
+exactly when a deploy step could have newly succeeded or a previously
+successful run could have been superseded by a new one."
   (interactive)
+  (when (and gp--pr (fboundp 'gp-helm--deploy-cache-bust))
+    (gp-helm--deploy-cache-bust (gp-pr-source-commit gp--pr)))
   (if gp--pr
       (progn
         (gp--detail-show-loading)

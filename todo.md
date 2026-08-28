@@ -1,5 +1,15 @@
 # TODO
 
+## Persist the overview's search filter for the session
+
+Currently `gp-helm--list' never passes `:input'/`:resume' to `helm', so
+Helm's own `helm-initial-setup' resets the pattern to "" on every fresh
+session -- typing a filter, opening a PR's detail buffer, then coming back
+to the overview loses it.  Add an option to keep the last-typed filter for
+the rest of the Emacs session (persist it in a `defvar', pass it back via
+`:input' on the next `gp-helm--list' call), gated by a `defcustom'
+defaulting to enabled.
+
 ## Coloring
 
 would be nice if the progress animation were blue and not red.
