@@ -304,13 +304,45 @@ this re-runs the earlier steps, rather than reporting a plain success."
 (ert-deftest gp-test-dw-step-marker-only-on-watched-steps ()
   (gp-dw-test--with-clean-registry
     (gp-dw-test--arm "deploy-dev")
-    (should (gp-deploy-watch-step-marker
-             (gp-dw-test--gate "deploy-dev") "acme/web" "feature/widget"))
-    ;; a different step, and a different branch, are not this watcher's
+    (should (string-match-p
+             "▸ A"
+             (substring-no-properties
+              (gp-deploy-watch-step-marker
+               (gp-dw-test--gate "deploy-dev") "acme/web" "feature/widget"))))
+    ;; a different step, and a different branch, are not THIS watcher's --
+    ;; but each is still schedulable on its own, so it gets the plain
+    ;; unarmed "▸ A" hint rather than nil (see
+    ;; `gp-test-dw-step-marker-hints-unarmed-schedulable-steps')
+    (should (string-match-p
+             "▸ A"
+             (substring-no-properties
+              (gp-deploy-watch-step-marker
+               (gp-dw-test--gate "deploy-prod") "acme/web" "feature/widget"))))
+    (should (string-match-p
+             "▸ A"
+             (substring-no-properties
+              (gp-deploy-watch-step-marker
+               (gp-dw-test--gate "deploy-dev") "acme/web" "other-branch"))))))
+
+(ert-deftest gp-test-dw-step-marker-hints-unarmed-schedulable-steps ()
+  "A schedulable step with no watcher yet still gets a plain `▸ A' hint
+\(unconditionally, like `[manual ▸ T]'/`[rerun ▸ P]' on the other
+pipeline commands) -- without this, `A' had no visible sign it
+existed until the user already knew to press it once."
+  (gp-dw-test--with-clean-registry
+    (should (string-match-p
+             "▸ A"
+             (substring-no-properties
+              (gp-deploy-watch-step-marker
+               (gp-dw-test--gate "deploy-dev") "acme/web" "feature/widget"))))))
+
+(ert-deftest gp-test-dw-step-marker-nil-on-non-schedulable-step ()
+  "A step that is not a manual gate at all (nothing `A' could ever
+arm) gets no marker -- not even the unarmed hint."
+  (gp-dw-test--with-clean-registry
     (should-not (gp-deploy-watch-step-marker
-                 (gp-dw-test--gate "deploy-prod") "acme/web" "feature/widget"))
-    (should-not (gp-deploy-watch-step-marker
-                 (gp-dw-test--gate "deploy-dev") "acme/web" "other-branch"))))
+                 '((name . "build") (state (name . "COMPLETED")))
+                 "acme/web" "feature/widget"))))
 
 (ert-deftest gp-test-dw-step-marker-shows-the-state ()
   (gp-dw-test--with-clean-registry

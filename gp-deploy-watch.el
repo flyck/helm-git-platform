@@ -542,17 +542,26 @@ wherever it is read -- popup, step line, or watcher list."
     (_ "•")))
 
 (defun gp-deploy-watch-step-marker (step full-name branch)
-  "Return a propertized armed-marker for STEP, or nil when unwatched.
+  "Return a propertized marker for STEP's arm-on-reach state, or nil.
 STEP is matched by name against the watchers on BRANCH of FULL-NAME.
-Rendered onto the step line so an armed gate is visible from the PR
-itself, without opening the watcher list."
-  (when-let* ((name (alist-get 'name step))
-              (w (gp-deploy-watch-get full-name branch name)))
-    (propertize (format "  [%s %s ▸ A]"
-                        (gp-deploy-watch--state-glyph (gp-deploy-watch-state w))
-                        (gp-deploy-watch-state w))
-                'face (gp-deploy-watch--state-face (gp-deploy-watch-state w))
-                'help-echo (gp-deploy-watch-detail w))))
+
+An armed/finished watcher renders its state (matches the other
+pipeline commands' `label ▸ KEY' hints, e.g. `[manual ▸ T]',
+`[rerun ▸ P]') so it is visible from the PR itself, without opening
+the watcher list.  A schedulable step with no watcher yet ALSO gets a
+plain `▸ A' hint for the same reason those other commands' hints are
+unconditional -- without this, `A' had no visible sign it existed
+until you already knew to press it once."
+  (when-let* ((name (alist-get 'name step)))
+    (if-let* ((w (gp-deploy-watch-get full-name branch name)))
+        (propertize (format "  [%s %s ▸ A]"
+                            (gp-deploy-watch--state-glyph (gp-deploy-watch-state w))
+                            (gp-deploy-watch-state w))
+                    'face (gp-deploy-watch--state-face (gp-deploy-watch-state w))
+                    'help-echo (gp-deploy-watch-detail w))
+      (when (gp-deploy-watch-schedulable-p step)
+        (propertize "  [▸ A]" 'face 'shadow
+                    'help-echo "Arm this gate to run automatically once the build reaches it")))))
 
 (defun gp-deploy-watch--elapsed (w)
   "Return W's age as a short human string."
