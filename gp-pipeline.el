@@ -86,7 +86,6 @@ command's own output." :group 'bitbucket-faces)
 
 (defclass gp-pipeline-section (magit-section) ())
 (defclass gp-pipeline-step-section (magit-section) ())
-(defclass gp-pipeline-recent-section (magit-section) ())
 
 ;;;; Spinner -------------------------------------------------------------------
 
@@ -381,17 +380,21 @@ the indistinguishable running state."
                                  (alist-get 'started_on step)))))
                 (propertize "   l:log" 'face 'shadow))))))
 
-(defun gp-pipeline--short-hash (hash)
-  "Return a 8-char short form of commit HASH, or \"\"."
-  (if (and hash (>= (length hash) 8)) (substring hash 0 8) (or hash "")))
-
 (defun gp--insert-pipelines (data)
   "Insert the Pipelines section from DATA (plist :current :recent).
 :current is a sorted alist of (PIPELINE . STEPS) for the PR's head
-commit (rendered in full, finished ones collapsed); :recent is a
-list of prior-commit pipelines shown as a one-line status summary."
-  (let ((current (plist-get data :current))
-        (recent (plist-get data :recent)))
+commit, rendered in full (finished ones collapsed).  :recent (prior
+commits' pipelines on the same branch) is not rendered here at all --
+see `gp--insert-commits', which shows each one beside the commit it
+belongs to instead: a dedicated \"Recent runs\" block here used to
+repeat the same commit summary a second time with a status beside it,
+and nothing there was actionable."
+  (let* ((current (plist-get data :current))
+         (recent (plist-get data :recent)))
+    ;; still shown (with the "no pipeline" fallback) when only :recent has
+    ;; anything, so a PR whose head commit has no run of its own doesn't
+    ;; silently lose this section -- :recent itself renders in the Commits
+    ;; section instead (see `gp--insert-commits'), not here.
     (when (or current recent)
       (magit-insert-section (magit-section 'pipelines)
         (magit-insert-heading
@@ -409,34 +412,7 @@ list of prior-commit pipelines shown as a one-line status summary."
                       (dolist (s steps) (gp-pipeline--insert-step s))
                     (insert "    (no steps)\n")))))
           (insert "  (no pipeline for the current commit)\n"))
-        ;; status summary of runs on the branch's other recent commits;
-        ;; each run is its own (foldable, navigable) section.
-        (when recent
-          (magit-insert-section (gp-pipeline-recent-section nil t)
-            (magit-insert-heading
-              (format "  Recent runs on this branch (%d)" (length recent)))
-            (dolist (entry recent)
-              (gp-pipeline--insert-recent entry))))
         (insert "\n")))))
-
-(defun gp-pipeline--insert-recent (entry)
-  "Insert one recent-run ENTRY (a cons (PIPELINE . SUMMARY)) as a section."
-  (let* ((p (car entry))
-         (summary (cdr entry))
-         (state (gp-pipeline-state p))
-         (result (gp-pipeline-result p))
-         (g (gp-pipeline--status-glyph state result)))
-    (magit-insert-section (gp-pipeline-recent-section p)
-      (magit-insert-heading
-        (concat "    "
-                (propertize (car g) 'face (cdr g))
-                (format " #%s " (or (gp-pipeline-number p) "?"))
-                (propertize (gp-pipeline--short-hash (gp-pipeline-commit p))
-                            'face 'magit-hash)
-                (when (and summary (not (string-empty-p summary)))
-                  (propertize (format "  %s" summary) 'face 'default))
-                (propertize (format "   %s" (or result state ""))
-                            'face 'shadow))))))
 
 ;;;; Fetching (network, via the protocol) --------------------------------------
 

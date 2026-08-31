@@ -214,6 +214,45 @@ face on the rest of the string (see `gp--pr-heading')."
         (should (equal (get-text-property pos 'help-echo text)
                        "https://co.atlassian.net/browse/WP-1231"))))))
 
+(ert-deftest gp-test-detail-commits-show-pipeline-status ()
+  "A commit with a matching pipeline (from EITHER :current, the head
+commit's own runs, or :recent, an older commit's) shows a status
+glyph + pipeline number on its own line -- this is what used to be a
+separate \"Recent runs on this branch\" block (see
+`gp-test-pipeline-render-section', which now asserts that block is
+gone) that repeated the commit summary a second time for no reason."
+  (let* ((head-pipeline '((state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
+                          (build_number . 42)
+                          (target (commit (hash . "87c8054110c84d42edc3a4e89184ffd1a15d3a8d")))))
+         (older-pipeline '((state (name . "COMPLETED") (result (name . "FAILED")))
+                           (build_number . 40)
+                           (target (commit (hash . "1a2b3c4d5e6f7788990011223344556677889900")))))
+         (git-platform-current-backend (git-platform-bitbucket)))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-commits gp-test--commits
+            gp--detail-pipelines (list :current (list (cons head-pipeline nil))
+                                       :recent (list (cons older-pipeline "older commit summary"))))
+      (let ((inhibit-read-only t))
+        (magit-insert-section (gp-root)
+          (gp--insert-commits)))
+      (let ((text (buffer-string)))
+        ;; the head commit's line carries its own (successful) pipeline
+        (should (string-match-p "87c80541.*#42" text))
+        ;; the older commit's line carries ITS pipeline, not the head's
+        (should (string-match-p "1a2b3c4d.*#40" text))
+        ;; and does NOT repeat as a separate "Recent runs" block/summary
+        (should-not (string-match-p "Recent runs" text))
+        (should-not (string-match-p "older commit summary" text))))))
+
+(ert-deftest gp-test-detail-commits-no-pipeline-match-is-quiet ()
+  "A commit with no matching pipeline just has no status glyph -- not
+an error, not a placeholder."
+  (let ((text (gp-test--render-commits gp-test--commits)))
+    ;; gp-test--render-commits leaves gp--detail-pipelines at its
+    ;; default (nil), so nothing should match and nothing breaks
+    (should (string-match-p "fix indentation of the wscat script" text))))
+
 (ert-deftest gp-test-detail-commits-empty-is-noop ()
   "No commits -> no section at all (not an empty heading)."
   (should (equal (gp-test--render-commits nil) "")))

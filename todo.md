@@ -18,6 +18,11 @@ would be nice if the progress animation were blue and not red.
 
 we should have a loading indecator icon here for spinning
 
+Confirmed gap: a queued job currently gets no distinct icon and doesn't
+read as "running" anywhere in the UI (bubble, step glyph) -- it's
+indistinguishable from idle/not-started, so a PR that's actually waiting
+in a queue looks the same as one with nothing happening at all.
+
 ## GitHub labels support
 
 - `C-c C-c` on a label in either view should filter/jump to the set of PRs
@@ -72,15 +77,6 @@ list of paths to leave out of the counter (still listed, just not counted,
 or hidden entirely -- decide which reads better), defaulting to
 `Pipfile.lock' and the obvious siblings (`poetry.lock',
 `package-lock.json', `yarn.lock', `go.sum', `Cargo.lock').
-
-## Fold "recent runs" into the commits list
-
-The "Recent runs on this branch (N)" block is noise: it repeats the same
-commit summary four times with a status each, and nothing is actionable
-there.  Drop it and instead put each run's status and pipeline number
-beside its commit in the Commits section -- one line per commit, carrying
-the build result.  Keep the merge-commit run (see the merged-PR section),
-which is a different question.
 
 ## Pipeline steps are not properly integrated with GitHub
 

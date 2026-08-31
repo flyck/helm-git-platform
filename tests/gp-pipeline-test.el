@@ -291,10 +291,10 @@ cover this hint -- which is how it went stale once already."
       (should (string-match-p "Deploy to LIVE" text))
       ;; the waiting manual step is flagged as runnable
       (should (string-match-p "\\[manual ▸ T\\]" text))
-      ;; the older-commit run appears in the recent-runs summary,
-      ;; with its commit message (not just the sha)
-      (should (string-match-p "Recent runs on this branch (1)" text))
-      (should (string-match-p "Fix the widget toggle" text)))))
+      ;; the older-commit run no longer shows here as a "Recent runs"
+      ;; block -- it renders beside its own commit in the Commits
+      ;; section instead, see `gp-test-detail-commits-show-pipeline-status'
+      (should-not (string-match-p "Recent runs" text)))))
 
 (ert-deftest gp-test-pipeline-trigger-or-run-manual-prefers-manual-step ()
   (let ((called nil)
@@ -308,25 +308,6 @@ cover this hint -- which is how it went stale once already."
                (lambda () (setq called 'trigger))))
       (gp-detail-pipeline-trigger-or-run-manual)
       (should (eq called 'manual)))))
-
-(ert-deftest gp-test-pipeline-recent-runs-are-sections ()
-  "Each recent run is its own foldable section, like comments."
-  (bitbucket-mock-with-service
-    (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
-           (data (gp-pipeline-fetch-for-pr pr)))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (let ((inhibit-read-only t))
-          (magit-insert-section (gp-root)
-            (gp--insert-pipelines data)))
-        (let ((recent-secs
-               (cl-remove-if-not
-                (lambda (s) (and (object-of-class-p s 'gp-pipeline-recent-section)
-                                 ;; the per-run sections carry a pipeline value
-                                 (oref s value)))
-                (gp-test--all-pipeline-sections magit-root-section))))
-          ;; one per recent run
-          (should (= (length recent-secs) 1)))))))
 
 (ert-deftest gp-test-pipeline-render-empty-is-noop ()
   (should (equal (gp-test--render-pipelines nil) "")))

@@ -975,12 +975,41 @@ checkout is for).  Set to nil for no cap."
                  (const :tag "No limit" nil))
   :group 'bitbucket)
 
+(defun gp--commit-pipelines-by-hash (pipelines)
+  "Return a hash table mapping commit hash -> list of pipelines from
+PIPELINES (a plist :current :recent, see `gp-pipeline-fetch-for-pr').
+:current pairs a pipeline with its steps ((PIPELINE . STEPS) …); :recent
+pairs one with a commit summary ((PIPELINE . SUMMARY) …) -- only the
+PIPELINE itself is needed here, so both shapes are unwrapped the same
+way with `car'."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (entry (append (plist-get pipelines :current) (plist-get pipelines :recent)))
+      (let* ((p (car entry))
+             (hash (gp-pipeline-commit p)))
+        (when hash (push p (gethash hash table)))))
+    table))
+
+(defun gp--insert-commit-pipeline-status (pipelines-by-hash hash)
+  "Insert a status glyph + number for each pipeline at HASH, if any.
+Multiple pipelines can target one commit (e.g. two workflows); each
+gets its own glyph so none is silently dropped."
+  (dolist (p (reverse (gethash hash pipelines-by-hash)))
+    (let ((g (gp-pipeline--status-glyph (gp-pipeline-state p) (gp-pipeline-result p))))
+      (insert (propertize (format "  %s#%s" (car g) (or (gp-pipeline-number p) "?"))
+                          'face (cdr g))))))
+
 (defun gp--insert-commits ()
   "Insert a collapsable commits section for the detail buffer's PR.
-Each commit is one line -- short hash, summary, author, relative date
--- carrying its plist as the section value so `RET' can open just that
-commit in Magit (see `gp-detail-show-commit')."
-  (let ((commits gp--detail-commits))
+Each commit is one line -- short hash, summary, author, relative date,
+pipeline status -- carrying its plist as the section value so `RET'
+can open just that commit in Magit (see `gp-detail-show-commit').
+The pipeline status folds in what used to be its own \"Recent runs on
+this branch\" block under Pipelines (see `gp--insert-pipelines') --
+that block repeated the same commit summary a second time with a
+status beside it and nothing there was actionable, so the status now
+sits directly on the commit it belongs to instead."
+  (let ((commits gp--detail-commits)
+        (pipelines-by-hash (gp--commit-pipelines-by-hash gp--detail-pipelines)))
     (when commits
       (magit-insert-section (gp-commits nil gp-detail-commits-collapsed)
         (magit-insert-heading (format "Commits (%d)" (length commits)))
@@ -998,6 +1027,8 @@ commit in Magit (see `gp-detail-show-commit')."
               (when date
                 (insert (propertize (format "  %s" (gp--relative-time date))
                                     'face 'shadow)))
+              (when hash
+                (gp--insert-commit-pipeline-status pipelines-by-hash hash))
               (insert "\n"))))
         (insert "\n")))))
 
