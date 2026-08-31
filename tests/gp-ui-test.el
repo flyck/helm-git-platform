@@ -28,6 +28,22 @@
     (should (string-match-p (format "#%s" (alist-get 'id pr)) h))
     (should (string-match-p (regexp-quote (alist-get 'title pr)) h))))
 
+(ert-deftest gp-test-pr-heading-linkifies-ticket-key-in-title ()
+  "A ticket key in the title becomes a link, without losing the title
+face on the rest of the string (see `gp--pr-heading')."
+  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
+         (pr '((id . 42) (title . "WP-1231: add the widget toggle")
+               (destination (repository (slug . "web")))
+               (author (display_name . "Ada"))))
+         (h (gp--pr-heading pr))
+         (ticket-pos (string-match "WP-1231" h))
+         (rest-pos (string-match "widget toggle" h)))
+    (should (eq (get-text-property ticket-pos 'face h) 'link))
+    (should (equal (get-text-property ticket-pos 'help-echo h)
+                   "https://co.atlassian.net/browse/WP-1231"))
+    ;; the rest of the title keeps its own face, not `link'
+    (should (eq (get-text-property rest-pos 'face h) 'gp-pr-title-face))))
+
 (ert-deftest gp-test-render-list-builds-groups ()
   "Rendering produces both group headings and one section per PR."
   (let ((prs (gp-test--mock-prs))
@@ -109,6 +125,29 @@
             (should-not (string-match-p (regexp-quote "? → ?") text))
             (should-not (string-match-p (regexp-quote "👤 ?") text))))))))
 
+(ert-deftest gp-test-render-detail-linkifies-ticket-key-in-title ()
+  "A ticket key in the PR title is linked in the detail buffer too
+\(previously only the description and commit summaries were)."
+  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
+         (pr '((id . 42) (title . "WP-1231: add the widget toggle")
+               (state . "OPEN")
+               (destination (repository (full_name . "acme/web") (slug . "web"))
+                            (branch (name . "main")))
+               (source (branch (name . "feature/widget")))
+               (author (display_name . "Ada")))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-detail pr nil))
+      (let* ((text (buffer-string))
+             (ticket-pos (string-match "WP-1231" text))
+             (rest-pos (string-match "widget toggle" text)))
+        (should (eq (get-text-property ticket-pos 'face text) 'link))
+        (should (equal (get-text-property ticket-pos 'help-echo text)
+                       "https://co.atlassian.net/browse/WP-1231"))
+        ;; the rest of the title keeps the detail-view title face
+        (should (eq (get-text-property rest-pos 'face text) 'gp-detail-title-face))))))
+
 (ert-deftest gp-test-render-detail-shows-mark-ready-for-open-github-pr-authored-by-me ()
   "The draft-toggle button must key off `gp-pr-open-p', not a raw
 \"OPEN\" string comparison -- GitHub's `state' is lowercase \"open\"."
@@ -156,6 +195,24 @@
     (should (string-match-p "fix indentation of the wscat script" text))
     (should (string-match-p "Felix Brilej" text))
     (should (string-match-p "Ada Lovelace" text))))
+
+(ert-deftest gp-test-detail-commits-summary-linkifies-ticket-keys ()
+  "A ticket key in a commit summary (\"fix: WP-1231 ...\") becomes a link."
+  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
+         (commits (list (list :hash "abc123" :summary "fix: WP-1231 handle the edge case"
+                              :author "Felix" :date "2026-07-15T17:28:26+00:00"))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-commits commits)
+      (let ((inhibit-read-only t))
+        (magit-insert-section (gp-root)
+          (gp--insert-commits)))
+      (let* ((text (buffer-string))
+             (pos (string-match "WP-1231" text)))
+        (should pos)
+        (should (eq (get-text-property pos 'face text) 'link))
+        (should (equal (get-text-property pos 'help-echo text)
+                       "https://co.atlassian.net/browse/WP-1231"))))))
 
 (ert-deftest gp-test-detail-commits-empty-is-noop ()
   "No commits -> no section at all (not an empty heading)."
@@ -353,6 +410,33 @@ naive `eq' implementation would hit across two separate renders."
       ;; a JSON null arrives as a non-string, not as nil
       (should-not (gp-pr-description '((id . 42) (body . :null))))
       (should-not (gp-pr-description '((id . 42)))))))
+
+(ert-deftest gp-test-linkify-buffer-links-ticket-keys ()
+  "`gp--linkify' (used on the rendered description, alongside URLs)
+also turns a ticket key into a link -- the same pass `gp--render-markdown'
+runs on PR descriptions."
+  (let ((gp-ticket-url-format "https://co.atlassian.net/browse/%s"))
+    (with-temp-buffer
+      (insert "See WP-1231 and https://example.com for details.")
+      (gp--linkify (point-min))
+      (let ((text (buffer-string)))
+        (let ((ticket-pos (string-match "WP-1231" text)))
+          (should (eq (get-text-property ticket-pos 'face text) 'link))
+          (should (equal (get-text-property ticket-pos 'help-echo text)
+                         "https://co.atlassian.net/browse/WP-1231")))
+        ;; the URL pass still works alongside the ticket pass
+        (let ((url-pos (string-match "https://example.com" text)))
+          (should (eq (get-text-property url-pos 'face text) 'link)))))))
+
+(ert-deftest gp-test-linkify-buffer-ticket-unconfigured-still-highlights ()
+  (let ((gp-ticket-url-format nil))
+    (with-temp-buffer
+      (insert "See WP-1231 for details.")
+      (gp--linkify (point-min))
+      (let* ((text (buffer-string))
+             (pos (string-match "WP-1231" text)))
+        (should (eq (get-text-property pos 'face text) 'link))
+        (should (string-match-p "gp-ticket-url-format" (get-text-property pos 'help-echo text)))))))
 
 (ert-deftest gp-test-render-detail-shows-description-for-github-pr ()
   "The detail view renders the description section from GitHub's `body'."

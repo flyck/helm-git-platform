@@ -266,7 +266,10 @@ notice about work that may not exist is worse than none.")
       (concat
        (propertize (format "#%s" .id) 'face 'gp-pr-id-face)
        " "
-       (propertize (or .title "(no title)") 'face 'gp-pr-title-face)
+       ;; ticket-linkify AFTER the title face so a ticket key's `link'
+       ;; face wins on just that substring, not the whole title
+       (gp-ticket-linkify-string
+        (propertize (or .title "(no title)") 'face 'gp-pr-title-face))
        (if (string-empty-p labels) "" (concat "  " labels))
        "  "
        (propertize (format "[%s]" (or (gp-pr-repo-slug pr) "?"))
@@ -317,7 +320,8 @@ Assumes the buffer is in `gp-list-mode' and writable."
 
 (defun gp--linkify (start)
   "Add `link' face + clickability to markdown/bare links from START in buffer.
-Handles \[label](url) (showing the label) and bare http(s) URLs."
+Handles \[label](url) (showing the label), bare http(s) URLs, and
+ticket keys like \"WP-1231\" (see `gp-ticket-key-pattern')."
   (save-excursion
     ;; [label](url) -> clickable label
     (goto-char start)
@@ -347,7 +351,20 @@ Handles \[label](url) (showing the label) and bare http(s) URLs."
                                        (lambda () (interactive) (browse-url url)))
                            (define-key m (kbd "RET")
                                        (lambda () (interactive) (browse-url url)))
-                           m))))))))
+                           m))))))
+    ;; ticket keys not already faced (by either pass above)
+    (goto-char start)
+    (while (re-search-forward gp-ticket-key-pattern nil t)
+      (unless (eq (get-text-property (match-beginning 0) 'face) 'link)
+        (let ((bounds (gp-ticket--padded-bounds
+                       (match-beginning 0) (match-end 0)
+                       (lambda (p) (and (> p (point-min))
+                                         (buffer-substring-no-properties (1- p) p)))
+                       (lambda (p) (and (< p (point-max))
+                                         (buffer-substring-no-properties p (1+ p)))))))
+          (add-text-properties
+           (car bounds) (cdr bounds)
+           (gp-ticket--props (match-string 0))))))))
 
 (defun gp--render-markdown (text)
   "Return TEXT fontified as GitHub-flavoured Markdown, with colored links.
@@ -977,7 +994,7 @@ commit in Magit (see `gp-detail-show-commit')."
               (insert "  ")
               (insert (propertize (gp--short-hash hash) 'face 'magit-hash))
               (insert "  ")
-              (insert (or (plist-get c :summary) ""))
+              (insert (gp-ticket-linkify-string (or (plist-get c :summary) "")))
               (when author
                 (insert (propertize (format "  — %s" author) 'face 'gp-author-face)))
               (when date
@@ -1119,8 +1136,12 @@ that is when you need a way to add the first one."
                        (format "#%s" .id))
                'face 'gp-pr-id-face))
       (insert "  ")
-      (insert (propertize (or .title "(no title)")
-                          'face 'gp-detail-title-face))
+      (let ((title-start (point)))
+        (insert (or .title "(no title)"))
+        (add-text-properties title-start (point) '(face gp-detail-title-face))
+        ;; runs AFTER the face above so a ticket key's `link' face wins
+        ;; over the title's on just that substring, not the whole title
+        (gp--linkify title-start))
       (when (gp-pr-open-p pr)
         (insert "   ")
         (gp--insert-action-button

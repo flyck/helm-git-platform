@@ -227,5 +227,87 @@ PR\"."
     (should (equal (gp-comment-web-url '((html_url . "https://gh/c/2")))
                    "https://gh/c/2"))))
 
+(ert-deftest gp-test-ticket-key-pattern-matches-shape ()
+  "2-3 letters, a dash, 1-5 digits -- and, deliberately, never a bare
+GitHub-style \"#123\" reference (no letter prefix to match at all)."
+  (should (string-match-p gp-ticket-key-pattern "WP-1231"))
+  (should (string-match-p gp-ticket-key-pattern "ab-7"))
+  (should (string-match-p gp-ticket-key-pattern "XYZ-99999"))
+  (should-not (string-match-p gp-ticket-key-pattern "#123"))
+  (should-not (string-match-p gp-ticket-key-pattern "A-1"))          ;; only 1 letter
+  (should-not (string-match-p gp-ticket-key-pattern "ABCD-1"))       ;; 4 letters
+  (should-not (string-match-p gp-ticket-key-pattern "WP-123456")))   ;; 6 digits
+
+(ert-deftest gp-test-ticket-url-for-honours-configured-format ()
+  (let ((gp-ticket-url-format "https://co.atlassian.net/browse/%s"))
+    (should (equal (gp-ticket-url-for "WP-1231")
+                   "https://co.atlassian.net/browse/WP-1231")))
+  (let ((gp-ticket-url-format nil))
+    (should-not (gp-ticket-url-for "WP-1231"))))
+
+(ert-deftest gp-test-ticket-linkify-string-links-configured-key ()
+  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
+         (s (gp-ticket-linkify-string "fix: handle WP-1231 correctly")))
+    (should (equal (substring-no-properties s) "fix: handle WP-1231 correctly"))
+    (let ((pos (string-match "WP-1231" s)))
+      (should (eq (get-text-property pos 'face s) 'link))
+      (should (equal (get-text-property pos 'help-echo s)
+                     "https://co.atlassian.net/browse/WP-1231")))))
+
+(ert-deftest gp-test-ticket-linkify-string-unconfigured-still-highlights ()
+  "Unconfigured: still linked/highlighted (so it visibly reads as a
+recognized ticket key), but the tooltip says to configure it instead
+of a guessed or blank URL."
+  (let* ((gp-ticket-url-format nil)
+         (s (gp-ticket-linkify-string "fix: handle WP-1231 correctly"))
+         (pos (string-match "WP-1231" s)))
+    (should (eq (get-text-property pos 'face s) 'link))
+    (should (string-match-p "gp-ticket-url-format" (get-text-property pos 'help-echo s)))))
+
+(ert-deftest gp-test-ticket-linkify-string-ignores-github-issue-refs ()
+  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
+         (s (gp-ticket-linkify-string "closes #123, relates to WP-9")))
+    (should-not (eq (get-text-property (string-match "#123" s) 'face s) 'link))
+    (should (eq (get-text-property (string-match "WP-9" s) 'face s) 'link))))
+
+(ert-deftest gp-test-ticket-linkify-string-multiple-keys ()
+  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
+         (s (gp-ticket-linkify-string "WP-1 and ABC-22 both here")))
+    (should (eq (get-text-property (string-match "WP-1" s) 'face s) 'link))
+    (should (eq (get-text-property (string-match "ABC-22" s) 'face s) 'link))))
+
+(ert-deftest gp-test-ticket-linkify-string-nil-is-nil ()
+  (should-not (gp-ticket-linkify-string nil)))
+
+(ert-deftest gp-test-ticket-linkify-string-pads-surrounding-whitespace ()
+  "A short ticket key is an easy mouse target to miss by a column --
+padding the clickable/highlighted region into an adjacent SPACE (but
+never into another word) closes that gap.  A click landing on the
+space right before/after \"WP-1231\" must still be `link'-faced."
+  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
+         (s (gp-ticket-linkify-string "see WP-1231 now")))
+    (let ((key-start (string-match "WP-1231" s)))
+      ;; the space right before the key is now also `link'-faced...
+      (should (eq (get-text-property (1- key-start) 'face s) 'link))
+      ;; ...but the word before THAT space is untouched
+      (should-not (eq (get-text-property (- key-start 2) 'face s) 'link))
+      ;; the space right after the key is also `link'-faced...
+      (should (eq (get-text-property (+ key-start 7) 'face s) 'link))
+      ;; ...but the word after THAT space is untouched
+      (should-not (eq (get-text-property (+ key-start 8) 'face s) 'link)))))
+
+(ert-deftest gp-test-ticket-linkify-string-padding-never-eats-a-neighbour ()
+  "Two ticket keys separated by exactly one space must not both claim
+that same space -- whichever is processed first would otherwise
+overwrite the other's padding claim on it."
+  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
+         (s (gp-ticket-linkify-string "WP-1 AB-99")))
+    ;; the single space between them is still faced (claimed by one of
+    ;; the two neighbours, whichever ran second, harmlessly) but the
+    ;; keys themselves are intact and distinctly identifiable
+    (should (eq (get-text-property (string-match "WP-1" s) 'face s) 'link))
+    (should (eq (get-text-property (string-match "AB-99" s) 'face s) 'link))
+    (should (equal (substring-no-properties s) "WP-1 AB-99"))))
+
 (provide 'git-platform-test)
 ;;; git-platform-test.el ends here

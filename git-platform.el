@@ -901,6 +901,85 @@ Tokens inside inline/fenced code are left untouched."
            (or (gp--emoji-for (downcase m)) m)))
        text t t))))
 
+(defcustom gp-ticket-key-pattern "\\b[A-Za-z]\\{2,3\\}-[0-9]\\{1,5\\}\\b"
+  "Regexp matching an external ticket key, e.g. \"WP-1231\".
+Default is a 2-3 letter project prefix, a dash, then 1-5 digits.
+Deliberately does NOT match a bare GitHub issue/PR reference like
+\"#123\" -- those have no letter prefix at all, so this pattern
+simply never sees them; GitHub linking is handled separately by the
+platform's own UI.  Applied to PR descriptions and commit summaries
+\(see `gp-ticket-linkify-string', `gp--linkify')."
+  :type 'regexp :group 'bitbucket)
+
+(defcustom gp-ticket-url-format nil
+  "URL template for turning a ticket key into a link, or nil.
+A format string with one `%s' for the ticket key, e.g.
+\"https://mycompany.atlassian.net/browse/%s\".  When nil, a detected
+ticket key is still highlighted (so it reads as recognized) but
+clicking it reports that this needs to be set rather than guessing
+a URL or opening nothing silently -- see `gp-ticket-url-for'."
+  :type '(choice (const :tag "Not configured" nil) string)
+  :group 'bitbucket)
+
+(defun gp-ticket-url-for (key)
+  "Return the configured ticket URL for KEY, or nil if unconfigured."
+  (and gp-ticket-url-format (format gp-ticket-url-format key)))
+
+(defun gp-ticket--open (key)
+  "Open KEY's ticket URL, or report that `gp-ticket-url-format' needs setting."
+  (let ((url (gp-ticket-url-for key)))
+    (if url
+        (browse-url url)
+      (message "Set `gp-ticket-url-format' to link ticket keys like %S" key))))
+
+(defun gp-ticket--keymap (key)
+  "Return a keymap opening KEY's ticket link on RET/mouse-1."
+  (let ((m (make-sparse-keymap)))
+    (define-key m [mouse-1] (lambda () (interactive) (gp-ticket--open key)))
+    (define-key m (kbd "RET") (lambda () (interactive) (gp-ticket--open key)))
+    m))
+
+(defun gp-ticket--props (key)
+  "Return the text properties for a ticket-key match on KEY."
+  (list 'face 'link 'mouse-face 'highlight
+        'help-echo (or (gp-ticket-url-for key)
+                       (format "Set `gp-ticket-url-format' to link %s" key))
+        'follow-link t 'keymap (gp-ticket--keymap key)))
+
+(defun gp-ticket--padded-bounds (b e get-char-before get-char-after)
+  "Return (B* . E*), B/E widened by one whitespace char on each side.
+A ticket key like \"WP-1231\" is a short mouse target compared to a
+long URL, and a mis-click one pixel/column short or past the exact
+text was a common miss -- easy for RET (point already has to be
+exactly on it either way) but not for a mouse.  One column of
+padding on each side (never eating into non-whitespace, so it can
+never swallow a neighbouring word or another ticket key) closes that
+gap without visually changing anything, since the padding is
+whitespace anyway.  GET-CHAR-BEFORE/-AFTER take B/E and return the
+character just outside the range, or nil at a buffer/string edge."
+  (cons (if (equal (funcall get-char-before b) " ") (1- b) b)
+        (if (equal (funcall get-char-after e) " ") (1+ e) e)))
+
+(defun gp-ticket-linkify-string (text)
+  "Return TEXT with ticket keys (`gp-ticket-key-pattern') turned into links.
+Pure -- returns a fresh string.  Skips a match already faced `link'
+\(from `gp-linkify-string' running first, say), so a key that happens
+to sit inside an already-linkified URL is not re-propertized."
+  (if (not text)
+      text
+    (let ((s (copy-sequence text)) (i 0))
+      (while (string-match gp-ticket-key-pattern s i)
+        (let ((b (match-beginning 0)) (e (match-end 0)))
+          (unless (eq (get-text-property b 'face s) 'link)
+            (let ((bounds (gp-ticket--padded-bounds
+                           b e
+                           (lambda (p) (and (> p 0) (substring s (1- p) p)))
+                           (lambda (p) (and (< p (length s)) (substring s p (1+ p)))))))
+              (add-text-properties (car bounds) (cdr bounds)
+                                    (gp-ticket--props (match-string 0 s)) s)))
+          (setq i e)))
+      s)))
+
 (defun gp-linkify-string (text)
   "Return TEXT with markdown [label](url) and bare URLs turned into links.
 \[label](url) is shown as LABEL; both forms get the `link' face and
