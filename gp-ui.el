@@ -2172,6 +2172,8 @@ which optional layers (gp-watch, gp-helm) are in use."
     (clrhash gp-helm--pipeline-cache))
   (when (boundp 'gp-helm--deploy-cache)
     (clrhash gp-helm--deploy-cache))
+  (when (boundp 'gp-helm--live-deploy-cache)
+    (clrhash gp-helm--live-deploy-cache))
   (when (boundp 'gp-helm--reviewing-cache)
     (setq gp-helm--reviewing-cache nil))
   (when (boundp 'gp-helm--others-cache)
@@ -2766,7 +2768,7 @@ exactly when a deploy step could have newly succeeded or a previously
 successful run could have been superseded by a new one."
   (interactive)
   (when (and gp--pr (fboundp 'gp-helm--deploy-cache-bust))
-    (gp-helm--deploy-cache-bust (gp-pr-source-commit gp--pr)))
+    (gp-helm--deploy-cache-bust gp--pr))
   (if gp--pr
       (progn
         (gp--detail-show-loading)

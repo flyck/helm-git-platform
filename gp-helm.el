@@ -211,28 +211,105 @@ shows until the status arrives."
       (_           (propertize "⚫" 'help-echo "Pipeline status loading…")))))
 
 (defvar gp-helm--deploy-cache (make-hash-table :test 'equal)
-  "commit-hash -> t/nil: whether any step named \"deploy\" succeeded
-on that commit's current pipeline(s).  Absent means not yet scanned.
+  "(FULL-NAME . commit-hash) -> t/nil: whether any step named \"deploy\"
+succeeded on that commit's current pipeline(s).  Absent means not yet
+scanned.  Keyed by repo as well as hash (rather than bare hash) so a
+deploy can be busted per-repo -- see `gp-helm--deploy-cache-bust-repo'.
 
 Unlike `gp-helm--pipeline-cache', a resolved entry here is kept
 forever rather than expiring a non-terminal answer: walking every
 current pipeline's steps (one fetch per pipeline, not the single
 lightweight commit-statuses call the bubble uses) is too expensive to
 repeat on each list refresh.  A PR whose pipeline is still running
-when scanned stays cached nil until something explicitly busts it --
-`gp-helm--deploy-cache-bust' -- which `gp-detail-refresh' and running
-a manual step both call, since those are the moments a deploy step
-already known about this commit could newly have succeeded.")
+when scanned stays cached nil until something explicitly busts it.
+Two things bust entries:
+ - `gp-helm--deploy-cache-bust' on this PR's own commit, called by
+   `gp-detail-refresh' -- the moment a deploy step already known about
+   this commit could newly have succeeded;
+ - `gp-helm--deploy-cache-bust-repo' on the whole repo, called when
+   `gp-pipeline-deploy-script' actually finishes a deploy -- a deploy
+   to a shared environment can supersede what an EARLIER pr's deploy
+   left behind, and that earlier pr's own commit never changes, so
+   only a repo-wide bust (not a re-scan of its own commit) can catch it.")
 
-(defun gp-helm--deploy-cache-bust (hash)
-  "Forget any cached deploy verdict for commit HASH, if any."
-  (when hash (remhash hash gp-helm--deploy-cache)))
+(defvar gp-helm--live-deploy-cache (make-hash-table :test 'equal)
+  "(FULL-NAME . merge-commit-hash) -> t/nil: whether the DESTINATION
+branch's pipeline for a merged PR's merge commit has a successful step
+matching both `gp-helm-deploy-keywords' and `gp-helm-live-keywords'.
+Absent means not yet scanned.
+
+Unlike `gp-helm--deploy-cache', this is keyed on the MERGE commit on
+the destination branch, not the PR's own (by-then-stale) source
+commit -- that merge commit is what an actual production pipeline
+runs against.  Same cache-forever-once-resolved reasoning as
+`gp-helm--deploy-cache' applies (and the same repo-wide bust via
+`gp-helm--deploy-cache-bust-repo' also clears this table).")
+
+(defun gp-helm--deploy-cache-key (pr)
+  "Return PR's `gp-helm--deploy-cache' key, or nil if its commit is unknown."
+  (let ((hash (gp-pr-source-commit pr)))
+    (and hash (cons (gp-pr-full-name pr) hash))))
+
+(defun gp-helm--deploy-cache-bust (pr)
+  "Forget any cached deploy verdict for PR's current commit, if any."
+  (let ((key (gp-helm--deploy-cache-key pr)))
+    (when key (remhash key gp-helm--deploy-cache))))
+
+(defun gp-helm--cache-bust-repo-in (table full-name)
+  "Remove every entry in TABLE (a `gp-helm--deploy-cache'-shaped hash
+table, keyed by (FULL-NAME . commit)) whose key belongs to FULL-NAME."
+  (let (stale)
+    (maphash (lambda (k _v) (when (equal (car k) full-name) (push k stale))) table)
+    (dolist (k stale) (remhash k table))))
+
+(defun gp-helm--deploy-cache-bust-repo (full-name)
+  "Forget every cached deploy verdict for FULL-NAME's repo, in both
+`gp-helm--deploy-cache' and `gp-helm--live-deploy-cache'.
+A deploy to a shared environment can silently supersede what an
+earlier PR's own successful deploy step (or a merged PR's live
+deploy) left behind; that earlier commit never changes, so nothing
+would otherwise re-check it."
+  (when full-name
+    (gp-helm--cache-bust-repo-in gp-helm--deploy-cache full-name)
+    (gp-helm--cache-bust-repo-in gp-helm--live-deploy-cache full-name)))
+
+(defcustom gp-helm-deploy-keywords '("deploy")
+  "Words that mark a pipeline step as a deploy, for the 🚀/🚢 badges.
+Matched case-insensitively as a substring of the step name; a step
+matches if ANY word in the list is found (see
+`gp-helm--step-name-matches-p').  `gp-helm-live-keywords' narrows this
+further, for the merged-PR \"deployed live\" badge specifically."
+  :type '(repeat string) :group 'bitbucket)
+
+(defcustom gp-helm-live-keywords '("live" "prod")
+  "Words that mark a deploy step as targeting production, for the 🚢 badge.
+Matched case-insensitively as a substring of the step name, same as
+`gp-helm-deploy-keywords'; a merged PR's step must match a word from
+BOTH lists to count as \"deployed live\" -- e.g. \"Deploy to LIVE\"
+matches, \"Deploy to STAGING\" does not."
+  :type '(repeat string) :group 'bitbucket)
+
+(defun gp-helm--step-name-matches-p (name words)
+  "Return non-nil if NAME contains any of WORDS, case-insensitively."
+  (let ((name (downcase (or name ""))))
+    (cl-some (lambda (w) (string-match-p (regexp-quote (downcase w)) name)) words)))
 
 (defun gp-helm--pipeline-has-successful-deploy-p (steps)
-  "Return non-nil if STEPS contains a successful step named \"deploy\"."
+  "Return non-nil if STEPS has a successful step matching
+`gp-helm-deploy-keywords'."
   (cl-some (lambda (step)
-             (and (string-match-p "deploy" (downcase (or (alist-get 'name step) "")))
+             (and (gp-helm--step-name-matches-p (alist-get 'name step) gp-helm-deploy-keywords)
                   (equal (gp-pipeline-step-result step) "SUCCESSFUL")))
+           steps))
+
+(defun gp-helm--pipeline-has-successful-live-deploy-p (steps)
+  "Return non-nil if STEPS contains a successful step matching BOTH
+`gp-helm-deploy-keywords' and `gp-helm-live-keywords'."
+  (cl-some (lambda (step)
+             (let ((name (alist-get 'name step)))
+               (and (gp-helm--step-name-matches-p name gp-helm-deploy-keywords)
+                    (gp-helm--step-name-matches-p name gp-helm-live-keywords)
+                    (equal (gp-pipeline-step-result step) "SUCCESSFUL"))))
            steps))
 
 (defun gp-helm--scan-deploys-async (prs)
@@ -244,23 +321,54 @@ commit-statuses call the bubble uses.  Only ever called on a cache
 miss (see `gp-helm--deploy-cache'), so a settled answer is never
 re-fetched just by reopening the list."
   (dolist (pr prs)
-    (let ((hash (gp-pr-source-commit pr)))
-      (when (and hash (eq (gethash hash gp-helm--deploy-cache 'miss) 'miss))
+    (let ((key (gp-helm--deploy-cache-key pr)))
+      (when (and key (eq (gethash key gp-helm--deploy-cache 'miss) 'miss))
         (gp-pipeline-fetch-for-pr-async
          pr
          (lambda (data)
            (let ((deployed (cl-some (lambda (pp) (gp-helm--pipeline-has-successful-deploy-p (cdr pp)))
                                      (plist-get data :current))))
-             (puthash hash (and deployed t) gp-helm--deploy-cache)
+             (puthash key (and deployed t) gp-helm--deploy-cache)
              (gp-helm--refresh-if-alive))))))))
 
 (defun gp-helm--deploy-badge (pr)
   "Return a 🚀 badge for PR if its current pipeline ran a deploy step
 successfully, else \"\".  Reads the async `gp-helm--deploy-cache';
 blank until the scan resolves (see `gp-helm--scan-deploys-async')."
-  (let* ((hash (gp-pr-source-commit pr))
-         (deployed (and hash (gethash hash gp-helm--deploy-cache))))
+  (let* ((key (gp-helm--deploy-cache-key pr))
+         (deployed (and key (gethash key gp-helm--deploy-cache))))
     (if deployed (propertize " 🚀" 'help-echo "A deploy step succeeded") "")))
+
+(defun gp-helm--live-deploy-cache-key (pr)
+  "Return PR's `gp-helm--live-deploy-cache' key, or nil if unresolvable.
+Only merged PRs have a merge commit to key on."
+  (let ((hash (and (gp-pr-merged-p pr) (gp-pr-merge-commit pr))))
+    (and hash (cons (gp-pr-full-name pr) hash))))
+
+(defun gp-helm--scan-live-deploys-async (prs)
+  "Fetch each merged PR's destination-branch pipeline steps at its merge
+commit, caching whether a live/prod deploy step succeeded there.
+Non-merged PRs (no cache key, see `gp-helm--live-deploy-cache-key')
+are skipped outright -- this badge only makes sense post-merge."
+  (dolist (pr prs)
+    (let ((key (gp-helm--live-deploy-cache-key pr)))
+      (when (and key (eq (gethash key gp-helm--live-deploy-cache 'miss) 'miss))
+        (gp-pipeline-fetch-for-branch-async
+         (gp-pr-full-name pr) (gp-pr-destination-branch pr) (gp-pr-merge-commit pr)
+         (lambda (data)
+           (let ((deployed (cl-some (lambda (pp) (gp-helm--pipeline-has-successful-live-deploy-p (cdr pp)))
+                                     (plist-get data :current))))
+             (puthash key (and deployed t) gp-helm--live-deploy-cache)
+             (gp-helm--refresh-if-alive))))))))
+
+(defun gp-helm--live-deploy-badge (pr)
+  "Return a 🚢 badge for a merged PR whose destination-branch pipeline
+ran a live/prod deploy step successfully at the merge commit, else
+\"\".  Reads the async `gp-helm--live-deploy-cache'; blank until the
+scan resolves (see `gp-helm--scan-live-deploys-async')."
+  (let* ((key (gp-helm--live-deploy-cache-key pr))
+         (deployed (and key (gethash key gp-helm--live-deploy-cache))))
+    (if deployed (propertize " 🚢" 'help-echo "Deployed live") "")))
 
 (defun gp-helm--pr-display (pr &optional draft)
   "Return an aligned, multi-column, propertized Helm line for PR.
@@ -279,7 +387,7 @@ shown on graphical displays."
                                         'gp-helm-author-face))
            (badge (gp-helm--comment-badge pr))
            (reviews (gp-helm--review-badge pr))
-           (deploy (gp-helm--deploy-badge pr))
+           (deploy (concat (gp-helm--deploy-badge pr) (gp-helm--live-deploy-badge pr)))
            ;; already padded to its column width, and "" when unsupported --
            ;; so it carries its own trailing separator and the row collapses
            ;; back to the original layout on a platform without labels
@@ -786,7 +894,9 @@ of the list is open-only."
    (lambda (ok prs)
      (setq gp-helm--merged-recent-cache
            (if ok (gp-helm--merged-recently prs) nil))
-     (when ok (gp-cache-put (list 'merged-recent uuid) prs))
+     (when ok
+       (gp-cache-put (list 'merged-recent uuid) prs)
+       (gp-helm--scan-live-deploys-async gp-helm--merged-recent-cache))
      (gp-helm--refresh-if-alive))
    uuid "MERGED" 20))
 
@@ -848,10 +958,16 @@ same key the synchronous path used, so a reopen is instant."
 
 (defun gp-helm--list-keymap (include-merged)
   "Keymap for the main PR list.
-C-c g reloads (clearing the PR-list cache only); C-c G does a full
-refresh (clearing every cache across all layers, see
-`gp-reset-caches') -- use this when a repo or PR is missing
-because a stale cache (e.g. the 24h repo-list cache) predates it.
+C-c g reloads: clears the PR-list cache AND the deploy-status caches
+\(`gp-helm--deploy-cache' and `gp-helm--live-deploy-cache' -- a
+settled verdict there is otherwise kept forever, since another PR's
+deploy to a shared environment can supersede it without this commit
+itself ever changing, see `gp-helm--deploy-cache-bust-repo'), so a
+manual reload always re-checks deploy status rather than trusting a
+stale 🚀/🚢.  C-c G does a full refresh (clearing every cache across
+all layers, see `gp-reset-caches') -- use this when a repo or PR is
+missing because a stale cache (e.g. the 24h repo-list cache) predates
+it.
 C-c m toggles whether MERGED/DECLINED PRs are shown \(currently
 INCLUDE-MERGED)."
   (let ((map (make-sparse-keymap)))
@@ -859,7 +975,11 @@ INCLUDE-MERGED)."
     (define-key map (kbd "C-c g")
                 (lambda () (interactive)
                   (helm-run-after-exit
-                   (lambda () (gp-cache-clear) (gp-helm--list include-merged)))))
+                   (lambda ()
+                     (gp-cache-clear)
+                     (clrhash gp-helm--deploy-cache)
+                     (clrhash gp-helm--live-deploy-cache)
+                     (gp-helm--list include-merged)))))
     (define-key map (kbd "C-c G")
                 (lambda () (interactive)
                   (helm-run-after-exit
@@ -1088,8 +1208,17 @@ resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
            ((or (not gp-helm-show-merged-recent) include-merged) nil)
            ((car merged-hit) (gp-helm--merged-recently (cdr merged-hit)))
            (t 'loading)))
-    (when (and gp-helm-show-merged-recent (not include-merged) (not (car merged-hit)))
-      (gp-helm--fetch-merged-recent-async uuid))
+    (if (and gp-helm-show-merged-recent (not include-merged) (not (car merged-hit)))
+        (gp-helm--fetch-merged-recent-async uuid)
+      ;; Served from cache, so `gp-helm--fetch-merged-recent-async' (and
+      ;; the live-deploy scan hanging off its on-done) never runs --
+      ;; without this the 🚢 badge on every cached merged row stays
+      ;; blank until the cache expires.  Mirrors the same fix for the
+      ;; reviewing section just below.
+      (when (listp gp-helm--merged-recent-cache)
+        (run-with-idle-timer
+         0.1 nil
+         (lambda () (gp-helm--scan-live-deploys-async gp-helm--merged-recent-cache)))))
     (let ((reviewing-source
            (helm-build-sync-source "Needs my review"
              :candidates #'gp-helm--reviewing-candidates

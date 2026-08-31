@@ -830,8 +830,8 @@ a visible stall once per interval in any open detail buffer."
 
 (ert-deftest gp-test-detail-refresh-busts-deploy-cache-when-helm-loaded ()
   "`gp-detail-refresh' forgets the overview's cached deploy verdict for
-this PR's commit -- but only when `gp-helm' is actually loaded
-(the fboundp guard), since this file does not require it."
+this PR -- but only when `gp-helm' is actually loaded (the fboundp
+guard), since this file does not require it."
   (let* ((pr '((id . 7)
                (source (commit (hash . "abc")))
                (destination (repository (full_name . "acme/x")))))
@@ -844,7 +844,7 @@ this PR's commit -- but only when `gp-helm' is actually loaded
             gp--detail-diff nil
             gp--detail-pipelines '(:recent nil))
       (cl-letf (((symbol-function 'gp-helm--deploy-cache-bust)
-                 (lambda (hash) (setq busted hash)))
+                 (lambda (pr) (setq busted pr)))
                 ((symbol-function 'bitbucket-pull-request-async)
                  (lambda (_full-name _id callback) (funcall callback t pr)))
                 ((symbol-function 'bitbucket-pull-request-comments-async)
@@ -854,7 +854,7 @@ this PR's commit -- but only when `gp-helm' is actually loaded
                 ((symbol-function 'gp-pull-request-diff-async)
                  (lambda (_fn _id _c _pr cb) (funcall cb nil))))
         (gp-detail-refresh)
-        (should (equal busted "abc"))))))
+        (should (equal busted pr))))))
 
 (ert-deftest gp-test-every-buffer-name-is-tagged ()
   "No buffer this package opens may escape the shared prefix.

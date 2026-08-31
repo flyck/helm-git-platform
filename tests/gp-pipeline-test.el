@@ -544,5 +544,66 @@ refreshed and the finished deploy sat stale until a manual `g'."
       (kill-buffer detail)
       (delete-file script))))
 
+(ert-deftest gp-test-deploy-run-busts-repo-deploy-cache-on-success ()
+  "A finished deploy busts the WHOLE repo's cached deploy verdicts, not
+just this commit's -- a deploy to a shared environment can supersede
+what an EARLIER pr's own successful deploy left behind, and that
+earlier pr's commit never changes, so nothing else would ever
+re-check it (see `gp-helm--deploy-cache-bust-repo')."
+  (let* ((busted 'unset)
+         (detail (generate-new-buffer " *gp-detail-fake*"))
+         (script (make-temp-file "gp-deploy-test" nil ".sh")))
+    (unwind-protect
+        (progn
+          (with-temp-file script (insert "#!/bin/sh\nexit 0\n"))
+          (set-file-modes script #o755)
+          (with-current-buffer detail
+            (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
+          (cl-letf (((symbol-function 'gp-detail-refresh) #'ignore)
+                    ((symbol-function 'gp-helm--deploy-cache-bust-repo)
+                     (lambda (full-name) (setq busted full-name))))
+            (let ((gp-pipeline-deploy-script (list script))
+                  (gp-pipeline-deploy-notify nil))
+              (with-current-buffer detail
+                (gp-pipeline--deploy-run
+                 "acme/web" "b" gp-test--deploy-pipeline
+                 gp-test--deploy-step '((id . 1))))
+              (let ((deadline (+ (float-time) 5)))
+                (while (and (eq busted 'unset) (< (float-time) deadline))
+                  (accept-process-output nil 0.05)))))
+          (should (equal busted "acme/web")))
+      (kill-buffer detail)
+      (delete-file script))))
+
+(ert-deftest gp-test-deploy-run-does-not-bust-cache-on-failure ()
+  "A failed deploy leaves other PRs' cached verdicts alone -- nothing
+about them changed."
+  (let* ((busted 'unset)
+         (detail (generate-new-buffer " *gp-detail-fake*"))
+         (script (make-temp-file "gp-deploy-test" nil ".sh")))
+    (unwind-protect
+        (progn
+          (with-temp-file script (insert "#!/bin/sh\nexit 1\n"))
+          (set-file-modes script #o755)
+          (with-current-buffer detail
+            (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
+          (cl-letf (((symbol-function 'gp-detail-refresh) #'ignore)
+                    ((symbol-function 'gp-helm--deploy-cache-bust-repo)
+                     (lambda (full-name) (setq busted full-name))))
+            (let ((gp-pipeline-deploy-script (list script))
+                  (gp-pipeline-deploy-notify nil))
+              (with-current-buffer detail
+                (gp-pipeline--deploy-run
+                 "acme/web" "b" gp-test--deploy-pipeline
+                 gp-test--deploy-step '((id . 1))))
+              ;; give the (short-lived, failing) process time to exit
+              (let ((deadline (+ (float-time) 5)))
+                (while (and (process-live-p (get-buffer-process gp-pipeline-deploy-buffer))
+                            (< (float-time) deadline))
+                  (accept-process-output nil 0.05)))))
+          (should (eq busted 'unset)))
+      (kill-buffer detail)
+      (delete-file script))))
+
 (provide 'gp-pipeline-test)
 ;;; gp-pipeline-test.el ends here

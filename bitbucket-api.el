@@ -468,7 +468,15 @@ UUID they already hold."
   "Return the query alist for a workspace pull-request listing in STATE.
 Shared by the sync and async variants so the two never drift on the
 `fields' projection -- a field missing from one but not the other
-shows up as a silently blank column in the overview."
+shows up as a silently blank column in the overview.
+
+`values.merge_commit.hash' is included even though it is only ever
+populated on a MERGED PR: without it in this projection, Bitbucket's
+list endpoint omits the field entirely (it is not returned unless
+explicitly requested, unlike a single-PR fetch), and
+`gp-pr-merge-commit' silently resolves to nil for every merged PR --
+which is exactly the commit the \"deployed live\" 🚢 badge needs to
+find the pipeline that actually ran post-merge."
   `(("state" . ,(or state "OPEN"))
     ("fields" . ,(concat
                   "values.id,values.title,values.state,values.draft,"
@@ -478,6 +486,7 @@ shows up as a silently blank column in the overview."
                   "values.destination.branch.name,"
                   "values.destination.repository.full_name,"
                   "values.destination.repository.slug,"
+                  "values.merge_commit.hash,"
                   "values.comment_count,values.created_on,values.updated_on,"
                   "values.participants.role,values.participants.approved,"
                   "values.participants.state,values.participants.user.uuid,"

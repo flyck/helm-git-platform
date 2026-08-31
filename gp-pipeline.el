@@ -43,6 +43,7 @@
 (declare-function gp-detail-refresh "gp-ui")
 (declare-function gp-deploy-watch-step-marker "gp-deploy-watch")
 (declare-function gp-deploy-watch-toggle-at-point "gp-deploy-watch")
+(declare-function gp-helm--deploy-cache-bust-repo "gp-helm")
 
 ;;;; Faces ---------------------------------------------------------------------
 
@@ -735,6 +736,13 @@ Refreshes the detail view when the script exits successfully."
          (if ok
              (progn
                (message "Deploy script finished for %S" name)
+               ;; A deploy to a shared environment can supersede what an
+               ;; EARLIER pr's successful deploy step left behind; that pr's
+               ;; own commit never changes, so only a repo-wide bust (not
+               ;; a re-scan of this one commit) can catch it -- see
+               ;; `gp-helm--deploy-cache-bust-repo'.
+               (when (fboundp 'gp-helm--deploy-cache-bust-repo)
+                 (gp-helm--deploy-cache-bust-repo full-name))
                ;; Refresh the detail buffer the run was started from, so the
                ;; step's new state shows up without a manual `g'.  Guarded on
                ;; it still being a live detail buffer: the user may have

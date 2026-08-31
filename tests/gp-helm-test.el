@@ -241,22 +241,137 @@ that is still running or failed must not light the badge."
 
 (ert-deftest gp-test-helm-deploy-badge ()
   (let ((gp-helm--deploy-cache (make-hash-table :test 'equal))
-        (pr '((source (commit (hash . "abc"))))))
+        (pr '((source (commit (hash . "abc")))
+              (destination (repository (full_name . "acme/x"))))))
     ;; not yet scanned -> blank, same as the other async badges
     (should (equal (gp-helm--deploy-badge pr) ""))
-    (puthash "abc" nil gp-helm--deploy-cache)
+    (puthash (cons "acme/x" "abc") nil gp-helm--deploy-cache)
     (should (equal (gp-helm--deploy-badge pr) ""))
-    (puthash "abc" t gp-helm--deploy-cache)
+    (puthash (cons "acme/x" "abc") t gp-helm--deploy-cache)
     (should (string-match-p "🚀" (gp-helm--deploy-badge pr)))))
 
 (ert-deftest gp-test-helm-deploy-cache-bust ()
   "Busting forgets a resolved verdict so the next scan re-fetches it."
-  (let ((gp-helm--deploy-cache (make-hash-table :test 'equal)))
-    (puthash "abc" t gp-helm--deploy-cache)
-    (gp-helm--deploy-cache-bust "abc")
-    (should (eq (gethash "abc" gp-helm--deploy-cache 'miss) 'miss))
-    ;; nil hash is a no-op, not an error
-    (gp-helm--deploy-cache-bust nil)))
+  (let ((gp-helm--deploy-cache (make-hash-table :test 'equal))
+        (pr '((source (commit (hash . "abc")))
+              (destination (repository (full_name . "acme/x"))))))
+    (puthash (cons "acme/x" "abc") t gp-helm--deploy-cache)
+    (gp-helm--deploy-cache-bust pr)
+    (should (eq (gethash (cons "acme/x" "abc") gp-helm--deploy-cache 'miss) 'miss))
+    ;; a pr with no resolvable commit is a no-op, not an error
+    (gp-helm--deploy-cache-bust '((source (commit)) (destination (repository (full_name . "acme/x")))))))
+
+(ert-deftest gp-test-helm-deploy-cache-bust-repo ()
+  "Busting a repo forgets every commit's verdict there, but leaves
+other repos' verdicts alone -- this is what a deploy actually running
+must do: an earlier PR's own commit never changes, so nothing else
+would ever re-check whether ITS deploy got superseded by this one.
+Covers BOTH the open-PR deploy cache and the merged-PR live-deploy
+cache -- a live deploy can supersede either kind of earlier verdict."
+  (let ((gp-helm--deploy-cache (make-hash-table :test 'equal))
+        (gp-helm--live-deploy-cache (make-hash-table :test 'equal)))
+    (puthash (cons "acme/x" "abc") t gp-helm--deploy-cache)
+    (puthash (cons "acme/x" "def") nil gp-helm--deploy-cache)
+    (puthash (cons "acme/y" "ghi") t gp-helm--deploy-cache)
+    (puthash (cons "acme/x" "merge1") t gp-helm--live-deploy-cache)
+    (puthash (cons "acme/y" "merge2") t gp-helm--live-deploy-cache)
+    (gp-helm--deploy-cache-bust-repo "acme/x")
+    (should (eq (gethash (cons "acme/x" "abc") gp-helm--deploy-cache 'miss) 'miss))
+    (should (eq (gethash (cons "acme/x" "def") gp-helm--deploy-cache 'miss) 'miss))
+    (should (eq (gethash (cons "acme/y" "ghi") gp-helm--deploy-cache 'miss) t))
+    (should (eq (gethash (cons "acme/x" "merge1") gp-helm--live-deploy-cache 'miss) 'miss))
+    (should (eq (gethash (cons "acme/y" "merge2") gp-helm--live-deploy-cache 'miss) t))
+    ;; nil full-name is a no-op, not an error
+    (gp-helm--deploy-cache-bust-repo nil)))
+
+(ert-deftest gp-test-helm-step-name-matches-p ()
+  (should (gp-helm--step-name-matches-p "Deploy to LIVE" '("deploy")))
+  (should (gp-helm--step-name-matches-p "DEPLOY" '("deploy")))
+  (should-not (gp-helm--step-name-matches-p "Build and test" '("deploy")))
+  (should-not (gp-helm--step-name-matches-p nil '("deploy")))
+  ;; any word in the list matching is enough
+  (should (gp-helm--step-name-matches-p "Deploy to STAGING" '("live" "staging"))))
+
+(ert-deftest gp-test-helm-pipeline-has-successful-live-deploy-p ()
+  "A step must match BOTH `gp-helm-deploy-keywords' and
+`gp-helm-live-keywords' (default (\"deploy\") and (\"live\" \"prod\")),
+and be SUCCESSFUL, to count as a live deploy."
+  (let ((gp-helm-deploy-keywords '("deploy"))
+        (gp-helm-live-keywords '("live" "prod")))
+    (should (gp-helm--pipeline-has-successful-live-deploy-p
+             '(((name . "Deploy to LIVE") (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))))))
+    (should (gp-helm--pipeline-has-successful-live-deploy-p
+             '(((name . "deploy-prod") (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))))))
+    ;; a deploy step to a non-live/prod environment doesn't count
+    (should-not (gp-helm--pipeline-has-successful-live-deploy-p
+                 '(((name . "Deploy to STAGING") (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))))))
+    (should-not (gp-helm--pipeline-has-successful-live-deploy-p
+                 '(((name . "Deploy to DEV") (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))))))
+    ;; a live/prod step that isn't a deploy step doesn't count
+    (should-not (gp-helm--pipeline-has-successful-live-deploy-p
+                 '(((name . "Smoke test on LIVE") (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))))))
+    ;; matches, but hasn't succeeded yet
+    (should-not (gp-helm--pipeline-has-successful-live-deploy-p
+                 '(((name . "Deploy to LIVE") (state (name . "IN_PROGRESS"))))))
+    (should-not (gp-helm--pipeline-has-successful-live-deploy-p nil))))
+
+(ert-deftest gp-test-helm-live-deploy-cache-key-requires-merged ()
+  "Only a merged PR has a merge commit to key on -- an open PR
+resolves to nil, so `gp-helm--scan-live-deploys-async' skips it."
+  (let ((merged '((state . "MERGED") (merge_commit (hash . "m1"))
+                   (destination (branch (name . "main")) (repository (full_name . "acme/x")))))
+        (open '((state . "OPEN")
+                (destination (branch (name . "main")) (repository (full_name . "acme/x"))))))
+    (should (equal (gp-helm--live-deploy-cache-key merged) (cons "acme/x" "m1")))
+    (should-not (gp-helm--live-deploy-cache-key open))))
+
+(ert-deftest gp-test-helm-live-deploy-badge ()
+  (let ((gp-helm--live-deploy-cache (make-hash-table :test 'equal))
+        (pr '((state . "MERGED") (merge_commit (hash . "m1"))
+              (destination (branch (name . "main")) (repository (full_name . "acme/x"))))))
+    ;; not yet scanned -> blank
+    (should (equal (gp-helm--live-deploy-badge pr) ""))
+    (puthash (cons "acme/x" "m1") nil gp-helm--live-deploy-cache)
+    (should (equal (gp-helm--live-deploy-badge pr) ""))
+    (puthash (cons "acme/x" "m1") t gp-helm--live-deploy-cache)
+    (should (string-match-p "🚢" (gp-helm--live-deploy-badge pr)))
+    ;; an open pr never gets the badge, cache aside
+    (should (equal (gp-helm--live-deploy-badge
+                    '((state . "OPEN")
+                      (destination (branch (name . "main")) (repository (full_name . "acme/x")))))
+                   ""))))
+
+(ert-deftest gp-test-helm-scan-live-deploys-async-skips-open-prs ()
+  "Only merged PRs are ever fetched -- an open PR has no merge commit,
+so fetching its \"destination pipeline\" would be meaningless."
+  (let ((gp-helm--live-deploy-cache (make-hash-table :test 'equal))
+        (calls 0)
+        (open '((state . "OPEN")
+                (destination (branch (name . "main")) (repository (full_name . "acme/x"))))))
+    (cl-letf (((symbol-function 'gp-pipeline-fetch-for-branch-async)
+               (lambda (&rest _) (setq calls (1+ calls)))))
+      (gp-helm--scan-live-deploys-async (list open))
+      (should (= calls 0)))))
+
+(ert-deftest gp-test-helm-scan-live-deploys-async-populates-cache ()
+  "End to end against the mock: a merged PR's DESTINATION branch and
+MERGE commit (not its own, by-then-stale source branch/commit) drive
+the fetch.  The fixture's deploy steps aren't live/prod-SUCCESSFUL, so
+this resolves to nil -- and a cached commit is never re-fetched."
+  (bitbucket-mock-with-service
+    (let* ((gp-helm--live-deploy-cache (make-hash-table :test 'equal))
+           (pr '((state . "MERGED")
+                 (merge_commit (hash . "deadbeefcafe0001"))
+                 (destination (branch (name . "main"))
+                              (repository (full_name . "acme/web-frontend")))))
+           (key (gp-helm--live-deploy-cache-key pr)))
+      (gp-helm--scan-live-deploys-async (list pr))
+      (should (eq (gethash key gp-helm--live-deploy-cache 'miss) nil))
+      (let ((calls 0))
+        (cl-letf (((symbol-function 'gp-pipeline-fetch-for-branch-async)
+                   (lambda (&rest _) (setq calls (1+ calls)))))
+          (gp-helm--scan-live-deploys-async (list pr))
+          (should (= calls 0)))))))
 
 (ert-deftest gp-test-helm-scan-deploys-async-populates-cache ()
   "End to end against the mock: a fixture with no successful deploy
@@ -264,11 +379,11 @@ step yet caches nil, and a cached commit is never re-fetched."
   (bitbucket-mock-with-service
     (let* ((gp-helm--deploy-cache (make-hash-table :test 'equal))
            (pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
-           (hash (gp-pr-source-commit pr)))
+           (key (gp-helm--deploy-cache-key pr)))
       (gp-helm--scan-deploys-async (list pr))
       ;; resolved (to nil: the fixture's deploy steps aren't SUCCESSFUL yet),
       ;; not left as a miss
-      (should (eq (gethash hash gp-helm--deploy-cache 'miss) nil))
+      (should (eq (gethash key gp-helm--deploy-cache 'miss) nil))
       (let ((calls 0))
         (cl-letf (((symbol-function 'gp-pipeline-fetch-for-pr-async)
                    (lambda (_pr _cb) (setq calls (1+ calls)))))
@@ -691,6 +806,25 @@ own -- which must not happen when the section is off."
     (should (equal (gp-helm--merged-section-label) "Merged in the last 6 hours")))
   (let ((gp-helm-merged-recent-hours 1))
     (should (equal (gp-helm--merged-section-label) "Merged in the last hour"))))
+
+(ert-deftest gp-test-helm-fetch-merged-recent-async-scans-live-deploys ()
+  "A successful merged-recent fetch also kicks off the live-deploy scan
+over the resulting list -- otherwise every 🚢 badge in that section
+would stay blank forever."
+  (let ((scanned 'unset)
+        (merged-pr '((state . "MERGED") (merged_on . "2026-08-22T10:00:00Z")
+                     (destination (branch (name . "main")) (repository (full_name . "acme/x")))))
+        (gp-cache-ttl 0))
+    (cl-letf (((symbol-function 'gp-workspace-pull-requests-async)
+               (lambda (callback _uuid _state _max) (funcall callback t (list merged-pr))))
+              ((symbol-function 'gp-pr-merged-p) (lambda (_) t))
+              ((symbol-function 'gp-pr-merged-at) (lambda (_) "2026-08-22T10:00:00Z"))
+              ((symbol-function 'date-to-time) (lambda (_) (current-time)))
+              ((symbol-function 'gp-helm--scan-live-deploys-async)
+               (lambda (prs) (setq scanned prs)))
+              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+      (gp-helm--fetch-merged-recent-async "{me}")
+      (should (equal scanned (list merged-pr))))))
 
 (ert-deftest gp-test-helm-merged-recently-skips-the-unmergeable-and-undated ()
   "An open PR, or one whose merge time cannot be read, is left out.

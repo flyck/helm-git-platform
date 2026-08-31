@@ -49,6 +49,17 @@
         (should (alist-get 'id pr))
         (should (let-alist pr .destination.repository.full_name))))))
 
+(ert-deftest bitbucket-test-workspace-prs-fields-include-merge-commit ()
+  "Regression: Bitbucket's list endpoint only returns the fields asked
+for in `fields' -- unlike a single-PR fetch, a field simply absent
+from that projection is silently missing from every PR object, not
+merely nil.  `values.merge_commit.hash' was missing here, which made
+`gp-pr-merge-commit' return nil for every merged PR and silently
+disabled the \"deployed live\" 🚢 badge -- `gp-helm--scan-live-deploys-async'
+saw no cache key to fetch and skipped every merged PR outright."
+  (should (string-match-p "values\\.merge_commit\\.hash"
+                          (cdr (assoc "fields" (bitbucket--workspace-pull-requests-params "MERGED"))))))
+
 (ert-deftest bitbucket-test-partition-mine-vs-reviewing ()
   (bitbucket-mock-with-service
     (let* ((uuid (bitbucket-user-uuid))
