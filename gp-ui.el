@@ -333,6 +333,8 @@ ticket keys like \"WP-1231\" (see `gp-ticket-key-pattern')."
                      'keymap (let ((m (make-sparse-keymap)))
                                (define-key m [mouse-1]
                                            (lambda () (interactive) (browse-url url)))
+                               (define-key m [mouse-2]
+                                           (lambda () (interactive) (browse-url url)))
                                (define-key m (kbd "RET")
                                            (lambda () (interactive) (browse-url url)))
                                m))
@@ -349,6 +351,8 @@ ticket keys like \"WP-1231\" (see `gp-ticket-key-pattern')."
                  'keymap (let ((m (make-sparse-keymap)))
                            (define-key m [mouse-1]
                                        (lambda () (interactive) (browse-url url)))
+                           (define-key m [mouse-2]
+                                       (lambda () (interactive) (browse-url url)))
                            (define-key m (kbd "RET")
                                        (lambda () (interactive) (browse-url url)))
                            m))))))
@@ -356,15 +360,9 @@ ticket keys like \"WP-1231\" (see `gp-ticket-key-pattern')."
     (goto-char start)
     (while (re-search-forward gp-ticket-key-pattern nil t)
       (unless (eq (get-text-property (match-beginning 0) 'face) 'link)
-        (let ((bounds (gp-ticket--padded-bounds
-                       (match-beginning 0) (match-end 0)
-                       (lambda (p) (and (> p (point-min))
-                                         (buffer-substring-no-properties (1- p) p)))
-                       (lambda (p) (and (< p (point-max))
-                                         (buffer-substring-no-properties p (1+ p)))))))
-          (add-text-properties
-           (car bounds) (cdr bounds)
-           (gp-ticket--props (match-string 0))))))))
+        (add-text-properties
+         (match-beginning 0) (match-end 0)
+         (gp-ticket--props (match-string 0)))))))
 
 (defun gp--render-markdown (text)
   "Return TEXT fontified as GitHub-flavoured Markdown, with colored links.

@@ -279,35 +279,17 @@ of a guessed or blank URL."
 (ert-deftest gp-test-ticket-linkify-string-nil-is-nil ()
   (should-not (gp-ticket-linkify-string nil)))
 
-(ert-deftest gp-test-ticket-linkify-string-pads-surrounding-whitespace ()
-  "A short ticket key is an easy mouse target to miss by a column --
-padding the clickable/highlighted region into an adjacent SPACE (but
-never into another word) closes that gap.  A click landing on the
-space right before/after \"WP-1231\" must still be `link'-faced."
-  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
-         (s (gp-ticket-linkify-string "see WP-1231 now")))
-    (let ((key-start (string-match "WP-1231" s)))
-      ;; the space right before the key is now also `link'-faced...
-      (should (eq (get-text-property (1- key-start) 'face s) 'link))
-      ;; ...but the word before THAT space is untouched
-      (should-not (eq (get-text-property (- key-start 2) 'face s) 'link))
-      ;; the space right after the key is also `link'-faced...
-      (should (eq (get-text-property (+ key-start 7) 'face s) 'link))
-      ;; ...but the word after THAT space is untouched
-      (should-not (eq (get-text-property (+ key-start 8) 'face s) 'link)))))
-
-(ert-deftest gp-test-ticket-linkify-string-padding-never-eats-a-neighbour ()
-  "Two ticket keys separated by exactly one space must not both claim
-that same space -- whichever is processed first would otherwise
-overwrite the other's padding claim on it."
-  (let* ((gp-ticket-url-format "https://co.atlassian.net/browse/%s")
-         (s (gp-ticket-linkify-string "WP-1 AB-99")))
-    ;; the single space between them is still faced (claimed by one of
-    ;; the two neighbours, whichever ran second, harmlessly) but the
-    ;; keys themselves are intact and distinctly identifiable
-    (should (eq (get-text-property (string-match "WP-1" s) 'face s) 'link))
-    (should (eq (get-text-property (string-match "AB-99" s) 'face s) 'link))
-    (should (equal (substring-no-properties s) "WP-1 AB-99"))))
+(ert-deftest gp-test-ticket-keymap-binds-mouse-2 ()
+  "`mouse-1-click-follows-link' translates a plain mouse-1 click on a
+`follow-link' region into `mouse-2' BEFORE keymap lookup happens --
+a keymap binding only `mouse-1' silently never gets that translated
+event, and the click falls through to whatever mouse-2 does by
+default instead (e.g. `mouse-yank-primary', or `set-mark-command'
+depending on context) -- see `gp-ticket--keymap'."
+  (let ((m (gp-ticket--keymap "WP-1231")))
+    (should (functionp (lookup-key m [mouse-1])))
+    (should (functionp (lookup-key m [mouse-2])))
+    (should (functionp (lookup-key m (kbd "RET"))))))
 
 (provide 'git-platform-test)
 ;;; git-platform-test.el ends here

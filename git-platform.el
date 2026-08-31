@@ -933,9 +933,16 @@ a URL or opening nothing silently -- see `gp-ticket-url-for'."
       (message "Set `gp-ticket-url-format' to link ticket keys like %S" key))))
 
 (defun gp-ticket--keymap (key)
-  "Return a keymap opening KEY's ticket link on RET/mouse-1."
+  "Return a keymap opening KEY's ticket link on RET/mouse-1/mouse-2.
+`mouse-1-click-follows-link' translates a plain mouse-1 click on a
+`follow-link' region into `mouse-2' before keymap lookup even
+happens, so `mouse-2' has to be bound too -- `mouse-1' alone left a
+single click landing nowhere and falling through to whatever mouse-2
+does by default (region/mark handling), which read as \"nothing
+happened\" or, worse, \"Mark set\"."
   (let ((m (make-sparse-keymap)))
     (define-key m [mouse-1] (lambda () (interactive) (gp-ticket--open key)))
+    (define-key m [mouse-2] (lambda () (interactive) (gp-ticket--open key)))
     (define-key m (kbd "RET") (lambda () (interactive) (gp-ticket--open key)))
     m))
 
@@ -945,20 +952,6 @@ a URL or opening nothing silently -- see `gp-ticket-url-for'."
         'help-echo (or (gp-ticket-url-for key)
                        (format "Set `gp-ticket-url-format' to link %s" key))
         'follow-link t 'keymap (gp-ticket--keymap key)))
-
-(defun gp-ticket--padded-bounds (b e get-char-before get-char-after)
-  "Return (B* . E*), B/E widened by one whitespace char on each side.
-A ticket key like \"WP-1231\" is a short mouse target compared to a
-long URL, and a mis-click one pixel/column short or past the exact
-text was a common miss -- easy for RET (point already has to be
-exactly on it either way) but not for a mouse.  One column of
-padding on each side (never eating into non-whitespace, so it can
-never swallow a neighbouring word or another ticket key) closes that
-gap without visually changing anything, since the padding is
-whitespace anyway.  GET-CHAR-BEFORE/-AFTER take B/E and return the
-character just outside the range, or nil at a buffer/string edge."
-  (cons (if (equal (funcall get-char-before b) " ") (1- b) b)
-        (if (equal (funcall get-char-after e) " ") (1+ e) e)))
 
 (defun gp-ticket-linkify-string (text)
   "Return TEXT with ticket keys (`gp-ticket-key-pattern') turned into links.
@@ -971,23 +964,22 @@ to sit inside an already-linkified URL is not re-propertized."
       (while (string-match gp-ticket-key-pattern s i)
         (let ((b (match-beginning 0)) (e (match-end 0)))
           (unless (eq (get-text-property b 'face s) 'link)
-            (let ((bounds (gp-ticket--padded-bounds
-                           b e
-                           (lambda (p) (and (> p 0) (substring s (1- p) p)))
-                           (lambda (p) (and (< p (length s)) (substring s p (1+ p)))))))
-              (add-text-properties (car bounds) (cdr bounds)
-                                    (gp-ticket--props (match-string 0 s)) s)))
+            (add-text-properties b e (gp-ticket--props (match-string 0 s)) s))
           (setq i e)))
       s)))
 
 (defun gp-linkify-string (text)
   "Return TEXT with markdown [label](url) and bare URLs turned into links.
 \[label](url) is shown as LABEL; both forms get the `link' face and
-a keymap opening the URL on RET/mouse-1.  Pure -- returns a fresh string."
+a keymap opening the URL on RET/mouse-1/mouse-2 (mouse-2 because
+`mouse-1-click-follows-link' translates the click into a mouse-2
+event before keymap lookup -- see `gp-ticket--keymap').  Pure --
+returns a fresh string."
   (when text
     (let* ((open (lambda (url)
                    (let ((m (make-sparse-keymap)))
                      (define-key m [mouse-1] (lambda () (interactive) (browse-url url)))
+                     (define-key m [mouse-2] (lambda () (interactive) (browse-url url)))
                      (define-key m (kbd "RET") (lambda () (interactive) (browse-url url)))
                      m)))
            (link-props (lambda (url)
