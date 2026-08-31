@@ -2286,6 +2286,23 @@ already have pipeline history are watched.  Set to 0 to disable."
              (not (gp-pipeline-finished-p (car entry))))
            (plist-get data :current)))
 
+(defun gp--detail-buffer-visible-p (buf)
+  "Return non-nil when BUF has a window on ANY tab-bar tab, not just
+the currently selected one.
+
+`get-buffer-window' alone only sees the SELECTED tab's window tree --
+a buffer split into a window on a background tab has no live window
+under that check at all (tab-bar stores each tab's window state
+separately and only the selected tab's is materialised), so polling
+would stop silently the moment the user switched away from that PR's
+tab, even though the buffer is still genuinely on screen, just on
+another tab.  `tab-bar-mode' may not be loaded/enabled at all (this
+package has no dependency on it), so the tab-bar branch is guarded
+and simply contributes nothing when unavailable."
+  (or (get-buffer-window buf 'visible)
+      (and (fboundp 'tab-bar-get-buffer-tab)
+           (tab-bar-get-buffer-tab buf t))))
+
 (defun gp--detail-pipeline-poll-mode (data visible)
   "Decide what to schedule after a pipelines load of DATA.
 Both modes require a VISIBLE buffer: polling an off-screen buffer
@@ -2759,10 +2776,10 @@ live deployment without a manual refresh."
                                   gp--detail-pipelines)
                              (gp-pipeline--spinner-ensure))
                            (gp--detail-cancel-pipeline-timer)
-                           ;; keep polling against whatever we're actually showing
-                           ;; (`visible' -> any frame, not just the selected one)
+                           ;; keep polling against whatever we're actually showing --
+                           ;; any frame AND any tab-bar tab, not just the selected one
                            (pcase (gp--detail-pipeline-poll-mode
-                                   gp--detail-pipelines (get-buffer-window buf 'visible))
+                                   gp--detail-pipelines (gp--detail-buffer-visible-p buf))
                              ('poll
                               (setq gp--detail-pipeline-timer
                                     (run-with-timer
@@ -2785,9 +2802,10 @@ live deployment without a manual refresh."
   "One watch cycle: re-fetch BUF's PR head, then reload its pipelines.
 Re-fetching the PR first means a just-pushed commit's fresh run shows
 up as the CURRENT run (the head hash moved), not as a recent one.
-Stops silently when BUF is gone or no longer displayed; the next
-manual refresh restarts the watch."
-  (when (and (buffer-live-p buf) (get-buffer-window buf))
+Stops silently when BUF is gone or no longer displayed (on any
+tab-bar tab, not just the selected one); the next manual refresh
+restarts the watch."
+  (when (and (buffer-live-p buf) (gp--detail-buffer-visible-p buf))
     (let ((pr (buffer-local-value 'gp--pr buf)))
       (gp-pull-request-async
        (gp-pr-full-name pr) (alist-get 'id pr)

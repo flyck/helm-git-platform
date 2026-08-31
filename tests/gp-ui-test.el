@@ -709,6 +709,30 @@ leave no entry point for adding the first reviewer."
            (content (raw . "hi"))))))
     (should (string-match-p "5 minutes ago" (buffer-string)))))
 
+(ert-deftest gp-test-detail-buffer-visible-p-checks-every-tab ()
+  "A buffer showing in a window on a BACKGROUND tab-bar tab still
+counts as visible -- `get-buffer-window' alone only sees the
+currently selected tab's window tree, since tab-bar stores every
+other tab's window state separately rather than keeping it live.
+Without also checking `tab-bar-get-buffer-tab', switching away from
+a PR's tab looked identical to that buffer not being displayed
+anywhere at all, and its pipeline poll would stop silently."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      ;; on the selected tab's window tree: get-buffer-window alone finds it
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'a-window))
+                ((symbol-function 'tab-bar-get-buffer-tab) (lambda (&rest _) nil)))
+        (should (gp--detail-buffer-visible-p buf)))
+      ;; on a background tab only: get-buffer-window alone misses it,
+      ;; tab-bar-get-buffer-tab is what catches it
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil))
+                ((symbol-function 'tab-bar-get-buffer-tab) (lambda (&rest _) '(tab))))
+        (should (gp--detail-buffer-visible-p buf)))
+      ;; not displayed anywhere at all
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil))
+                ((symbol-function 'tab-bar-get-buffer-tab) (lambda (&rest _) nil)))
+        (should-not (gp--detail-buffer-visible-p buf))))))
+
 (ert-deftest gp-test-pipeline-poll-mode ()
   "Poll/watch only while the buffer is displayed."
   (let ((gp-detail-pipeline-poll-interval 6)
