@@ -230,7 +230,8 @@ gone) that repeated the commit summary a second time for no reason."
          (git-platform-current-backend (git-platform-bitbucket)))
     (with-temp-buffer
       (gp-detail-mode)
-      (setq gp--detail-commits gp-test--commits
+      (setq gp--pr '((destination (repository (full_name . "acme/web"))))
+            gp--detail-commits gp-test--commits
             gp--detail-pipelines (list :current (list (cons head-pipeline nil))
                                        :recent (list (cons older-pipeline "older commit summary"))))
       (let ((inhibit-read-only t))
@@ -243,7 +244,12 @@ gone) that repeated the commit summary a second time for no reason."
         (should (string-match-p "1a2b3c4d.*#40" text))
         ;; and does NOT repeat as a separate "Recent runs" block/summary
         (should-not (string-match-p "Recent runs" text))
-        (should-not (string-match-p "older commit summary" text))))))
+        (should-not (string-match-p "older commit summary" text))
+        ;; each pipeline number is a link to its Bitbucket results page
+        (should (equal (get-text-property (string-match "42" text) 'help-echo text)
+                       "https://bitbucket.org/acme/web/pipelines/results/42"))
+        (should (equal (get-text-property (string-match "40" text) 'help-echo text)
+                       "https://bitbucket.org/acme/web/pipelines/results/40"))))))
 
 (ert-deftest gp-test-detail-commits-no-pipeline-match-is-quiet ()
   "A commit with no matching pipeline just has no status glyph -- not
@@ -252,6 +258,88 @@ an error, not a placeholder."
     ;; gp-test--render-commits leaves gp--detail-pipelines at its
     ;; default (nil), so nothing should match and nothing breaks
     (should (string-match-p "fix indentation of the wscat script" text))))
+
+(ert-deftest gp-test-detail-commits-current-pipeline-shows-step-progress-immediately ()
+  "The head commit's own pipeline already carries its steps for free
+\(from the main pipeline load) -- its \"N/total\" count must show up
+on the very first render, with no fetch and no rerender needed."
+  (let* ((pipeline '((state (name . "RUNNING")) (build_number . 42)
+                     (target (commit (hash . "87c8054110c84d42edc3a4e89184ffd1a15d3a8d")))))
+         (steps (list '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
+                      '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
+                      '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
+                      '((state (name . "PENDING") (stage (name . "PAUSED"))))))
+         (calls 0)
+         (git-platform-current-backend (git-platform-bitbucket)))
+    (cl-letf (((symbol-function 'gp-pipeline-steps-async)
+               (lambda (&rest _) (setq calls (1+ calls)))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--pr '((destination (repository (full_name . "acme/web"))))
+              gp--detail-commits gp-test--commits
+              gp--detail-pipelines (list :current (list (cons pipeline steps)) :recent nil))
+        (let ((inhibit-read-only t))
+          (magit-insert-section (gp-root)
+            (gp--insert-commits)))
+        (should (string-match-p "3/4" (buffer-string)))
+        ;; the steps were already known -- no fetch was ever needed
+        (should (= calls 0))))))
+
+(ert-deftest gp-test-detail-commits-recent-pipeline-fetches-steps-once ()
+  "An unfinished :recent pipeline has no steps yet, so the first render
+shows just the glyph and kicks off a fetch; once that resolves (and
+caches, see `gp--recent-pipeline-steps-cache'), a SECOND render for
+the SAME pipeline uuid must not fetch again."
+  (let* ((pipeline '((uuid . "{pipe-1}") (state (name . "RUNNING")) (build_number . 40)
+                     (target (commit (hash . "1a2b3c4d5e6f7788990011223344556677889900")))))
+         (steps (list '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
+                      '((state (name . "PENDING") (stage (name . "PAUSED"))))))
+         (calls 0)
+         (gp--recent-pipeline-steps-cache (make-hash-table :test 'equal))
+         (git-platform-current-backend (git-platform-bitbucket)))
+    (cl-letf (((symbol-function 'gp-pipeline-steps-async)
+               (lambda (_full-name _id callback) (setq calls (1+ calls)) (funcall callback steps)))
+              ((symbol-function 'gp--detail-rerender) #'ignore))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--pr '((destination (repository (full_name . "acme/web"))))
+              gp--detail-commits gp-test--commits
+              gp--detail-pipelines (list :current nil :recent (list (cons pipeline "s"))))
+        (let ((inhibit-read-only t))
+          (magit-insert-section (gp-root)
+            (gp--insert-commits)))
+        ;; first render: no cached steps yet, so it fetched exactly once
+        (should (= calls 1))
+        ;; steps are cached now -- a second render must not fetch again
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (magit-insert-section (gp-root)
+            (gp--insert-commits)))
+        (should (= calls 1))
+        (should (string-match-p "1/2" (buffer-string)))))))
+
+(ert-deftest gp-test-detail-commits-finished-recent-pipeline-never-fetches-steps ()
+  "A FINISHED older-commit pipeline's glyph is already the whole
+story -- fetching its steps just to show a redundant \"N/total (all
+succeeded)\" would be a wasted call for no new information."
+  (let* ((pipeline '((uuid . "{pipe-2}")
+                     (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
+                     (build_number . 40)
+                     (target (commit (hash . "1a2b3c4d5e6f7788990011223344556677889900")))))
+         (calls 0)
+         (gp--recent-pipeline-steps-cache (make-hash-table :test 'equal))
+         (git-platform-current-backend (git-platform-bitbucket)))
+    (cl-letf (((symbol-function 'gp-pipeline-steps-async)
+               (lambda (&rest _) (setq calls (1+ calls)))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--pr '((destination (repository (full_name . "acme/web"))))
+              gp--detail-commits gp-test--commits
+              gp--detail-pipelines (list :current nil :recent (list (cons pipeline "s"))))
+        (let ((inhibit-read-only t))
+          (magit-insert-section (gp-root)
+            (gp--insert-commits)))
+        (should (= calls 0))))))
 
 (ert-deftest gp-test-detail-commits-empty-is-noop ()
   "No commits -> no section at all (not an empty heading)."

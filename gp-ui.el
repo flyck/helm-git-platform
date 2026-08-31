@@ -976,27 +976,105 @@ checkout is for).  Set to nil for no cap."
   :group 'bitbucket)
 
 (defun gp--commit-pipelines-by-hash (pipelines)
-  "Return a hash table mapping commit hash -> list of pipelines from
-PIPELINES (a plist :current :recent, see `gp-pipeline-fetch-for-pr').
-:current pairs a pipeline with its steps ((PIPELINE . STEPS) …); :recent
-pairs one with a commit summary ((PIPELINE . SUMMARY) …) -- only the
-PIPELINE itself is needed here, so both shapes are unwrapped the same
-way with `car'."
+  "Return a hash table mapping commit hash -> list of (PIPELINE . STEPS)
+from PIPELINES (a plist :current :recent, see `gp-pipeline-fetch-for-pr').
+:current already carries real STEPS, fetched for free as part of the
+main load; :recent pairs a pipeline with a commit summary instead (no
+steps fetched there) -- passed through as STEPS = nil, meaning
+\"unknown, not `no steps'\" to the renderer (see
+`gp--insert-commit-pipeline-status', which tells this apart from a
+genuinely empty step list by checking the cache/fetch state, not this
+nil)."
   (let ((table (make-hash-table :test 'equal)))
-    (dolist (entry (append (plist-get pipelines :current) (plist-get pipelines :recent)))
-      (let* ((p (car entry))
-             (hash (gp-pipeline-commit p)))
-        (when hash (push p (gethash hash table)))))
+    (dolist (entry (plist-get pipelines :current))
+      (let* ((p (car entry)) (hash (gp-pipeline-commit p)))
+        (when hash (push (cons p (cdr entry)) (gethash hash table)))))
+    (dolist (entry (plist-get pipelines :recent))
+      (let* ((p (car entry)) (hash (gp-pipeline-commit p)))
+        (when hash (push (cons p nil) (gethash hash table)))))
     table))
 
-(defun gp--insert-commit-pipeline-status (pipelines-by-hash hash)
-  "Insert a status glyph + number for each pipeline at HASH, if any.
-Multiple pipelines can target one commit (e.g. two workflows); each
-gets its own glyph so none is silently dropped."
-  (dolist (p (reverse (gethash hash pipelines-by-hash)))
-    (let ((g (gp-pipeline--status-glyph (gp-pipeline-state p) (gp-pipeline-result p))))
-      (insert (propertize (format "  %s#%s" (car g) (or (gp-pipeline-number p) "?"))
-                          'face (cdr g))))))
+(defcustom gp-detail-recent-pipeline-steps-cache-ttl 3600
+  "Seconds to cache an older commit's fetched pipeline steps.
+Only applies to `:recent' pipelines (see `gp--commit-pipelines-by-hash')
+-- an unfinished one has its steps fetched so the Commits section can
+show a \"N/total succeeded\" count, same as the head commit already
+gets for free.  An older run settles slowly if at all, so this can
+sit far longer than the ordinary `gp-cache-ttl' without going stale;
+set to 0 to disable caching (always refetch)."
+  :type 'integer :group 'bitbucket)
+
+(defvar gp--recent-pipeline-steps-cache (make-hash-table :test 'equal)
+  "pipeline-uuid -> (EXPIRY . STEPS).  Global (not buffer-local): a
+pipeline's steps don't depend on which detail buffer is asking, see
+`gp-detail-recent-pipeline-steps-cache-ttl'.")
+
+(defun gp--recent-pipeline-steps-cached (pipeline)
+  "Return PIPELINE's cached steps, or `miss' if absent/expired."
+  (let* ((id (gp-pipeline-id pipeline))
+         (entry (and id (gethash id gp--recent-pipeline-steps-cache))))
+    (if (and entry (< (float-time) (car entry))) (cdr entry) 'miss)))
+
+(defun gp--fetch-recent-pipeline-steps-async (full-name pipeline buf)
+  "Fetch and cache PIPELINE's steps, then rerender BUF if still live.
+Only called for an unfinished `:recent' pipeline with no cached steps
+yet (see `gp--insert-commit-pipeline-status') -- a finished run's
+glyph alone is already the whole story, and re-triggering this on
+every render would refetch on each poll tick for nothing, since the
+cache key (pipeline uuid) doesn't change render to render."
+  (let ((id (gp-pipeline-id pipeline)))
+    (when id
+      (gp-pipeline-steps-async
+       full-name id
+       (lambda (steps)
+         (puthash id (cons (+ (float-time) gp-detail-recent-pipeline-steps-cache-ttl) steps)
+                  gp--recent-pipeline-steps-cache)
+         (gp--detail-rerender buf))))))
+
+(defun gp--pipeline-step-progress (steps)
+  "Return \"N/total\" for STEPS' successful count, or nil if STEPS is nil."
+  (when steps
+    (format "%d/%d"
+            (cl-count-if (lambda (s) (equal (gp-pipeline-step-result s) "SUCCESSFUL")) steps)
+            (length steps))))
+
+(defun gp--insert-commit-pipeline-status (pipelines-by-hash hash full-name buf)
+  "Insert a status glyph + number (linked to the web UI) for each
+pipeline at HASH, if any.  Multiple pipelines can target one commit
+\(e.g. two workflows); each gets its own glyph so none is silently
+dropped.  An unfinished pipeline also gets a \"N/total\" step-progress
+count once its steps are known (FULL-NAME/BUF are for the fetch a
+`:recent' pipeline needs, see `gp--fetch-recent-pipeline-steps-async')
+-- the head commit's own pipeline already carries its steps for free
+\(passed straight through here); an older commit's does not, so this
+is what discovers e.g. \"stopped at a manual gate after 3 of 4 steps\"
+instead of just an opaque ⏸ ."
+  (dolist (entry (reverse (gethash hash pipelines-by-hash)))
+    (let* ((p (car entry))
+           (known-steps (cdr entry))
+           (g (gp-pipeline--status-glyph (gp-pipeline-state p) (gp-pipeline-result p)))
+           (number (or (gp-pipeline-number p) "?"))
+           (url (ignore-errors (gp-pipeline-web-url full-name p)))
+           (steps (or known-steps
+                      (and (not (gp-pipeline-finished-p p))
+                           (let ((cached (gp--recent-pipeline-steps-cached p)))
+                             (if (eq cached 'miss)
+                                 (progn (gp--fetch-recent-pipeline-steps-async full-name p buf) nil)
+                               cached)))))
+           (progress (gp--pipeline-step-progress steps)))
+      (insert "  ")
+      (insert (propertize (car g) 'face (cdr g)))
+      (insert (if url
+                  (propertize (format "#%s" number) 'face (cdr g)
+                              'mouse-face 'highlight 'follow-link t 'help-echo url
+                              'keymap (let ((m (make-sparse-keymap)))
+                                        (define-key m [mouse-1] (lambda () (interactive) (browse-url url)))
+                                        (define-key m [mouse-2] (lambda () (interactive) (browse-url url)))
+                                        (define-key m (kbd "RET") (lambda () (interactive) (browse-url url)))
+                                        m))
+                (propertize (format "#%s" number) 'face (cdr g))))
+      (when progress
+        (insert (propertize (format " (%s)" progress) 'face 'shadow))))))
 
 (defun gp--insert-commits ()
   "Insert a collapsable commits section for the detail buffer's PR.
@@ -1009,7 +1087,9 @@ that block repeated the same commit summary a second time with a
 status beside it and nothing there was actionable, so the status now
 sits directly on the commit it belongs to instead."
   (let ((commits gp--detail-commits)
-        (pipelines-by-hash (gp--commit-pipelines-by-hash gp--detail-pipelines)))
+        (pipelines-by-hash (gp--commit-pipelines-by-hash gp--detail-pipelines))
+        (full-name (ignore-errors (gp-pr-full-name gp--pr)))
+        (buf (current-buffer)))
     (when commits
       (magit-insert-section (gp-commits nil gp-detail-commits-collapsed)
         (magit-insert-heading (format "Commits (%d)" (length commits)))
@@ -1027,8 +1107,8 @@ sits directly on the commit it belongs to instead."
               (when date
                 (insert (propertize (format "  %s" (gp--relative-time date))
                                     'face 'shadow)))
-              (when hash
-                (gp--insert-commit-pipeline-status pipelines-by-hash hash))
+              (when (and hash full-name)
+                (gp--insert-commit-pipeline-status pipelines-by-hash hash full-name buf))
               (insert "\n"))))
         (insert "\n")))))
 
