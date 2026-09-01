@@ -132,6 +132,12 @@ in ascending / insertion order."
         (when (and path line
                    (or gp-overlay-show-resolved
                        (not (gp-overlay--comment-thread-resolved-p c by-id)))
+                   ;; DIFF-BY-FILE drives the diff-membership fallback in
+                   ;; gp-comment-outdated-p -- Bitbucket's own `inline.outdated'
+                   ;; is undocumented (not in its OpenAPI spec) and, in
+                   ;; practice, only the per-comment GET returns it; the
+                   ;; list-comments endpoint used here never does, and
+                   ;; fetching per comment would be an N+1.
                    (or gp-overlay-show-outdated
                        (not (gp-comment-outdated-p c diff-by-file))))
           (let* ((file-entry (or (assoc path by-file)
@@ -556,10 +562,20 @@ Reuses the last-drawn lines, so no network fetch is needed."
     (gp-overlay-apply-to-buffer (current-buffer) gp-overlay--lines)))
 
 (defun gp-overlay-refresh ()
-  "Refetch the PR's comments and redraw overlays in this buffer."
+  "Refetch this buffer's PR (bypassing the TTL cache) and redraw overlays.
+`gp-overlay--pr' is a buffer-local snapshot that otherwise never changes
+on its own, so a source commit pushed after overlays were last drawn
+here would keep being checked against the old diff -- reusing the stale
+object could hide a comment's outdated status indefinitely.  Refetching
+here re-keys the diff cache (see `gp-comment-outdated-p') on the current
+source commit, same as `g' does in the PR detail buffer."
   (interactive)
   (when gp-overlay--pr
-    (gp-overlay-pr gp-overlay--pr)))
+    (let* ((full-name (gp-pr-full-name gp-overlay--pr))
+           (id (alist-get 'id gp-overlay--pr))
+           (gp-cache-ttl 0)
+           (pr (or (gp-pull-request full-name id) gp-overlay--pr)))
+      (gp-overlay-pr pr))))
 
 ;;;; Entry point + minor mode ------------------------------------------------
 

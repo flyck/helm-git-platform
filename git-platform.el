@@ -773,23 +773,43 @@ commit can still make the comment stale.")
 
 (defun gp-comment-outdated-p (comment diff-by-file)
   "Return non-nil when inline COMMENT is anchored to a stale line.
-DIFF-BY-FILE is the alist from `gp-split-diff-by-file'.  A comment
-is outdated when its file is in the diff but its anchored new-side
-line is no longer present in any hunk (it was changed away under
-the comment).  Returns nil when COMMENT is not inline, when the
-diff is unknown (nil), or when the comment's file is absent from
-the diff -- we only flag outdated when we can prove it.
+Trusts the forge's own `inline.outdated' flag when COMMENT carries
+one.  Bitbucket sets this from its own line-tracking -- e.g. when the
+anchored line's content was moved/rewritten elsewhere rather than
+merely sitting inside a hunk that also touched other lines, a
+distinction the diff-membership heuristic below cannot make (see
+gp-overlay.el's captured PR #199/comment 852271411 case: the
+comment's `to' line coincided with an unrelated newly-added line in
+the current diff, so the heuristic alone called it current when
+Bitbucket's own tracking says otherwise).  In practice this flag is
+NOT populated by `bitbucket-pull-request-comments' -- Bitbucket's
+list-comments endpoint omits `inline.outdated' even when every field
+is requested; only the single-comment endpoint
+\(`/pullrequests/{id}/comments/{comment_id}'\) returns it, and fetching
+that per comment is an N+1 we don't do.  This check stays cheap to
+call so it is ready if a caller ever does have the flag.
 
-A true verdict is memoised by comment id (see
+Falls back to a diff-membership heuristic when the flag is absent:
+DIFF-BY-FILE is the alist from `gp-split-diff-by-file'; a comment is
+outdated when its file is in the diff but its anchored new-side line
+is no longer present in any hunk.  Returns nil when COMMENT is not
+inline, when the diff is unknown (nil), or when the comment's file is
+absent from the diff -- the heuristic only flags outdated when it can
+prove it, and can under-flag in the coincidental-line-number case
+described above.
+
+A true verdict (from either source) is memoised by comment id (see
 `gp--comment-outdated-cache') and short-circuits future checks even
 across diff refreshes, since outdatedness never reverses."
   (let ((id (alist-get 'id comment)))
     (or (and id (gethash id gp--comment-outdated-cache))
-        (let* ((path (let-alist comment .inline.path))
+        (let* ((flagged (let-alist comment .inline.outdated))
+               (path (let-alist comment .inline.path))
                (line (let-alist comment (or .inline.to .inline.from)))
                (chunk (and path diff-by-file (cdr (assoc path diff-by-file))))
-               (outdated (and path line chunk
-                              (not (gethash line (gp-diff-chunk-new-lines--cached chunk))))))
+               (outdated (or flagged
+                             (and path line chunk
+                                  (not (gethash line (gp-diff-chunk-new-lines--cached chunk)))))))
           (when (and outdated id)
             (puthash id t gp--comment-outdated-cache))
           outdated))))

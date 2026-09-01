@@ -219,6 +219,40 @@ Outdated-ness is computed from the diff: line 2 is in the hunk
     (should (gp-comment-outdated-p c dbf))      ;; proven outdated from the diff
     (should (gp-comment-outdated-p c nil))))    ;; sticky: cached, no diff needed
 
+(ert-deftest gp-test-comment-outdated-trusts-server-flag ()
+  "Bitbucket's own `inline.outdated' flag wins over the diff heuristic.
+A comment's anchor line can be numerically present in a hunk (e.g. the
+surrounding code moved and unrelated new content now lands on the same
+line number) while the code the comment was actually about was itself
+rewritten elsewhere -- only the forge's own line-tracking can tell the
+two apart, so a true flag must be trusted even when our own
+line-membership check would call the comment current."
+  (clrhash gp--comment-outdated-cache)
+  (let* ((c '((id . 501) (inline (path . "a.el") (to . 2) (outdated . t))
+              (content (raw . "stale per bitbucket"))))
+         ;; line 2 IS present in this hunk -- our own heuristic alone
+         ;; would say "current", so this only passes via the server flag
+         (dbf (gp-split-diff-by-file "diff --git a/a.el b/a.el
+--- a/a.el
++++ b/a.el
+@@ -1,3 +1,3 @@
+ one
+ two
+ three
+")))
+    (should (gp-comment-outdated-p c dbf)))
+  (clrhash gp--comment-outdated-cache)
+  ;; a false/absent flag defers to the diff heuristic, not a blanket "current"
+  (let ((c '((id . 502) (inline (path . "a.el") (to . 2) (outdated . nil))
+             (content (raw . "explicitly not outdated"))))
+        (dbf (gp-split-diff-by-file "diff --git a/a.el b/a.el
+--- a/a.el
++++ b/a.el
+@@ -1,1 +1,1 @@
+ one
+")))
+    (should (gp-comment-outdated-p c dbf))))   ;; line 2 absent from this hunk
+
 (ert-deftest gp-test-overlay-global-toggle-suppresses-draw ()
   "With overlays globally off, apply-to-buffer draws nothing but keeps lines."
   (with-temp-buffer
@@ -270,6 +304,41 @@ comment runs off the right edge."
   (let ((gp-overlay-wrap-width nil))
     (let ((text (make-string 300 ?a)))
       (should (equal (gp-overlay--fill text "  " 2) text)))))
+
+(ert-deftest gp-test-overlay-refresh-refetches-pr-bypassing-ttl ()
+  "`gp-overlay-refresh' refetches the PR (TTL 0) instead of reusing the
+buffer-local snapshot, so a commit pushed after overlays were last
+drawn is picked up rather than cached indefinitely."
+  (with-temp-buffer
+    (setq gp-overlay--pr '((id . 3) (destination (repository (full_name . "ws/slug")))))
+    (let ((seen-ttl 'unset)
+          (passed-to-overlay-pr nil)
+          (fresh-pr '((id . 3) (source (commit (hash . "newhash")))
+                      (destination (repository (full_name . "ws/slug"))))))
+      (cl-letf (((symbol-function 'gp-pull-request)
+                 (lambda (fn id)
+                   (should (equal fn "ws/slug"))
+                   (should (= id 3))
+                   (setq seen-ttl gp-cache-ttl)
+                   fresh-pr))
+                ((symbol-function 'gp-overlay-pr)
+                 (lambda (pr) (setq passed-to-overlay-pr pr))))
+        (gp-overlay-refresh))
+      (should (= seen-ttl 0))
+      (should (equal passed-to-overlay-pr fresh-pr)))))
+
+(ert-deftest gp-test-overlay-refresh-falls-back-when-refetch-fails ()
+  "A failed refetch (nil) falls back to the stale buffer-local PR rather
+than erroring or drawing nothing."
+  (with-temp-buffer
+    (let ((stale-pr '((id . 3) (destination (repository (full_name . "ws/slug"))))))
+      (setq gp-overlay--pr stale-pr)
+      (let (passed-to-overlay-pr)
+        (cl-letf (((symbol-function 'gp-pull-request) (lambda (_fn _id) nil))
+                  ((symbol-function 'gp-overlay-pr)
+                   (lambda (pr) (setq passed-to-overlay-pr pr))))
+          (gp-overlay-refresh))
+        (should (equal passed-to-overlay-pr stale-pr))))))
 
 (provide 'gp-overlay-test)
 ;;; gp-overlay-test.el ends here

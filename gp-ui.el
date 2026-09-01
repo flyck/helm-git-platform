@@ -463,6 +463,11 @@ thread."
          (collapse (if by-id
                        (gp--comment-thread-resolved-p comment by-id)
                      resolved))
+         ;; gp--detail-diff is the diff-membership fallback: Bitbucket's own
+         ;; `inline.outdated' flag (see gp-comment-outdated-p) is never
+         ;; populated here because bitbucket-pull-request-comments uses the
+         ;; list-comments endpoint, which omits it -- only the per-comment
+         ;; endpoint has it, and fetching that per comment would be an N+1.
          (outdated (gp-comment-outdated-p comment gp--detail-diff))
          (marked (and pr (gp--detail-comment-marked-p comment)))
          ;; prefix every line of STR with the thread indent
