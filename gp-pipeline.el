@@ -41,6 +41,7 @@
 
 (defvar gp--pr)                         ;; the detail buffer's PR (gp-ui.el)
 (declare-function gp-detail-refresh "gp-ui")
+(declare-function gp--detail-rerender "gp-ui")
 (declare-function gp-deploy-watch-step-marker "gp-deploy-watch")
 (declare-function gp-deploy-watch-toggle-at-point "gp-deploy-watch")
 (declare-function gp-helm--deploy-cache-bust-repo "gp-helm")
@@ -119,6 +120,22 @@ tuned for a 12-frame bar and reads sluggishly as a rotation."
 
 (defvar gp-pipeline--spinner-timer nil
   "Repeating timer animating the in-progress spinners, or nil.")
+
+(defvar gp-pipeline--deploy-running (make-hash-table :test 'equal)
+  "Step id -> start time (`float-time') for an in-flight deploy script.
+Bitbucket's own step `state'/`result' never reflect
+`gp-pipeline--deploy-run': that process runs entirely on this side
+\(browser automation, a script, whatever `gp-pipeline-deploy-script'
+does\), so the forge keeps reporting the step's PRE-run state
+\(typically the SUCCESSFUL result from its last real run, for a
+redeploy\) for the whole time our script is working.  This registry is
+the only source of truth for \"is a script running against this step
+right now\", checked by `gp-pipeline--insert-step' before falling back
+to the forge-reported glyph.")
+
+(defun gp-pipeline--deploy-running-p (step)
+  "Non-nil when a deploy script is currently running for STEP."
+  (and (gethash (gp-pipeline-step-id step) gp-pipeline--deploy-running) t))
 
 (defun gp-pipeline--spinner-frame ()
   "Return the spinner's current frame string."
@@ -319,6 +336,22 @@ step is startable."
        (not (cl-some #'gp-pipeline-step-running-p steps))
        (cl-some #'gp-pipeline-step-runnable-manual-p steps)))
 
+(defun gp-pipeline-step-redeployable-p (step)
+  "Non-nil when STEP already succeeded and can be redeployed on demand.
+Distinct from `gp-pipeline-step-runnable-manual-p' (a manual step still
+WAITING to run for the first time): this is for a manual step whose
+result is already SUCCESSFUL, e.g. re-pushing the same build to an
+environment after a rollback, or simply wanting it to run again.
+
+Only meaningful with `gp-pipeline-deploy-script' configured: that
+script is the only route that can re-run this step's action at all
+\(Bitbucket's API cannot resume or restart an individual step in
+place, see `gp-detail-pipeline-run-manual'\), so with no script
+configured there is nothing to offer."
+  (and gp-pipeline-deploy-script
+       (gp-pipeline-step-manual-p step)
+       (equal (gp-pipeline-step-result step) "SUCCESSFUL")))
+
 (defun gp-pipeline--label (pipeline &optional steps)
   "Return a one-line label string for PIPELINE (number + status).
 When STEPS reveal an open manual gate, show ⏸ and say so instead of
@@ -340,12 +373,21 @@ the indistinguishable running state."
 
 (defun gp-pipeline--insert-step (step)
   "Insert one STEP line as a `gp-pipeline-step-section'."
-  (let* ((state (gp-pipeline-step-state step))
+  (let* ((deploy-started (gethash (gp-pipeline-step-id step) gp-pipeline--deploy-running))
+         (state (gp-pipeline-step-state step))
          (result (gp-pipeline-step-result step))
-         (g (gp-pipeline--status-glyph state result 'step))
+         ;; A locally-running deploy script overrides the forge-reported
+         ;; glyph: Bitbucket's own state/result for this step do not change
+         ;; while our script runs (see `gp-pipeline--deploy-running'), so
+         ;; without this a redeploy would still show ✔ SUCCESSFUL throughout.
+         (g (if deploy-started
+                (progn (gp-pipeline--spinner-ensure)
+                       (cons (gp-pipeline--spinner-glyph) 'gp-pipeline-spinner-face))
+              (gp-pipeline--status-glyph state result 'step)))
          (name (or (alist-get 'name step) "step"))
          (dur (gp-pipeline--format-duration step))
          (runnable (gp-pipeline-step-runnable-manual-p step))
+         (redeployable (gp-pipeline-step-redeployable-p step))
          (manual (gp-pipeline-step-manual-p step))
          (rerunnable (gp-pipeline-step-rerunnable-p step)))
     (magit-insert-section (gp-pipeline-step-section step)
@@ -355,7 +397,9 @@ the indistinguishable running state."
                 " "
                 (propertize name 'face 'default)
                  (cond
+                  (deploy-started (propertize "  [deploying…]" 'face 'gp-pipeline-running-face))
                   (runnable (propertize "  [manual ▸ T]" 'face 'gp-pipeline-running-face))
+                  (redeployable (propertize "  [redeploy ▸ T]" 'face 'gp-pipeline-running-face))
                   (manual (propertize "  [manual]" 'face 'shadow)))
                 (when rerunnable
                   (propertize "  [rerun ▸ P]" 'face 'gp-pipeline-running-face))
@@ -367,7 +411,18 @@ the indistinguishable running state."
                        (gp-deploy-watch-step-marker
                         step (gp-pr-full-name gp--pr)
                         (gp-pr-source-branch gp--pr))))
-                (unless (string-empty-p dur)
+                (cond
+                 ;; Same tag-with-timestamp trick as a forge-reported running
+                 ;; step below: `gp-pipeline--spinner-tick' reticks this in
+                 ;; place every second without a rerender.
+                 (deploy-started
+                  (propertize
+                   (format "  %s" (gp-pipeline--format-secs
+                                   (max 0 (floor (- (float-time) deploy-started)))))
+                   'face 'shadow
+                   'gp-pipeline-elapsed
+                   (format-time-string "%Y-%m-%dT%H:%M:%S+00:00" deploy-started t)))
+                 ((not (string-empty-p dur))
                   ;; A running step's duration is computed from `started_on'
                   ;; at RENDER time, so it is a snapshot, not a clock.  The
                   ;; poll deliberately skips the rerender while fetched data
@@ -377,7 +432,7 @@ the indistinguishable running state."
                   (apply #'propertize (format "  %s" dur) 'face 'shadow
                          (when (gp-pipeline-step-running-p step)
                            (list 'gp-pipeline-elapsed
-                                 (alist-get 'started_on step)))))
+                                 (alist-get 'started_on step))))))
                 (propertize "   l:log" 'face 'shadow))))))
 
 (defun gp--insert-pipelines (data)
@@ -663,12 +718,20 @@ resolved are omitted rather than exported empty, so a script can tell
   "Run `gp-pipeline-deploy-script' for STEP, streaming output to a buffer.
 Asynchronous: browser automation takes tens of seconds, and blocking
 Emacs on it is exactly what the async work in this package removed.
-Refreshes the detail view when the script exits successfully."
+Refreshes the detail view when the script exits successfully.
+
+While the process runs, STEP's id is registered in
+`gp-pipeline--deploy-running' so the step line shows a spinner and a
+live elapsed-time counter (see `gp-pipeline--insert-step') instead of
+whatever forge-reported glyph it had before the run started -- that
+glyph does not change on its own, since the forge has no idea this
+local process is running at all."
   (unless gp-pipeline-deploy-script
     (user-error "No `gp-pipeline-deploy-script' configured"))
   (let* ((cmd (copy-sequence gp-pipeline-deploy-script))
          (program (expand-file-name (car cmd)))
          (name (or (alist-get 'name step) "?"))
+         (step-id (gp-pipeline-step-id step))
          (buf (get-buffer-create gp-pipeline-deploy-buffer))
          ;; Captured HERE, not read in the sentinel: a process sentinel runs
          ;; in whatever buffer is current when the process exits -- usually
@@ -692,6 +755,13 @@ Refreshes the detail view when the script exits successfully."
     (message "Deploy script started for %S; output in %s"
              name gp-pipeline-deploy-buffer)
     (gp-log 'info "deploy script: %S for %s/%s" cmd full-name name)
+    (when step-id
+      (puthash step-id (float-time) gp-pipeline--deploy-running)
+      ;; Paint the spinner immediately rather than waiting for the next
+      ;; unrelated redraw or the spinner timer's own tick to notice.
+      (when (and (buffer-live-p detail-buf) (fboundp 'gp--detail-rerender))
+        (with-current-buffer detail-buf
+          (when (bound-and-true-p gp--pr) (gp--detail-rerender detail-buf)))))
     (make-process
      :name "gp-deploy"
      :buffer buf
@@ -700,6 +770,7 @@ Refreshes the detail view when the script exits successfully."
      :noquery t
      :sentinel
      (lambda (_proc event)
+       (when step-id (remhash step-id gp-pipeline--deploy-running))
        (let ((ok (string-prefix-p "finished" event)))
          (with-current-buffer buf
            (let ((inhibit-read-only t))
@@ -709,27 +780,32 @@ Refreshes the detail view when the script exits successfully."
            (gp-notify (if ok "Deploy succeeded" "Deploy failed")
                       (format "%s — %s" name full-name)
                       (not ok)))
-         (if ok
-             (progn
-               (message "Deploy script finished for %S" name)
-               ;; A deploy to a shared environment can supersede what an
-               ;; EARLIER pr's successful deploy step left behind; that pr's
-               ;; own commit never changes, so only a repo-wide bust (not
-               ;; a re-scan of this one commit) can catch it -- see
-               ;; `gp-helm--deploy-cache-bust-repo'.
-               (when (fboundp 'gp-helm--deploy-cache-bust-repo)
-                 (gp-helm--deploy-cache-bust-repo full-name))
-               ;; Refresh the detail buffer the run was started from, so the
-               ;; step's new state shows up without a manual `g'.  Guarded on
-               ;; it still being a live detail buffer: the user may have
-               ;; killed or navigated it during the (long) run.
-               (when (and (buffer-live-p detail-buf)
-                          (fboundp 'gp-detail-refresh))
-                 (with-current-buffer detail-buf
-                   (when (bound-and-true-p gp--pr)
-                     (gp-detail-refresh)))))
+         (when ok
+           (message "Deploy script finished for %S" name)
+           ;; A deploy to a shared environment can supersede what an
+           ;; EARLIER pr's successful deploy step left behind; that pr's
+           ;; own commit never changes, so only a repo-wide bust (not
+           ;; a re-scan of this one commit) can catch it -- see
+           ;; `gp-helm--deploy-cache-bust-repo'.
+           (when (fboundp 'gp-helm--deploy-cache-bust-repo)
+             (gp-helm--deploy-cache-bust-repo full-name)))
+         (unless ok
            (message "Deploy script failed for %S (%s); see %s"
-                    name (string-trim event) gp-pipeline-deploy-buffer)))))))
+                    name (string-trim event) gp-pipeline-deploy-buffer))
+         ;; Refresh the detail buffer the run was started from either way --
+         ;; a failure needs the spinner cleared just as much as a success
+         ;; needs the new state shown.  Guarded on it still being a live
+         ;; detail buffer: the user may have killed or navigated it during
+         ;; the (long) run.
+         (if ok
+             (when (and (buffer-live-p detail-buf) (fboundp 'gp-detail-refresh))
+               (with-current-buffer detail-buf
+                 (when (bound-and-true-p gp--pr)
+                   (gp-detail-refresh))))
+           (when (and (buffer-live-p detail-buf) (fboundp 'gp--detail-rerender))
+             (with-current-buffer detail-buf
+               (when (bound-and-true-p gp--pr)
+                 (gp--detail-rerender detail-buf))))))))))
 
 ;;;; Actions -------------------------------------------------------------------
 
@@ -783,13 +859,23 @@ point is not within a pipeline."
                          (error-message-string e)))))))
 
 (defun gp-detail-pipeline-trigger-or-run-manual ()
-  "Trigger the pipeline, or run a waiting manual step when point is on one."
+  "Trigger the pipeline, run a waiting manual step, or redeploy at point.
+Dispatches on the step section under point: a manual step still
+waiting runs via `gp-detail-pipeline-run-manual'; a manual step that
+already succeeded redeploys via `gp-detail-pipeline-redeploy'
+\(only offered with `gp-pipeline-deploy-script' configured -- see
+`gp-pipeline-step-redeployable-p'\); anything else triggers a fresh
+pipeline run."
   (interactive)
-  (let ((sec (magit-current-section)))
-    (if (and sec (object-of-class-p sec 'gp-pipeline-step-section)
-             (gp-pipeline-step-runnable-manual-p (oref sec value)))
-        (gp-detail-pipeline-run-manual)
-      (gp-detail-pipeline-trigger))))
+  (let* ((sec (magit-current-section))
+         (step (and sec (object-of-class-p sec 'gp-pipeline-step-section)
+                    (oref sec value))))
+    (cond
+     ((and step (gp-pipeline-step-runnable-manual-p step))
+      (gp-detail-pipeline-run-manual))
+     ((and step (gp-pipeline-step-redeployable-p step))
+      (gp-detail-pipeline-redeploy))
+     (t (gp-detail-pipeline-trigger)))))
 
 (defun gp-detail-pipeline-run-manual ()
   "Run the waiting manual step at point.
@@ -838,6 +924,33 @@ Only offered on a manual step that is still waiting."
                 (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
             (error (message "Could not run manual step: %s"
                             (error-message-string e))))))))
+
+(defun gp-detail-pipeline-redeploy ()
+  "Redeploy the already-successful manual step at point.
+Unlike `gp-detail-pipeline-run-manual' (a step still WAITING to run
+for the first time), this re-runs `gp-pipeline-deploy-script' for a
+step whose result is already SUCCESSFUL -- e.g. to push the same
+build again after a rollback, or because the target environment needs
+another pass.  Only offered when `gp-pipeline-step-redeployable-p'
+holds: the script is the only route that can act on this step at all,
+Bitbucket's API having no per-step re-run (BCLOUD-20050).
+
+Confirms first: unlike the first run of a gate, this is a deliberate
+repeat of something that already happened once."
+  (interactive)
+  (let* ((step (gp-pipeline--step-at-point))
+         (pp (gp-pipeline--at-point))
+         (pipeline (car pp))
+         (full-name (gp-pr-full-name gp--pr))
+         (branch (gp-pr-source-branch gp--pr))
+         (name (or (alist-get 'name step) "?")))
+    (unless (gp-pipeline-step-redeployable-p step)
+      (user-error "Step %S is not redeployable (needs `gp-pipeline-deploy-script' \
+and a SUCCESSFUL result; state: %s, result: %s)"
+                  name (or (gp-pipeline-step-state step) "?")
+                  (or (gp-pipeline-step-result step) "?")))
+    (when (yes-or-no-p (format "Redeploy already-successful step %S? " name))
+      (gp-pipeline--deploy-run full-name branch pipeline step gp--pr))))
 
 (defun gp-detail-pipeline-arm-deploy ()
   "Arm the manual step at point to run as soon as the build reaches it.

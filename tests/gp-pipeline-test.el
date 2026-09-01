@@ -309,6 +309,113 @@ cover this hint -- which is how it went stale once already."
       (gp-detail-pipeline-trigger-or-run-manual)
       (should (eq called 'manual)))))
 
+;;;; Redeploy an already-successful manual step --------------------------------
+
+(defconst gp-test--redeployed-step
+  '((uuid . "{step-uuid}") (name . "Deploy to LIVE")
+    (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
+    (trigger (type . "pipeline_step_trigger_manual"))))
+
+(ert-deftest gp-test-pipeline-step-redeployable-p ()
+  "Only a manual, already-SUCCESSFUL step is redeployable, and only
+with a deploy script configured -- Bitbucket's API has no other way
+to act on a finished step."
+  (let ((gp-pipeline-deploy-script (list "/bin/true")))
+    (should (gp-pipeline-step-redeployable-p gp-test--redeployed-step))
+    ;; still waiting (not yet run) -- that is `runnable', not `redeployable'
+    (should-not (gp-pipeline-step-redeployable-p gp-test--deploy-step))
+    ;; a non-manual step never qualifies regardless of result
+    (should-not (gp-pipeline-step-redeployable-p
+                 '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))))
+    ;; a failed manual step is not "redeployable" by this predicate
+    (should-not (gp-pipeline-step-redeployable-p
+                 '((state (name . "COMPLETED") (result (name . "FAILED")))
+                   (trigger (type . "pipeline_step_trigger_manual"))))))
+  ;; with no script configured, nothing is ever redeployable
+  (let ((gp-pipeline-deploy-script nil))
+    (should-not (gp-pipeline-step-redeployable-p gp-test--redeployed-step))))
+
+(ert-deftest gp-test-pipeline-redeploy-hint-shown-when-configured ()
+  "A successful manual step advertises [redeploy ▸ T] only when a
+deploy script is configured to act on it."
+  (let ((gp-pipeline-deploy-script (list "/bin/true")))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (magit-insert-section (gp-root)
+          (gp-pipeline--insert-step gp-test--redeployed-step)))
+      (should (string-match-p "\\[redeploy ▸ T\\]"
+                              (substring-no-properties (buffer-string))))))
+  (let ((gp-pipeline-deploy-script nil))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (magit-insert-section (gp-root)
+          (gp-pipeline--insert-step gp-test--redeployed-step)))
+      (should-not (string-match-p "\\[redeploy"
+                                  (substring-no-properties (buffer-string)))))))
+
+(ert-deftest gp-test-pipeline-trigger-or-run-manual-offers-redeploy ()
+  "`T' on an already-successful manual step redeploys, not re-triggers
+the whole pipeline."
+  (let ((gp-pipeline-deploy-script (list "/bin/true"))
+        (called nil))
+    (cl-letf (((symbol-function 'magit-current-section)
+               (lambda ()
+                 (let ((s (gp-pipeline-step-section)))
+                   (oset s value gp-test--redeployed-step) s)))
+              ((symbol-function 'gp-detail-pipeline-redeploy)
+               (lambda () (setq called 'redeploy)))
+              ((symbol-function 'gp-detail-pipeline-run-manual)
+               (lambda () (setq called 'manual)))
+              ((symbol-function 'gp-detail-pipeline-trigger)
+               (lambda () (setq called 'trigger))))
+      (gp-detail-pipeline-trigger-or-run-manual)
+      (should (eq called 'redeploy)))))
+
+(ert-deftest gp-test-pipeline-redeploy-rejects-non-redeployable-step ()
+  "Calling `gp-detail-pipeline-redeploy' directly on a step that is not
+redeployable is a clear user error, not a silent no-op or a crash."
+  (let ((gp-pipeline-deploy-script (list "/bin/true"))
+        (gp--pr '((id . 1) (source (branch (name . "b"))))))
+    (cl-letf (((symbol-function 'gp-pipeline--step-at-point)
+               (lambda () gp-test--deploy-step))  ;; HALTED, not SUCCESSFUL
+              ((symbol-function 'gp-pipeline--at-point)
+               (lambda () (cons gp-test--deploy-pipeline nil))))
+      (should-error (gp-detail-pipeline-redeploy) :type 'user-error))))
+
+(ert-deftest gp-test-pipeline-redeploy-confirms-then-runs-deploy-script ()
+  "A confirmed redeploy invokes the same deploy-script path as the
+first manual run, not a fresh pipeline trigger or the browser."
+  (let* ((gp-pipeline-deploy-script (list "/bin/true"))
+         (gp--pr '((id . 1) (source (branch (name . "b")))))
+         (deploy-args nil))
+    (cl-letf (((symbol-function 'gp-pipeline--step-at-point)
+               (lambda () gp-test--redeployed-step))
+              ((symbol-function 'gp-pipeline--at-point)
+               (lambda () (cons gp-test--deploy-pipeline nil)))
+              ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+              ((symbol-function 'gp-pipeline--deploy-run)
+               (lambda (&rest args) (setq deploy-args args))))
+      (gp-detail-pipeline-redeploy)
+      (should deploy-args)
+      (should (equal (nth 3 deploy-args) gp-test--redeployed-step)))))
+
+(ert-deftest gp-test-pipeline-redeploy-declines-without-confirmation ()
+  "Answering no to the confirmation prompt runs nothing."
+  (let* ((gp-pipeline-deploy-script (list "/bin/true"))
+         (gp--pr '((id . 1) (source (branch (name . "b")))))
+         (ran nil))
+    (cl-letf (((symbol-function 'gp-pipeline--step-at-point)
+               (lambda () gp-test--redeployed-step))
+              ((symbol-function 'gp-pipeline--at-point)
+               (lambda () (cons gp-test--deploy-pipeline nil)))
+              ((symbol-function 'yes-or-no-p) (lambda (&rest _) nil))
+              ((symbol-function 'gp-pipeline--deploy-run)
+               (lambda (&rest _) (setq ran t))))
+      (gp-detail-pipeline-redeploy)
+      (should-not ran))))
+
 (ert-deftest gp-test-pipeline-render-empty-is-noop ()
   (should (equal (gp-test--render-pipelines nil) "")))
 
@@ -524,6 +631,59 @@ refreshed and the finished deploy sat stale until a manual `g'."
           (should (eq refreshed detail)))
       (kill-buffer detail)
       (delete-file script))))
+
+(ert-deftest gp-test-deploy-run-registers-and-clears-step-while-running ()
+  "The step id is registered in `gp-pipeline--deploy-running' for the
+life of the process and removed once it exits, on success AND failure
+\(a failed redeploy must not leave the spinner running forever\)."
+  (let* ((detail (generate-new-buffer " *gp-detail-fake*"))
+         (script (make-temp-file "gp-deploy-test" nil ".sh"))
+         (step '((uuid . "{redeploy-step}") (name . "Deploy to DEV"))))
+    (unwind-protect
+        (progn
+          (with-temp-file script (insert "#!/bin/sh\nexit 1\n"))
+          (set-file-modes script #o755)
+          (with-current-buffer detail
+            (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
+          (let ((gp-pipeline-deploy-script (list script))
+                (gp-pipeline-deploy-notify nil))
+            (with-current-buffer detail
+              (gp-pipeline--deploy-run
+               "acme/web" "b" gp-test--deploy-pipeline step '((id . 1))))
+            ;; registered immediately, before the process has had a chance
+            ;; to finish
+            (should (gp-pipeline--deploy-running-p step))
+            (let ((deadline (+ (float-time) 5)))
+              (while (and (gp-pipeline--deploy-running-p step)
+                          (< (float-time) deadline))
+                (accept-process-output nil 0.05)))
+            ;; cleared even though the script exited non-zero
+            (should-not (gp-pipeline--deploy-running-p step))))
+      (kill-buffer detail)
+      (delete-file script))))
+
+(ert-deftest gp-test-deploy-running-step-shows-spinner-and-elapsed ()
+  "A step registered as deploying shows the spinner glyph and a live
+elapsed-time counter, overriding whatever forge-reported glyph it had
+\(a redeploy target is SUCCESSFUL the whole time our script runs --
+the forge has no idea a local process is acting on it\)."
+  (let ((step '((uuid . "{spin-step}") (name . "Deploy to DEV")
+                (state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))))
+    (puthash "{spin-step}" (- (float-time) 5) gp-pipeline--deploy-running)
+    (unwind-protect
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (magit-insert-section (gp-root)
+              (gp-pipeline--insert-step step)))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "\\[deploying…\\]" text))
+            ;; not the stale ✔ SUCCESSFUL glyph
+            (should-not (string-match-p "✔" text)))
+          ;; the elapsed text is tagged for the shared spinner timer to retick
+          (should (text-property-not-all (point-min) (point-max)
+                                         'gp-pipeline-elapsed nil)))
+      (remhash "{spin-step}" gp-pipeline--deploy-running))))
 
 (ert-deftest gp-test-deploy-run-busts-repo-deploy-cache-on-success ()
   "A finished deploy busts the WHOLE repo's cached deploy verdicts, not
