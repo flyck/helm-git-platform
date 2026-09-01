@@ -314,7 +314,22 @@ there is still work in flight, so wait."
            (pipeline (car run))
            (steps (cdr run))
            (step (cl-find (gp-deploy-watch-step-name w) steps
-                          :key (lambda (s) (alist-get 'name s)) :test #'equal)))
+                          :key (lambda (s) (alist-get 'name s)) :test #'equal))
+           ;; Bitbucket reports an untouched manual step as NOT_RUN whether
+           ;; the build has genuinely reached it or simply has not gotten
+           ;; there yet -- `gp-pipeline-step-runnable-manual-p' cannot tell
+           ;; those apart on its own (see `gp-dw-test--unreached-gate').
+           ;; Something still RUNNING AHEAD OF the target is the only
+           ;; reliable signal that its NOT_RUN has not actually been
+           ;; reached yet -- same reasoning `gp-pipeline--manual-gate-open-p'
+           ;; already uses for the pipeline-label ⏸ glyph.  Scoped to steps
+           ;; strictly before the target (not every step in the run): the
+           ;; target's OWN state is never "finished" while genuinely
+           ;; waiting, so including it would misread every open gate as
+           ;; still blocked on itself.
+           (nothing-running-before-target
+            (and step (not (cl-some #'gp-pipeline-step-running-p
+                                    (gp-deploy-watch--steps-before w steps))))))
       (cond
        ;; A failed fetch reports nil exactly as a pipeline-less branch does,
        ;; so it cannot be read as "the run vanished" -- keep waiting.
@@ -338,7 +353,7 @@ there is still work in flight, so wait."
        ;; The target itself is open -- checked BEFORE the blocking-gate clause
        ;; so a target that is ready is fired now, never deferred behind
        ;; something that is no longer in its way.
-       ((gp-pipeline-step-runnable-manual-p step)
+       ((and nothing-running-before-target (gp-pipeline-step-runnable-manual-p step))
         (gp-deploy-watch--cancel-timer w)
         (gp-deploy-watch--set-state w 'firing "gate open on build %s; triggering"
                                     (or (gp-pipeline-number pipeline) "?"))
@@ -346,7 +361,11 @@ there is still work in flight, so wait."
        ;; An earlier gate is open and in the way: press it, then keep
        ;; waiting for the target.  This is what makes an armed `deploy-live\'
        ;; walk the chain instead of parking on `deploy-dev\' forever.
-       ((gp-deploy-watch--blocking-gate w steps)
+       ;; `nothing-running-before-target' is a valid (if slightly
+       ;; conservative) proxy for "nothing before THIS gate": the blocking
+       ;; gate is itself one of the steps before the target, so anything
+       ;; running ahead of the target is also running ahead of it.
+       ((and nothing-running-before-target (gp-deploy-watch--blocking-gate w steps))
         (gp-deploy-watch--fire-blocking w pipeline
                                         (gp-deploy-watch--blocking-gate w steps)))
        ;; Nothing left running and the gate never opened -- waiting on this

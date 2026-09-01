@@ -37,9 +37,17 @@
 
 (defun gp-dw-test--unreached-gate (name)
   "Return a manual step NAME the build has not reached yet.
-Deliberately NOT state NOT_RUN: Bitbucket counts that as pending, and
-therefore already startable (`bitbucket-pipeline-step-pending-p'), so
-it would be a gate that is open rather than one still to come."
+Modelled as IN_PROGRESS rather than the NOT_RUN Bitbucket actually
+reports for an untouched manual step: NOT_RUN alone is ambiguous
+between \"ready to press\" and \"not reached yet\", so
+`gp-deploy-watch--consider' also checks whether anything earlier in
+the run is still running (see `nothing-running-before-target' there)
+before trusting a NOT_RUN gate -- see
+`gp-test-dw-not-run-gate-behind-a-running-step-does-not-fire' for
+that exact case.  This helper stays IN_PROGRESS anyway: it is a
+distinct, unambiguous-on-its-own way to say \"not reachable right
+now\" that most of this file's tests do not otherwise need an
+earlier running step to establish."
   (gp-dw-test--step name '(state (name . "IN_PROGRESS"))))
 
 (defun gp-dw-test--pending-auto (name)
@@ -136,6 +144,30 @@ waits for the backend to report the step runnable."
             ;; an earlier step still running, and the gate NOT yet startable
             (list (gp-dw-test--pending-auto "test")
                   (gp-dw-test--unreached-gate "deploy-dev")))))
+      (should-not fired)
+      (should (eq (gp-deploy-watch-state w) 'waiting)))))
+
+(ert-deftest gp-test-dw-not-run-gate-behind-a-running-step-does-not-fire ()
+  "Regression: the gate genuinely reports NOT_RUN (not the
+`gp-dw-test--unreached-gate' IN_PROGRESS stand-in) while an earlier
+AUTOMATIC step is still running -- this is exactly what a live build
+looks like before it reaches the gate, and it must not be read as
+open.  Before this fix, arming `A' on a step behind a running build
+fired (and then failed) within under a second, because Bitbucket's
+NOT_RUN is ambiguous between \"ready to press\" and \"not reached
+yet\" and only checking the target step's own state could not tell
+those apart -- see `gp-pipeline--manual-gate-open-p', which solves
+the identical ambiguity for the pipeline-label ⏸ glyph."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm))
+          (fired nil))
+      (cl-letf (((symbol-function 'gp-deploy-watch--fire)
+                 (lambda (&rest _) (setq fired t))))
+        (gp-deploy-watch--consider
+         w (gp-dw-test--data
+            gp-dw-test--running-pipeline
+            (list (gp-dw-test--pending-auto "build")
+                  (gp-dw-test--step "deploy-dev" '(state (name . "NOT_RUN")))))))
       (should-not fired)
       (should (eq (gp-deploy-watch-state w) 'waiting)))))
 

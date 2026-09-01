@@ -30,6 +30,18 @@ reload() {
                       (or (string-suffix-p \"-mode-map\" (symbol-name s))
                           (string-suffix-p \"-map\" (symbol-name s))))
              (makunbound s))))
+        ;; defface has the same already-defined problem, but faces aren't
+        ;; unbound via makunbound -- (get s 'face-defface-spec) is what a
+        ;; plain reload leaves stale, so an edited :inherit/colour silently
+        ;; keeps showing the old one until this resets it.
+        (mapatoms
+         (lambda (s)
+           (when (and (facep s)
+                      (let ((n (symbol-name s)))
+                        (or (string-prefix-p \"bitbucket-\" n)
+                            (string-prefix-p \"gp-\" n)
+                            (string-prefix-p \"git-platform\" n))))
+             (face-spec-set s nil 'reset))))
         ;; load components first, the umbrella (helm-git-platform.el) last so
         ;; its with-eval-after-load bodies see freshly-defined keymaps
         (dolist (f (directory-files \"$DIR\" t \"\\\\.el\\\\'\"))
