@@ -104,6 +104,8 @@ it, so it confirms by default."
   branch         ; source branch the pipeline runs on
   commit         ; head commit the run must belong to, or nil for any
   step-name      ; the manual step's name -- matched across refetches
+  pipeline-id    ; uuid of the run this watcher is currently following, or
+                 ; nil before its first sighting -- see `gp-deploy-watch--steps-of'
   pr             ; the PR alist, for the deploy script's environment
   state          ; waiting | firing | done | failed | cancelled
   detail         ; short human string about the current state
@@ -222,11 +224,28 @@ does not need telling."
           gp-deploy-watch-timeout)))
 
 (defun gp-deploy-watch--steps-of (w data)
-  "Return (PIPELINE . STEPS) for the run carrying watcher W's step in DATA."
+  "Return (PIPELINE . STEPS) for the run watcher W is following in DATA.
+
+Once W has followed a run (`gp-deploy-watch-pipeline-id' is set), only
+that exact run counts as a hit: matching by step *name* alone against
+whatever the branch/commit fetch happens to return would let an
+unrelated later run on the same branch and commit -- e.g. one Bitbucket
+fires after the PR has already merged -- be silently mistaken for the
+build the watcher is meant to be walking, and fired against.  Before
+the first sighting (`pipeline-id' still nil), any run with a
+name-matching step is adopted and its id recorded as the run to follow
+from then on; `gp-deploy-watch--fire-blocking' updates it again each
+time pressing an earlier gate starts a new run, so the lineage moves
+forward only through runs the watcher itself has seen or caused."
   (catch 'hit
     (pcase-dolist (`(,pipeline . ,steps) (plist-get data :current))
-      (when (cl-find (gp-deploy-watch-step-name w) steps
-                     :key (lambda (s) (alist-get 'name s)) :test #'equal)
+      (when (and (or (null (gp-deploy-watch-pipeline-id w))
+                     (equal (gp-pipeline-id pipeline)
+                            (gp-deploy-watch-pipeline-id w)))
+                 (cl-find (gp-deploy-watch-step-name w) steps
+                          :key (lambda (s) (alist-get 'name s)) :test #'equal))
+        (unless (gp-deploy-watch-pipeline-id w)
+          (setf (gp-deploy-watch-pipeline-id w) (gp-pipeline-id pipeline)))
         (throw 'hit (cons pipeline steps))))
     nil))
 
@@ -391,7 +410,13 @@ Unlike firing the target, this does NOT finish the watcher: pressing
 keeps waiting afterwards.  Each gate is pressed once -- recorded on
 the watcher -- because a gate stays reported as open for a moment
 after it is triggered, and pressing it every poll would launch it
-repeatedly."
+repeatedly.
+
+Re-triggering (Bitbucket's only route to a per-step press) starts a
+NEW pipeline run with its own id, so W's lineage is cleared here: the
+next poll's fetch will not carry PIPELINE's id any more, and
+`gp-deploy-watch--steps-of' must be free to adopt whatever new run
+appears rather than waiting forever for an id that is now stale."
   (let ((name (or (alist-get 'name gate) "?")))
     (if (member name (gp-deploy-watch-fired-gates w))
         (progn
@@ -408,6 +433,7 @@ repeatedly."
               (gp-pipeline-run-manual-step (gp-deploy-watch-full-name w)
                                            (gp-deploy-watch-branch w)
                                            pipeline gate))
+            (setf (gp-deploy-watch-pipeline-id w) nil)
             (gp-deploy-watch--log w "pressed %S; still waiting for %S"
                                   name (gp-deploy-watch-step-name w))
             (gp-deploy-watch--rearm w))
@@ -426,7 +452,12 @@ Two routes, in order of how faithfully they do what was asked:
 
 1. `gp-pipeline-deploy-script', when configured.  The only route that
    advances THIS build's gate in place, which is precisely what
-   waiting for the gate was for.
+   waiting for the gate was for.  Asynchronous, so W is left `firing'
+   here and only moves to `done'/`failed' once
+   `gp-pipeline--deploy-run's ON-EXIT callback reports the script's
+   real exit status -- spawning the process is not the same as the
+   deploy having happened, and a guardrail in the script (refusing a
+   production step, say) can fail it well after this call returns.
 2. Otherwise the backend's own manual-step API
    \(`gp-pipeline-run-manual-step'), given PIPELINE and STEP.  On
    Bitbucket that is the
@@ -444,11 +475,16 @@ you waited twenty minutes for has just started over."
         (if gp-pipeline-deploy-script
             (progn
               (gp-deploy-watch--log w "running `gp-pipeline-deploy-script'")
-              (gp-pipeline--deploy-run full-name branch pipeline step
-                                       (gp-deploy-watch-pr w))
-              (gp-deploy-watch--set-state
-               w 'done "deploy script started for %S"
-               (gp-deploy-watch-step-name w)))
+              (gp-pipeline--deploy-run
+               full-name branch pipeline step (gp-deploy-watch-pr w)
+               (lambda (ok)
+                 (if ok
+                     (gp-deploy-watch--set-state
+                      w 'done "deploy script finished for %S"
+                      (gp-deploy-watch-step-name w))
+                   (gp-deploy-watch--set-state
+                    w 'failed "deploy script failed for %S; see %s"
+                    (gp-deploy-watch-step-name w) gp-pipeline-deploy-buffer)))))
           (gp-deploy-watch--log
            w "no deploy script; using the backend's manual-step API")
           (gp-pipeline-run-manual-step full-name branch pipeline step)

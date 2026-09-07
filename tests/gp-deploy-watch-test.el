@@ -197,6 +197,45 @@ the identical ambiguity for the pipeline-label ⏸ glyph."
       (should-not fired)
       (should (eq (gp-deploy-watch-state w) 'waiting)))))
 
+(ert-deftest gp-test-dw-ignores-an-unrelated-run-once-a-run-is-adopted ()
+  "Once the watcher has followed a run, a DIFFERENT pipeline on the same
+branch/commit with a name-matching step must not be mistaken for it --
+e.g. a stray post-merge run Bitbucket fires on the same commit after
+the PR that armed the watcher has already merged."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-dev"))
+          (other-pipeline '((build_number . 999) (uuid . "{p999}")
+                            (state (name . "IN_PROGRESS") (stage (name . "RUNNING")))))
+          (fired nil))
+      (cl-letf (((symbol-function 'gp-deploy-watch--fire)
+                 (lambda (&rest _) (setq fired t))))
+        ;; first sighting: adopts {p728} as the run to follow
+        (gp-deploy-watch--consider
+         w (gp-dw-test--data gp-dw-test--running-pipeline
+                             (list (gp-dw-test--unreached-gate "deploy-dev"))))
+        (should (equal (gp-deploy-watch-pipeline-id w) "{p728}"))
+        ;; a later poll surfaces an unrelated run, {p999}, with an open
+        ;; gate of the same name -- must be ignored, not fired on
+        (gp-deploy-watch--consider
+         w (gp-dw-test--data other-pipeline
+                             (list (gp-dw-test--gate "deploy-dev"))))
+        (should-not fired)
+        (should (eq (gp-deploy-watch-state w) 'waiting))
+        (should (equal (gp-deploy-watch-pipeline-id w) "{p728}"))))))
+
+(ert-deftest gp-test-dw-fire-blocking-clears-lineage-for-the-new-run ()
+  "Re-triggering to press an earlier gate starts a NEW pipeline run on
+Bitbucket, so the watcher's lineage must be free to adopt whatever run
+appears next, not keep waiting for the id that just became stale."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-live")))
+      (cl-letf (((symbol-function 'gp-pipeline-run-manual-step) #'ignore))
+        (setf (gp-deploy-watch-pipeline-id w) "{p728}")
+        (let ((gp-pipeline-deploy-script nil))
+          (gp-deploy-watch--fire-blocking
+           w gp-dw-test--running-pipeline (gp-dw-test--gate "deploy-dev"))))
+      (should-not (gp-deploy-watch-pipeline-id w)))))
+
 (ert-deftest gp-test-dw-gives-up-when-the-build-finishes-unfired ()
   "A finished run will never open the gate, so waiting on it is over."
   (gp-dw-test--with-clean-registry
@@ -263,12 +302,19 @@ must not be read as \"the build vanished\"."
 ;;;; Firing routes -------------------------------------------------------------------
 
 (ert-deftest gp-test-dw-fires-via-the-deploy-script-when-configured ()
-  "A configured script is the only route that advances THIS build's gate."
+  "A configured script is the only route that advances THIS build's gate.
+
+Spawning the script is not the same as it having succeeded: the watcher
+must stay `firing' until the script's real exit status comes back
+through the ON-EXIT callback, not flip to `done' the moment the process
+is merely started."
   (gp-dw-test--with-clean-registry
     (let ((w (gp-dw-test--arm))
-          (script-run nil))
+          (script-run nil)
+          (on-exit nil))
       (cl-letf (((symbol-function 'gp-pipeline--deploy-run)
-                 (lambda (&rest _) (setq script-run t)))
+                 (lambda (_full-name _branch _pipeline _step _pr callback)
+                   (setq script-run t on-exit callback)))
                 ((symbol-function 'gp-pipeline-run-manual-step)
                  (lambda (&rest _) (error "must not re-trigger with a script set")))
                 ((symbol-function 'gp-deploy-watch--notify) #'ignore))
@@ -276,7 +322,29 @@ must not be read as \"the build vanished\"."
           (gp-deploy-watch--fire w gp-dw-test--running-pipeline
                                  (gp-dw-test--gate "deploy-dev"))))
       (should script-run)
+      ;; spawning the process does not by itself mean the deploy succeeded
+      (should-not (eq (gp-deploy-watch-state w) 'done))
+      (funcall on-exit t)
       (should (eq (gp-deploy-watch-state w) 'done)))))
+
+(ert-deftest gp-test-dw-deploy-script-failure-is-recorded-not-a-success ()
+  "A script that runs but exits non-zero (a guardrail refusing a
+production step, say) must land the watcher on `failed', not `done' --
+the watcher only knows the process was spawned until ON-EXIT says
+otherwise."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm))
+          (on-exit nil))
+      (cl-letf (((symbol-function 'gp-pipeline--deploy-run)
+                 (lambda (_full-name _branch _pipeline _step _pr callback)
+                   (setq on-exit callback)))
+                ((symbol-function 'gp-deploy-watch--notify) #'ignore))
+        (let ((gp-pipeline-deploy-script '("/bin/true")))
+          (gp-deploy-watch--fire w gp-dw-test--running-pipeline
+                                 (gp-dw-test--gate "deploy-dev"))))
+      (should-not (eq (gp-deploy-watch-state w) 'failed))
+      (funcall on-exit nil)
+      (should (eq (gp-deploy-watch-state w) 'failed)))))
 
 (ert-deftest gp-test-dw-falls-back-to-the-api-without-a-script ()
   "With no script it uses the backend's manual-step API -- and says that

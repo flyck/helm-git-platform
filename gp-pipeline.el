@@ -714,11 +714,18 @@ resolved are omitted rather than exported empty, so a script can tell
       (when (and (cdr p) (not (equal (cdr p) "")))
         (push (format "%s=%s" (car p) (cdr p)) env)))))
 
-(defun gp-pipeline--deploy-run (full-name branch pipeline step pr)
+(defun gp-pipeline--deploy-run (full-name branch pipeline step pr &optional on-exit)
   "Run `gp-pipeline-deploy-script' for STEP, streaming output to a buffer.
 Asynchronous: browser automation takes tens of seconds, and blocking
 Emacs on it is exactly what the async work in this package removed.
 Refreshes the detail view when the script exits successfully.
+
+ON-EXIT, if given, is called with a single OK argument once the
+script's process exits -- non-nil for a clean exit, nil otherwise.
+Callers that need to know the script's real outcome (rather than
+merely that it was started) should use this instead of assuming
+success once `make-process' returns, since the process is still
+running at that point.
 
 While the process runs, STEP's id is registered in
 `gp-pipeline--deploy-running' so the step line shows a spinner and a
@@ -805,7 +812,8 @@ local process is running at all."
            (when (and (buffer-live-p detail-buf) (fboundp 'gp--detail-rerender))
              (with-current-buffer detail-buf
                (when (bound-and-true-p gp--pr)
-                 (gp--detail-rerender detail-buf))))))))))
+                 (gp--detail-rerender detail-buf)))))
+         (when on-exit (funcall on-exit ok)))))))
 
 ;;;; Actions -------------------------------------------------------------------
 
