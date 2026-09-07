@@ -22,8 +22,18 @@
   '((id . 42) (title . "Add the widget toggle")
     (source (branch (name . "feature/widget"))
             (commit (hash . "abc123")))
-    (destination (repository (full_name . "acme/web") (slug . "web"))))
+    (destination (branch (name . "main"))
+                 (repository (full_name . "acme/web") (slug . "web"))))
   "A Bitbucket-shaped PR the watcher can read repo/branch/commit off.")
+
+(defconst gp-dw-test--merged-pr
+  '((id . 42) (title . "Add the widget toggle") (state . "MERGED")
+    (source (branch (name . "feature/widget"))
+            (commit (hash . "abc123")))
+    (merge_commit (hash . "deadbeef99"))
+    (destination (branch (name . "main"))
+                 (repository (full_name . "acme/web") (slug . "web"))))
+  "GP-DW-TEST--PR after merge: source branch is gone, merge_commit is set.")
 
 (defun gp-dw-test--step (name &rest kv)
   "Return a manual step called NAME, with KV merged over the defaults."
@@ -544,6 +554,27 @@ list and the log header, so an outcome looks the same wherever it is read."
           (should (gp-deploy-watch-active-p w))
           (gp-deploy-watch-toggle-at-point)
           (should (eq (gp-deploy-watch-state w) 'cancelled)))))))
+
+(ert-deftest gp-test-dw-toggle-on-merged-pr-arms-destination-not-dead-source ()
+  "A merged PR's source branch is typically deleted and its old
+pipeline has already finished one way or the other -- there is
+nothing left to watch there.  Arming must target the DESTINATION
+branch and the merge commit, the run that actually deploys, not the
+(dead) source branch and its now-historical commit."
+  (gp-dw-test--with-clean-registry
+    (let ((gp--pr gp-dw-test--merged-pr))
+      (cl-letf (((symbol-function 'gp-pipeline--step-at-point)
+                 (lambda () (gp-dw-test--gate "deploy-dev")))
+                ((symbol-function 'gp-detail-refresh) #'ignore))
+        (gp-deploy-watch-toggle-at-point)
+        (let ((w (gp-deploy-watch-get "acme/web" "main" "deploy-dev")))
+          (should w)
+          (should (gp-deploy-watch-active-p w))
+          (should (equal (gp-deploy-watch-branch w) "main"))
+          (should (equal (gp-deploy-watch-commit w) "deadbeef99"))
+          ;; nothing was armed against the dead source branch
+          (should-not (gp-deploy-watch-get "acme/web" "feature/widget"
+                                           "deploy-dev")))))))
 
 (ert-deftest gp-test-dw-only-triggerable-steps-are-schedulable ()
   "Only a step somebody could press can be scheduled -- waiting for a

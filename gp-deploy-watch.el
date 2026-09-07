@@ -813,15 +813,24 @@ gates standing in the way: scheduling `deploy-live\' means getting to
 live, which includes pressing the `deploy-dev\' gate on the route.  It
 does have to be *triggerable* \(`gp-deploy-watch-schedulable-p\'): a
 step that runs on its own has no button for the watcher to press, so
-scheduling it would schedule nothing."
+scheduling it would schedule nothing.
+
+A merged PR's source branch is typically gone (Bitbucket deletes it
+on merge by default) and its old pipeline has already finished one way
+or the other -- there is nothing left to watch there.  The run that
+actually deploys is the one the merge produced on the DESTINATION
+branch, for the merge commit, so a merged PR arms against those
+instead of the (dead) source branch and its now-historical commit."
   (interactive)
   (unless (boundp 'gp--pr) (user-error "Not in a pull-request buffer"))
   (let* ((step (gp-pipeline--step-at-point))
          (name (or (alist-get 'name step)
                    (user-error "No pipeline step at point")))
          (pr gp--pr)
+         (merged (gp-pr-merged-p pr))
          (full-name (gp-pr-full-name pr))
-         (branch (gp-pr-source-branch pr))
+         (branch (if merged (gp-pr-destination-branch pr) (gp-pr-source-branch pr)))
+         (commit (if merged (gp-pr-merge-commit pr) (gp-pr-source-commit pr)))
          (existing (gp-deploy-watch-get full-name branch name)))
     (cond
      ((and existing (gp-deploy-watch-active-p existing))
@@ -844,8 +853,9 @@ scheduling it would schedule nothing."
                 (yes-or-no-p
                  (format "Run %S as soon as the build reaches it (approving any gates in the way)? "
                          name)))
-        (gp-deploy-watch-arm full-name branch (gp-pr-source-commit pr) name pr)
-        (message "gp: watching %S; earlier gates will be approved on the way" name)
+        (gp-deploy-watch-arm full-name branch commit name pr)
+        (message "gp: watching %S%s; earlier gates will be approved on the way"
+                 name (if merged (format " on %s (merged)" branch) ""))
         (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))))))
 
 (provide 'gp-deploy-watch)
