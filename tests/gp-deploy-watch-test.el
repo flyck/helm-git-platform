@@ -652,12 +652,40 @@ pressing it every poll would launch it again and again."
           (gp-deploy-watch--consider w data)))
       (should (= presses 1)))))
 
-(ert-deftest gp-test-dw-target-wins-over-an-earlier-open-gate ()
-  "When the target itself is ready it fires now, never deferred behind
-a gate that is no longer in its way."
+(ert-deftest gp-test-dw-unpressed-earlier-gate-blocks-the-target-even-if-open ()
+  "Regression: Bitbucket can report an untouched earlier manual gate as
+open/PAUSED at the same time as the target -- e.g. deploy-live's own
+NOT_RUN reads as runnable while deploy-dev sits paused, never pressed.
+The target must NOT fire in that case: it has to press deploy-dev
+first, exactly as it would if only deploy-dev were open.  Before this
+fix, an armed `deploy-live' could fire straight past an untouched
+`deploy-dev' and immediately fail (Bitbucket refuses to run a step
+behind one that was never triggered)."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-live"))
+          (fired nil) (pressed nil))
+      (cl-letf (((symbol-function 'gp-deploy-watch--fire)
+                 (lambda (_w _p s) (setq fired (alist-get 'name s))))
+                ((symbol-function 'gp-pipeline-run-manual-step)
+                 (lambda (_f _b _p s) (push (alist-get 'name s) pressed) t)))
+        (let ((gp-pipeline-deploy-script nil))
+          (gp-deploy-watch--consider
+           w (gp-dw-test--data gp-dw-test--running-pipeline
+                               (list (gp-dw-test--gate "deploy-dev")
+                                     (gp-dw-test--gate "deploy-live"))))))
+      (should-not fired)
+      (should (equal pressed '("deploy-dev")))
+      (should (eq (gp-deploy-watch-state w) 'waiting)))))
+
+(ert-deftest gp-test-dw-target-fires-once-its-own-fired-gate-is-stale-open ()
+  "When THIS watcher already pressed the earlier gate (deploy-dev is in
+`fired-gates'), it reporting open a moment longer is the well-known
+just-triggered stale-reporting window, not a real block -- the target
+fires without re-pressing it."
   (gp-dw-test--with-clean-registry
     (let ((w (gp-dw-test--arm "deploy-live"))
           (fired nil))
+      (setf (gp-deploy-watch-fired-gates w) '("deploy-dev"))
       (cl-letf (((symbol-function 'gp-deploy-watch--fire)
                  (lambda (_w _p s) (setq fired (alist-get 'name s)))))
         (gp-deploy-watch--consider
