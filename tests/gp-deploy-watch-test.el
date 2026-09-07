@@ -677,22 +677,29 @@ behind one that was never triggered)."
       (should (equal pressed '("deploy-dev")))
       (should (eq (gp-deploy-watch-state w) 'waiting)))))
 
-(ert-deftest gp-test-dw-target-fires-once-its-own-fired-gate-is-stale-open ()
-  "When THIS watcher already pressed the earlier gate (deploy-dev is in
-`fired-gates'), it reporting open a moment longer is the well-known
-just-triggered stale-reporting window, not a real block -- the target
-fires without re-pressing it."
+(ert-deftest gp-test-dw-fired-gate-still-blocks-target-until-completed ()
+  "Regression: pressing deploy-dev only starts it -- it does not wait
+for it to finish.  Being in `fired-gates' must stop it being pressed
+AGAIN, never exempt it from the completion check: deploy-dev genuinely
+running (not just reporting stale-open) must still block deploy-live,
+or an armed deploy-live could fire while dev's own deploy is still
+in flight."
   (gp-dw-test--with-clean-registry
     (let ((w (gp-dw-test--arm "deploy-live"))
-          (fired nil))
+          (fired nil) (pressed nil))
       (setf (gp-deploy-watch-fired-gates w) '("deploy-dev"))
       (cl-letf (((symbol-function 'gp-deploy-watch--fire)
-                 (lambda (_w _p s) (setq fired (alist-get 'name s)))))
+                 (lambda (_w _p s) (setq fired (alist-get 'name s))))
+                ((symbol-function 'gp-pipeline-run-manual-step)
+                 (lambda (&rest _) (setq pressed t) t)))
         (gp-deploy-watch--consider
          w (gp-dw-test--data gp-dw-test--running-pipeline
-                             (list (gp-dw-test--gate "deploy-dev")
+                             (list (gp-dw-test--step
+                                    "deploy-dev" '(state (name . "IN_PROGRESS")))
                                    (gp-dw-test--gate "deploy-live")))))
-      (should (equal fired "deploy-live")))))
+      (should-not fired)
+      (should-not pressed)
+      (should (eq (gp-deploy-watch-state w) 'waiting)))))
 
 (ert-deftest gp-test-dw-automatic-step-ahead-is-not-pressed ()
   "An automatic step in the way is just work still to do, not a button."

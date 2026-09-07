@@ -334,31 +334,16 @@ there is still work in flight, so wait."
            (steps (cdr run))
            (step (cl-find (gp-deploy-watch-step-name w) steps
                           :key (lambda (s) (alist-get 'name s)) :test #'equal))
-           ;; Bitbucket reports an untouched manual step as NOT_RUN whether
-           ;; the build has genuinely reached it or simply has not gotten
-           ;; there yet -- `gp-pipeline-step-runnable-manual-p' cannot tell
-           ;; those apart on its own (see `gp-dw-test--unreached-gate').  A
-           ;; step ahead of the target poses no obstacle once it has actually
-           ;; COMPLETED, or once it is a manual gate THIS WATCHER has already
-           ;; pressed (`fired-gates') and is merely sitting in the moment a
-           ;; just-triggered gate keeps reporting open for -- anything else
-           ;; open-but-unpressed ahead of the target (an earlier manual gate
-           ;; nobody has touched yet, e.g. `deploy-dev' still genuinely
-           ;; PAUSED) blocks it exactly as surely as a step still running
-           ;; does, and unlike "running" it is not transient: it sits there
-           ;; until acted on, so treating only "running" as blocking let the
-           ;; target's own NOT_RUN read as "gate open" while an earlier gate
-           ;; was still sitting there, unpressed.  Scoped to steps strictly
-           ;; before the target (not every step in the run): the target's OWN
-           ;; state is never "finished" while genuinely waiting, so including
-           ;; it would misread every open gate as still blocked on itself.
+           ;; An untouched manual step reports NOT_RUN, same as one Bitbucket
+           ;; simply hasn't reached yet (`gp-pipeline-step-runnable-manual-p'
+           ;; can't tell those apart) -- so only a step ahead of the target
+           ;; that has actually COMPLETED counts as clear. Excludes the
+           ;; target itself, whose own state is never "finished" while
+           ;; genuinely waiting.
            (nothing-blocking-before-target
             (and step
-                 (cl-every
-                  (lambda (s)
-                    (or (equal (gp-pipeline-step-state s) "COMPLETED")
-                        (member (alist-get 'name s) (gp-deploy-watch-fired-gates w))))
-                  (gp-deploy-watch--steps-before w steps)))))
+                 (cl-every (lambda (s) (equal (gp-pipeline-step-state s) "COMPLETED"))
+                           (gp-deploy-watch--steps-before w steps)))))
       (cond
        ;; A failed fetch reports nil exactly as a pipeline-less branch does,
        ;; so it cannot be read as "the run vanished" -- keep waiting.
