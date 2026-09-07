@@ -516,6 +516,52 @@ list and the log header, so an outcome looks the same wherever it is read."
         (gp-deploy-watch--render-log w)
         (should (string-match-p "⚪" (substring-no-properties (buffer-string))))))))
 
+;;;; Mode-line ------------------------------------------------------------------
+
+(ert-deftest gp-test-dw-mode-line-empty-without-active-watchers ()
+  "Nothing armed means nothing shown -- no persistent zero-count clutter."
+  (gp-dw-test--with-clean-registry
+    (should (equal (gp-deploy-watch--mode-line) ""))))
+
+(ert-deftest gp-test-dw-mode-line-ignores-finished-watchers ()
+  "A watcher that has already finished is not \"active\" any more."
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm)))
+      (gp-deploy-watch-cancel-watcher w)
+      (should (equal (gp-deploy-watch--mode-line) "")))))
+
+(ert-deftest gp-test-dw-mode-line-shows-the-sole-watcher-by-name ()
+  (gp-dw-test--with-clean-registry
+    (gp-dw-test--arm "deploy-dev")
+    (should (string-match-p "deploy-dev"
+                            (substring-no-properties (gp-deploy-watch--mode-line))))))
+
+(ert-deftest gp-test-dw-mode-line-shows-a-count-with-more-than-one ()
+  (gp-dw-test--with-clean-registry
+    (gp-deploy-watch-arm "acme/web" "feature/widget" "abc123" "deploy-dev" gp-dw-test--pr)
+    (gp-deploy-watch-arm "acme/web" "feature/other" "abc123" "deploy-live" gp-dw-test--pr)
+    (should (string-match-p "2" (substring-no-properties (gp-deploy-watch--mode-line))))))
+
+(ert-deftest gp-test-dw-mode-line-cancel-cancels-the-sole-watcher ()
+  (gp-dw-test--with-clean-registry
+    (let ((w (gp-dw-test--arm "deploy-dev")))
+      (gp-deploy-watch-mode-line-cancel)
+      (should (eq (gp-deploy-watch-state w) 'cancelled)))))
+
+(ert-deftest gp-test-dw-mode-line-cancel-opens-the-list-with-several ()
+  (gp-dw-test--with-clean-registry
+    (let ((w1 (gp-deploy-watch-arm "acme/web" "feature/widget" "abc123"
+                                   "deploy-dev" gp-dw-test--pr))
+          (w2 (gp-deploy-watch-arm "acme/web" "feature/other" "abc123"
+                                   "deploy-live" gp-dw-test--pr))
+          (listed nil))
+      (cl-letf (((symbol-function 'gp-deploy-watch-list-show)
+                 (lambda () (setq listed t))))
+        (gp-deploy-watch-mode-line-cancel))
+      (should listed)
+      (should (gp-deploy-watch-active-p w1))
+      (should (gp-deploy-watch-active-p w2)))))
+
 (ert-deftest gp-test-dw-list-is-empty-without-watchers ()
   (gp-dw-test--with-clean-registry
     (with-temp-buffer

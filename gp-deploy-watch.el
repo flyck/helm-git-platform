@@ -689,12 +689,14 @@ until you already knew to press it once."
     (user-error "Not a watcher log buffer")))
 
 (defun gp-deploy-watch--refresh-buffers (w)
-  "Redraw whatever is showing watcher W: its log buffer and the list."
+  "Redraw whatever is showing watcher W: its log buffer, the list, and
+the global mode-line segment."
   (ignore-errors
     (when-let* ((buf (get-buffer (gp-deploy-watch--log-buffer-name w))))
       (when (buffer-live-p buf)
         (with-current-buffer buf (gp-deploy-watch--render-log w))))
-    (gp-deploy-watch--refresh-list-buffer)))
+    (gp-deploy-watch--refresh-list-buffer)
+    (force-mode-line-update t)))
 
 ;;;; The watcher list --------------------------------------------------------------
 
@@ -853,6 +855,51 @@ instead of the (dead) source branch and its now-historical commit."
         (message "gp: watching %S%s; earlier gates will be approved on the way"
                  name (if merged (format " on %s (merged)" branch) ""))
         (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))))))
+
+;;;; Global mode-line segment -----------------------------------------------------
+
+(defun gp-deploy-watch--active-watchers ()
+  "Return every active watcher, newest first."
+  (seq-filter #'gp-deploy-watch-active-p (gp-deploy-watch-list)))
+
+(defvar gp-deploy-watch--modeline-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m [mode-line mouse-1] #'gp-deploy-watch-list-show)
+    (define-key m [mode-line mouse-3] #'gp-deploy-watch-mode-line-cancel)
+    m)
+  "Keymap for the mode-line deploy-watch segment.")
+
+(defun gp-deploy-watch--mode-line ()
+  "Return the global mode-line segment for active deploy watchers, or \"\"."
+  (let ((active (gp-deploy-watch--active-watchers)))
+    (if (null active) ""
+      (propertize
+       (format " %s%s"
+               (gp-deploy-watch--state-glyph (gp-deploy-watch-state (car active)))
+               (if (cdr active)
+                   (format " %d deploys" (length active))
+                 (format " %s" (gp-deploy-watch-step-name (car active)))))
+       'face 'gp-deploy-watch-armed-face
+       'help-echo "Deploy watcher(s) — click to list, right-click to cancel"
+       'mouse-face 'mode-line-highlight
+       'local-map gp-deploy-watch--modeline-map))))
+
+(defun gp-deploy-watch-mode-line-cancel ()
+  "Cancel the sole active watcher, or open the list when there is more
+than one to choose from."
+  (interactive)
+  (let ((active (gp-deploy-watch--active-watchers)))
+    (cond
+     ((null active) (user-error "No active deploy watchers"))
+     ((null (cdr active))
+      (gp-deploy-watch-cancel-watcher (car active))
+      (message "gp: cancelled the watcher on %S"
+               (gp-deploy-watch-step-name (car active))))
+     (t (gp-deploy-watch-list-show)))))
+
+(unless (member '(:eval (gp-deploy-watch--mode-line)) mode-line-misc-info)
+  (setq mode-line-misc-info
+        (append mode-line-misc-info '((:eval (gp-deploy-watch--mode-line))))))
 
 (provide 'gp-deploy-watch)
 ;;; gp-deploy-watch.el ends here
