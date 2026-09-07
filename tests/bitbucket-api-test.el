@@ -572,5 +572,38 @@ of falling back."
       (should (equal (bitbucket-pull-request-diff "acme/repo" 180 "abc") "REAL DIFF"))
       (should (= calls 2)))))
 
+(ert-deftest bitbucket-test-review-tally-async-refetches-not-stale ()
+  "The async tally reflects the SERVER's current PR, not a stale local copy.
+Regression test: a PR object held in a list-level cache (e.g. Helm's
+`reviewing' cache) can go stale relative to Bitbucket -- another
+reviewer's vote does not invalidate that cache -- so the badge must
+come from a fresh fetch, not from re-deriving the tally off the
+passed-in PR's own (possibly stale) `participants'."
+  (bitbucket-mock-with-service
+    (let* ((stale-pr '((id . 180)
+                       (destination (repository (full_name . "acme/web-frontend")))
+                       (participants . [((role . "REVIEWER")
+                                         (approved . t)
+                                         (state . "approved"))])))
+           tally)
+      ;; the mock's single-PR fixture has no participants at all, so a
+      ;; correct refetch reports zero approvals despite the stale PR
+      ;; object claiming one.
+      (bitbucket-pr-review-tally-async stale-pr (lambda (v) (setq tally v)))
+      (should (equal tally '(:approved 0 :changes 0 :pending 0))))))
+
+(ert-deftest bitbucket-test-reviewers-async-refetches-not-stale ()
+  "The async per-reviewer breakdown also comes from a fresh fetch."
+  (bitbucket-mock-with-service
+    (let* ((stale-pr '((id . 180)
+                       (destination (repository (full_name . "acme/web-frontend")))
+                       (participants . [((role . "REVIEWER")
+                                         (approved . t)
+                                         (state . "approved")
+                                         (user (uuid . "{stale}")))])))
+           reviewers)
+      (bitbucket-pr-reviewers-async stale-pr (lambda (v) (setq reviewers v)))
+      (should (null reviewers)))))
+
 (provide 'bitbucket-api-test)
 ;;; bitbucket-api-test.el ends here

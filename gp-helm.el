@@ -411,11 +411,16 @@ reviewer (✅✅⏳); nil hides it."
 
 (defvar gp-helm--review-tally-cache (make-hash-table :test 'eql)
   "PR id -> review tally plist (see `gp-pr-review-tally').
-Bitbucket's tally is embedded in the PR object already (free, no
-network); GitHub's needs a fetch per PR (see `gp-pr-review-tally-async'),
-which would block the list one row at a time if called directly from
-`gp-helm--review-badge' -- so it's populated asynchronously here,
-exactly like `gp-helm--pipeline-cache' already does for build status.")
+Both backends do a per-PR fetch here (see `gp-pr-review-tally-async'):
+Bitbucket's tally lives on the PR object, but a PR served from
+`gp-helm--reviewing-cache'/`gp-cache-get' can be up to `gp-cache-ttl'
+stale, and another reviewer's vote does not invalidate that list
+cache -- so Bitbucket's async path refetches the single PR rather
+than re-deriving the tally from the (possibly stale) cached object.
+Either way this would block the list one row at a time if called
+directly from `gp-helm--review-badge' -- so it's populated
+asynchronously here, exactly like `gp-helm--pipeline-cache' already
+does for build status.")
 
 (defun gp-helm--format-review-tally (tally)
   "Return the reviewer badge string for TALLY, honouring `gp-helm-review-style'."
@@ -472,9 +477,9 @@ current without a dedicated poll."
   "PR id -> per-reviewer plists (see `gp-pr-reviewers-async').
 The aggregate tally in `gp-helm--review-tally-cache' cannot say WHO
 voted, which is what `gp-helm--covered-by-others-p' needs to exclude
-the user's own vote -- hence a second cache over the same data.
-Bitbucket answers from the already-embedded participants (no network);
-GitHub does a real per-PR fetch, exactly as the tally scan does.")
+the user's own vote -- hence a second cache over the same data.  Both
+backends do a real per-PR fetch, exactly as the tally scan does (see
+`gp-helm--review-tally-cache' for why Bitbucket refetches too).")
 
 (defun gp-helm--scan-reviewers-async (prs)
   "Fetch each PR's per-reviewer breakdown in parallel, caching by id.

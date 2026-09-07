@@ -529,6 +529,41 @@ Only `REVIEWER' participants are counted: approved (state
            (t (setq pending (1+ pending)))))))
     (list :approved approved :changes changes :pending pending)))
 
+(defun bitbucket-pr-review-tally-async (pr callback)
+  "Fetch PR's id/full-name fresh from Bitbucket, then CALLBACK with its tally.
+`bitbucket-pr-review-tally' reads PR's already-embedded `participants',
+which is exactly the data that goes stale in a cached PR-list entry
+\(see `gp-cache-get' / `gp-helm--reviewing-cache'): another reviewer's
+vote on Bitbucket does not invalidate our list cache, so a badge
+derived from the cached PR object can keep showing a vote that has
+since changed for up to `gp-cache-ttl' seconds.  Refetching PR here --
+bypassing the PR-object cache, not just the list cache -- is what
+makes approvals as fresh as `gp-helm--scan-review-tallies-async''s
+docstring already promises."
+  (let ((full-name (let-alist pr .destination.repository.full_name))
+        (id (alist-get 'id pr)))
+    (if (not (and full-name id))
+        (funcall callback (bitbucket-pr-review-tally pr))
+      (let ((bitbucket-cache-ttl 0))
+        (bitbucket-pull-request-async
+         full-name id
+         (lambda (ok fresh)
+           (funcall callback (bitbucket-pr-review-tally (if ok fresh pr)))))))))
+
+(defun bitbucket-pr-reviewers-async (pr callback)
+  "Fetch PR's id/full-name fresh from Bitbucket, then CALLBACK with reviewers.
+Same staleness fix as `bitbucket-pr-review-tally-async', for the
+per-reviewer breakdown `gp-helm--covered-by-others-p' relies on."
+  (let ((full-name (let-alist pr .destination.repository.full_name))
+        (id (alist-get 'id pr)))
+    (if (not (and full-name id))
+        (funcall callback (bitbucket-pr-reviewers pr))
+      (let ((bitbucket-cache-ttl 0))
+        (bitbucket-pull-request-async
+         full-name id
+         (lambda (ok fresh)
+           (funcall callback (bitbucket-pr-reviewers (if ok fresh pr)))))))))
+
 (defun bitbucket-pr-reviewers (pr)
   "Return PR's `REVIEWER' participants as plists (:id :name :avatar :state).
 STATE is `approved', `changes', or `pending', matching
