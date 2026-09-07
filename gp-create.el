@@ -90,6 +90,17 @@ shared prefix) if there is a meaningful one, else BRANCH humanised."
       ""
     (mapconcat (lambda (s) (concat "- " (string-trim s))) summaries "\n")))
 
+(defun gp-create--dest-candidates (branches default dest)
+  "Return BRANCHES for the destination dropdown, DEFAULT and DEST first.
+BRANCHES is every branch name in the repo; DEFAULT is the repo's
+default branch; DEST is the destination the form opened with (usually
+the same as DEFAULT, but not always -- re-opening a form keeps
+whatever was picked last).  Deduplicated, so DEFAULT/DEST are not
+repeated if they already lead the alphabetical remainder."
+  (let* ((priority (delq nil (delete-dups (list default dest))))
+         (rest (seq-difference branches priority #'equal)))
+    (append priority rest)))
+
 ;;;; Buffer template & parsing -----------------------------------------------
 
 (defcustom gp-create-draft t
@@ -155,6 +166,7 @@ Example:
   "Window configuration to restore when the mask closes.")
 
 (defvar-local gp-create--w-title nil "Title field widget.")
+(defvar-local gp-create--w-dest nil "Destination-branch dropdown widget.")
 (defvar-local gp-create--w-desc nil "Description field widget.")
 (defvar-local gp-create--w-draft nil "Draft checkbox widget.")
 (defvar-local gp-create--w-close nil "Close-source-branch checkbox widget.")
@@ -320,10 +332,20 @@ to offer for this repo."
   "Render the widget form for CTX into the current buffer."
   (let ((full-name (plist-get ctx :full-name))
         (source (plist-get ctx :source))
-        (dest (plist-get ctx :dest)))
+        (dest (plist-get ctx :dest))
+        (candidates (plist-get ctx :dest-candidates)))
     (remove-overlays)
     (widget-insert (propertize "Create pull request\n" 'face 'gp-create-heading))
-    (widget-insert (propertize (format "%s  →  %s\n" source dest) 'face 'shadow))
+    (widget-insert (propertize (format "%s  →  " source) 'face 'shadow))
+    (setq gp-create--w-dest
+          (if candidates
+              (apply #'widget-create 'menu-choice
+                     :tag "" :value dest :format "%[%v%]"
+                     (mapcar (lambda (b) (list 'item b)) candidates))
+            ;; branch listing failed or is still unavailable -- fall back to a
+            ;; plain editable field so DEST is still choosable by hand
+            (widget-create 'editable-field :size 30 :format "%v" dest)))
+    (widget-insert "\n")
     (widget-insert (propertize (format "in %s\n\n" full-name) 'face 'shadow))
 
     (widget-insert (propertize "Title" 'face 'gp-create-section) "\n")
@@ -384,9 +406,11 @@ protected branch).  Opens the new PR's detail buffer on success."
          (full-name (plist-get ctx :full-name))
          (dir (plist-get ctx :dir))
          (source (plist-get ctx :source))
-         (dest (plist-get ctx :dest)))
+         (dest (widget-value gp-create--w-dest)))
     (when (string-empty-p title)
       (user-error "Title is empty"))
+    (when (equal source dest)
+      (user-error "Destination %s is the same as the source branch" dest))
     ;; ensure the source branch is on the remote (push if needed)
     (unless (gp-checkout-branch-on-remote-p dir source)
       (message "Pushing %s to origin…" source)
@@ -447,12 +471,20 @@ open always starts from a clean slate."
 
 (defun gp-create--context (dir full-name source dest)
   "Build the form context: derive title/description from commits.
-Returns a plist (:title :description :source :dest :full-name :dir)."
+Returns a plist (:title :description :source :dest :dest-candidates
+:full-name :dir).  DEST-CANDIDATES is every branch in FULL-NAME for
+the destination dropdown, DEST (and the repo's default branch) sorted
+first; fetching it is best-effort, so a failed/slow branch listing
+still leaves DEST itself choosable."
   (let* ((summaries (gp-checkout-commit-summaries dir dest source))
          (title (gp-create--derive-title summaries source))
-         (description (gp-create--body summaries)))
+         (description (gp-create--body summaries))
+         (default (ignore-errors (gp-repo-default-branch full-name)))
+         (branches (ignore-errors (gp-repo-branches full-name)))
+         (candidates (gp-create--dest-candidates branches default dest)))
     (list :title title :description description
-          :source source :dest dest :full-name full-name :dir dir)))
+          :source source :dest dest :dest-candidates candidates
+          :full-name full-name :dir dir)))
 
 ;;;###autoload
 (defun gp-create-pr (dir full-name source &optional dest)
@@ -479,8 +511,9 @@ source branch after merge, and the repo's default reviewers.
       (let ((inhibit-read-only t))
         (erase-buffer)
         (gp-create-mode)
-        (setq gp-create--ctx (list :full-name full-name :dir dir
-                                   :source source :dest dest)
+        (setq gp-create--ctx (list :full-name full-name :dir dir :source source
+                                   :dest dest
+                                   :dest-candidates (plist-get ctx :dest-candidates))
               gp-create--return-window winconf
               header-line-format
               (format "Create PR  %s → %s" source dest))

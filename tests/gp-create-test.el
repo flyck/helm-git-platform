@@ -73,6 +73,29 @@
   "No commits: an empty description."
   (should (equal (gp-create--body nil) "")))
 
+;;;; Destination-branch candidates ---------------------------------------------
+
+(ert-deftest gp-create-test-dest-candidates-default-and-dest-lead ()
+  "The default branch and the current destination sort to the front,
+the rest stays alphabetical."
+  (should (equal (gp-create--dest-candidates
+                  '("develop" "main" "release/1.0" "staging") "main" "staging")
+                 '("main" "staging" "develop" "release/1.0"))))
+
+(ert-deftest gp-create-test-dest-candidates-dedup-when-default-is-dest ()
+  "DEFAULT and DEST are usually the same branch; it must not repeat."
+  (should (equal (gp-create--dest-candidates '("develop" "main") "main" "main")
+                 '("main" "develop"))))
+
+(ert-deftest gp-create-test-dest-candidates-empty-branch-list ()
+  "A failed/empty branch fetch still surfaces DEFAULT/DEST alone."
+  (should (equal (gp-create--dest-candidates nil "main" "main") '("main"))))
+
+(ert-deftest gp-create-test-dest-candidates-nil-default ()
+  "No default branch known (e.g. the API call failed): DEST still leads."
+  (should (equal (gp-create--dest-candidates '("develop" "main") nil "main")
+                 '("main" "develop"))))
+
 ;;;; Create request body ------------------------------------------------------
 
 (ert-deftest gp-create-test-request-body-options ()

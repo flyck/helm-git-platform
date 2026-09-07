@@ -880,6 +880,19 @@ Cached, since it changes rarely."
                    '(("fields" . "mainbranch.name")))
          .mainbranch.name)))))
 
+(defun bitbucket-repo-branches (full-name)
+  "Return every branch name in FULL-NAME, alphabetically.
+Cached, like `bitbucket-repo-default-branch'."
+  (bitbucket-with-cache
+   (list 'repo-branches full-name)
+   (lambda ()
+     (ignore-errors
+       (sort (mapcar (lambda (b) (alist-get 'name b))
+                     (bitbucket-api-paged
+                      (format "/repositories/%s/refs/branches" full-name)
+                      '(("fields" . "values.name,next"))))
+             #'string<)))))
+
 (cl-defun bitbucket-create-pull-request
     (full-name source dest title
      &key description draft close-source-branch reviewer-uuids)

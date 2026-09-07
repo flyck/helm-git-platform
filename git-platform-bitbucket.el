@@ -93,6 +93,8 @@
   (bitbucket-open-pr-for-branch full-name branch))
 (cl-defmethod gp--repo-default-branch ((_ git-platform-bitbucket) full-name)
   (bitbucket-repo-default-branch full-name))
+(cl-defmethod gp--repo-branches ((_ git-platform-bitbucket) full-name)
+  (bitbucket-repo-branches full-name))
 (cl-defmethod gp--repo-default-reviewers ((_ git-platform-bitbucket) full-name)
   (bitbucket-repo-default-reviewers full-name))
 (cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-bitbucket) full-name)

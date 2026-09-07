@@ -201,6 +201,8 @@ approval\") and prompt for REASON only when this is `dismiss'.")
   "Return the open PR in FULL-NAME whose source branch is BRANCH.")
 (gp-defop repo-default-branch (full-name)
   "Return repo FULL-NAME's default (main) branch name, or nil.")
+(gp-defop repo-branches (full-name)
+  "Return every branch name in FULL-NAME, for the create-PR destination picker.")
 (gp-defop repo-default-reviewers (full-name)
   "Return repo FULL-NAME's default reviewers (list of user alists).
 These are pre-selected in the create-PR form: the platform itself

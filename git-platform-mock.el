@@ -328,6 +328,9 @@ CREATE TABLE IF NOT EXISTS participants (
 (cl-defmethod gp--repo-default-branch ((_ git-platform-mock) _full-name)
   "main")
 
+(cl-defmethod gp--repo-branches ((_ git-platform-mock) _full-name)
+  '("development" "main" "release/1.0"))
+
 (cl-defmethod gp--backend-name ((_ git-platform-mock))
   "Report `bitbucket'.
 The mock impersonates Bitbucket's shapes and semantics, so

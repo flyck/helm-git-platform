@@ -605,5 +605,23 @@ passed-in PR's own (possibly stale) `participants'."
       (bitbucket-pr-reviewers-async stale-pr (lambda (v) (setq reviewers v)))
       (should (null reviewers)))))
 
+(ert-deftest bitbucket-test-repo-branches-sorted-names ()
+  "Extracts just the name field, alphabetically, across pages."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-cache-ttl 0))
+      (cl-letf (((symbol-function 'bitbucket-api-paged)
+                 (lambda (&rest _)
+                   '(((name . "main")) ((name . "develop")) ((name . "release/1.0"))))))
+        (should (equal (bitbucket-repo-branches "acme/web")
+                       '("develop" "main" "release/1.0")))))))
+
+(ert-deftest bitbucket-test-repo-branches-survives-api-failure ()
+  "A failed branch listing yields nil, not an error."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-cache-ttl 0))
+      (cl-letf (((symbol-function 'bitbucket-api-paged)
+                 (lambda (&rest _) (error "network error"))))
+        (should (null (bitbucket-repo-branches "acme/web")))))))
+
 (provide 'bitbucket-api-test)
 ;;; bitbucket-api-test.el ends here

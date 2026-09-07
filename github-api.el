@@ -930,6 +930,13 @@ here, just a REST/GraphQL split, same as comment resolution.)"
   (ignore-errors
     (alist-get 'default_branch (github-api-request "GET" (format "/repos/%s" full-name)))))
 
+(defun github-repo-branches (full-name)
+  "Return every branch name in FULL-NAME, alphabetically."
+  (ignore-errors
+    (sort (mapcar (lambda (b) (alist-get 'name b))
+                  (github-api-paged (format "/repos/%s/branches" full-name)))
+          #'string<)))
+
 (cl-defun github-create-pull-request
     (full-name source dest title
      &key description draft close-source-branch reviewer-uuids)

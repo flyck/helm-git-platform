@@ -54,7 +54,8 @@
     ("get"    . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/diff")
     ("get"    . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/diffstat")
     ("get"    . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/commits")
-    ("get"    . "/repositories/{workspace}/{repo_slug}/commit/{commit}/statuses"))
+    ("get"    . "/repositories/{workspace}/{repo_slug}/commit/{commit}/statuses")
+    ("get"    . "/repositories/{workspace}/{repo_slug}/refs/branches"))
   "Endpoints (METHOD . PATH) the package relies on; checked against the spec.")
 
 (defun gp-api-drift--fetch-spec ()

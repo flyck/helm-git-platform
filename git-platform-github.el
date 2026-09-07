@@ -111,6 +111,8 @@
   (github-open-pr-for-branch full-name branch))
 (cl-defmethod gp--repo-default-branch ((_ git-platform-github) full-name)
   (github-repo-default-branch full-name))
+(cl-defmethod gp--repo-branches ((_ git-platform-github) full-name)
+  (github-repo-branches full-name))
 (cl-defmethod gp--repo-default-reviewers ((_ git-platform-github) full-name)
   (github-repo-default-reviewers full-name))
 (cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-github) full-name)

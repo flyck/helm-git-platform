@@ -893,5 +893,21 @@ per-response instead of at the end would drop the marker."
       (should (equal result "diff-text"))
       (should-not blocking))))
 
+(ert-deftest github-test-repo-branches-sorted-names ()
+  "Extracts just the name field, alphabetically, across pages."
+  (github-mock-with-service
+    (cl-letf (((symbol-function 'github-api-paged)
+               (lambda (&rest _)
+                 '(((name . "main")) ((name . "develop")) ((name . "release/1.0"))))))
+      (should (equal (github-repo-branches "acme/web")
+                     '("develop" "main" "release/1.0"))))))
+
+(ert-deftest github-test-repo-branches-empty-on-error ()
+  "A failed branch listing yields nil, not an error."
+  (github-mock-with-service
+    (cl-letf (((symbol-function 'github-api-paged)
+               (lambda (&rest _) (error "boom"))))
+      (should (null (github-repo-branches "acme/web"))))))
+
 (provide 'github-api-test)
 ;;; github-api-test.el ends here
