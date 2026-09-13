@@ -138,7 +138,8 @@ face on the rest of the string (see `gp--pr-heading')."
     (with-temp-buffer
       (gp-detail-mode)
       (let ((inhibit-read-only t))
-        (gp--render-detail pr nil))
+        (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+          (gp--render-detail pr nil)))
       (let* ((text (buffer-string))
              (ticket-pos (string-match "WP-1231" text))
              (rest-pos (string-match "widget toggle" text)))
@@ -1080,6 +1081,7 @@ guard), since this file does not require it."
             gp--detail-pipelines '(:recent nil))
       (cl-letf (((symbol-function 'gp-helm--deploy-cache-bust)
                  (lambda (pr) (setq busted pr)))
+                ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
                 ((symbol-function 'bitbucket-pull-request-async)
                  (lambda (_full-name _id callback) (funcall callback t pr)))
                 ((symbol-function 'bitbucket-pull-request-comments-async)

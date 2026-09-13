@@ -311,6 +311,12 @@ cover this hint -- which is how it went stale once already."
 
 ;;;; Redeploy an already-successful manual step --------------------------------
 
+;; Shared deploy fixtures.  `gp-test--deploy-pipeline' / `gp-test--deploy-step'
+;; are defined in the deploy-hook section below but referenced by the redeploy
+;; tests here, so declare them up front to keep the byte-compiler quiet.
+(defvar gp-test--deploy-pipeline)
+(defvar gp-test--deploy-step)
+
 (defconst gp-test--redeployed-step
   '((uuid . "{step-uuid}") (name . "Deploy to LIVE")
     (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
@@ -617,7 +623,8 @@ refreshed and the finished deploy sat stale until a manual `g'."
           (with-current-buffer detail
             (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
           (cl-letf (((symbol-function 'gp-detail-refresh)
-                     (lambda () (setq refreshed (current-buffer)))))
+                     (lambda () (setq refreshed (current-buffer))))
+                    ((symbol-function 'gp-user-uuid) (lambda () "{me}")))
             (let ((gp-pipeline-deploy-script (list script))
                   (gp-pipeline-deploy-notify nil))
               (with-current-buffer detail
@@ -647,18 +654,22 @@ life of the process and removed once it exits, on success AND failure
             (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
           (let ((gp-pipeline-deploy-script (list script))
                 (gp-pipeline-deploy-notify nil))
-            (with-current-buffer detail
-              (gp-pipeline--deploy-run
-               "acme/web" "b" gp-test--deploy-pipeline step '((id . 1))))
-            ;; registered immediately, before the process has had a chance
-            ;; to finish
-            (should (gp-pipeline--deploy-running-p step))
-            (let ((deadline (+ (float-time) 5)))
-              (while (and (gp-pipeline--deploy-running-p step)
-                          (< (float-time) deadline))
-                (accept-process-output nil 0.05)))
-            ;; cleared even though the script exited non-zero
-            (should-not (gp-pipeline--deploy-running-p step))))
+            ;; The immediate spinner paint and the sentinel's failure redraw
+            ;; both re-render the detail; this test only asserts the running
+            ;; registry, so the render is stubbed out rather than exercised.
+            (cl-letf (((symbol-function 'gp--detail-rerender) #'ignore))
+              (with-current-buffer detail
+                (gp-pipeline--deploy-run
+                 "acme/web" "b" gp-test--deploy-pipeline step '((id . 1))))
+              ;; registered immediately, before the process has had a chance
+              ;; to finish
+              (should (gp-pipeline--deploy-running-p step))
+              (let ((deadline (+ (float-time) 5)))
+                (while (and (gp-pipeline--deploy-running-p step)
+                            (< (float-time) deadline))
+                  (accept-process-output nil 0.05)))
+              ;; cleared even though the script exited non-zero
+              (should-not (gp-pipeline--deploy-running-p step)))))
       (kill-buffer detail)
       (delete-file script))))
 
@@ -701,6 +712,7 @@ re-check it (see `gp-helm--deploy-cache-bust-repo')."
           (with-current-buffer detail
             (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
           (cl-letf (((symbol-function 'gp-detail-refresh) #'ignore)
+                    ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
                     ((symbol-function 'gp-helm--deploy-cache-bust-repo)
                      (lambda (full-name) (setq busted full-name))))
             (let ((gp-pipeline-deploy-script (list script))
@@ -729,6 +741,7 @@ about them changed."
           (with-current-buffer detail
             (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
           (cl-letf (((symbol-function 'gp-detail-refresh) #'ignore)
+                    ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
                     ((symbol-function 'gp-helm--deploy-cache-bust-repo)
                      (lambda (full-name) (setq busted full-name))))
             (let ((gp-pipeline-deploy-script (list script))
