@@ -40,6 +40,7 @@
 (declare-function gp-pipeline-step-log-classify-line "git-platform")
 
 (defvar gp--pr)                         ;; the detail buffer's PR (gp-ui.el)
+(defvar gp-pipeline-deploy-script)      ;; defcustom, defined later in this file
 (declare-function gp-detail-refresh "gp-ui")
 (declare-function gp--detail-rerender "gp-ui")
 (declare-function gp-deploy-watch-step-marker "gp-deploy-watch")
