@@ -101,14 +101,8 @@
   (bitbucket-repo-suggested-reviewers full-name))
 (cl-defmethod gp--pull-request-merge-strategies ((_ git-platform-bitbucket) full-name id)
   (bitbucket-pull-request-merge-strategies full-name id))
-;; Bitbucket Cloud's PR payload carries no mergeability field.  There is a
-;; `.../pullrequests/{id}/conflicts' endpoint, but it 302s to
-;; `.../file-conflicts/{spec}', which rejects Atlassian API-token auth with
-;; 403 ("This resource does not support authentication using the provided
-;; token") while ordinary PR reads succeed on the same credentials -- so it
-;; is unreachable with the credentials this package uses.  Returning nil
-;; means "cannot answer", which callers must not treat as a conflict.
-(cl-defmethod gp--pull-request-mergeability ((_ git-platform-bitbucket) _full-name _id) nil)
+(cl-defmethod gp--pull-request-mergeability ((_ git-platform-bitbucket) full-name id)
+  (bitbucket-pull-request-mergeability full-name id))
 ;; Bitbucket Cloud has diff/diffstat but no ahead/behind commit counts.
 (cl-defmethod gp--pull-request-divergence ((_ git-platform-bitbucket) _fn _base _head) nil)
 (cl-defmethod gp--merge-pull-request ((_ git-platform-bitbucket) full-name id

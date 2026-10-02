@@ -59,15 +59,26 @@ merge button, the shape differs per forge:
 So the reason is optional and backend-dependent: ask what reasons the
 backend accepts and skip the prompt entirely when it has none.
 
-## Bitbucket conflict detection needs different credentials
+## Verify the diffstat-derived Bitbucket mergeability against a real conflict
 
-Conflicts are detected on GitHub (`mergeable_state' "dirty") but not on
-Bitbucket: its PR payload has no such field, and the
-`GET .../pullrequests/{id}/conflicts' endpoint 302s to
-`.../file-conflicts/{spec}', which rejects Atlassian API-token auth with
-403 ("This resource does not support authentication using the provided
-token") where ordinary PR reads answer 200 on the same credentials.
-Would need an app password / OAuth to be usable.
+`bitbucket-pull-request-mergeability' (bitbucket-api.el) now derives
+MERGEABLE from the existing diffstat fetch: any file with `status'
+`"merge conflict"' means a conflict. This replaces the old hard `nil'
+("cannot answer") -- the dedicated `GET .../pullrequests/{id}/conflicts'
+endpoint still does not work with this package's Atlassian API-token
+auth (confirmed live 2026-09-11: redirects to `.../file-conflicts/{spec}',
+which 404s with header `X-Credential-Type: unauthenticated_identity' even
+though ordinary PR reads succeed on the same credentials), so diffstat is
+the only reachable signal.
+
+Not yet verified against a real conflicted PR -- only that the endpoint
+is reachable and the `status' field exists (confirmed via a merged PR
+with no conflicts, `status: "modified"'). The Bitbucket community has
+reported this field unreliable in the past (one thread noted `diffstat'
+returning `"modified"' on files that did have conflicts). Test against
+an actual open, conflicted Bitbucket PR the next time one exists, and
+tighten the STATE string (currently hardcoded `"unverified"') once
+confirmed either way.
 
 ## Exclude generated files from the changed-lines counter
 

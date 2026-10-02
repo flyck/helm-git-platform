@@ -1152,6 +1152,34 @@ See `bitbucket-pull-request-stats'."
           :commits (length commits)
           :file-list (mapcar #'bitbucket--diffstat-entry stat))))
 
+(defun bitbucket-pull-request-mergeability (full-name id)
+  "Return (MERGEABLE . STATE) for PR ID in FULL-NAME, or nil.
+
+Bitbucket Cloud's PR payload has no mergeability field, and the
+dedicated `.../pullrequests/{id}/conflicts' endpoint rejects this
+package's Atlassian API-token auth (confirmed live: it redirects to
+`.../file-conflicts/{spec}', which answers 404 with header
+`X-Credential-Type: unauthenticated_identity' even though ordinary PR
+reads succeed on the same credentials).
+
+The diffstat this package already fetches for `bitbucket-pull-request-stats'
+carries a per-file `status', which the Bitbucket community has
+reported can read \"merge conflict\" -- so derive mergeability from
+that instead of a second request.  Reuses the same cache (keyed by
+source commit), so this costs nothing extra when stats were already
+loaded.  Not independently verified against a live conflicted PR, so
+treat STATE \"unverified\" as a hint, not a guarantee -- a false
+\"mergeable\" reading here is possible if the status value turns out
+unreliable (see `todo.md')."
+  (let* ((pr (bitbucket-pull-request full-name id))
+         (stats (and pr (bitbucket-pull-request-stats full-name id pr)))
+         (files (plist-get stats :file-list)))
+    (when files
+      (cons (if (cl-some (lambda (f) (equal (plist-get f :status) "merge conflict")) files)
+                nil
+              t)
+            "unverified"))))
+
 (defun bitbucket-pull-request-stats-async (full-name id pr callback)
   "Fetch the stats plist for PR FULL-NAME/ID asynchronously.
 CALLBACK gets the plist, or nil on error.  Caching matches the

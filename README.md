@@ -297,6 +297,12 @@ section folded with `gp-detail-commits-collapsed`.
   (`git-platform`) so another forge (GitLab, …) could be added the same way. GitHub has a handful
   of documented gaps relative to Bitbucket (see [Extensibility](#extensibility) above) stemming
   from real product/API differences, not missing implementation effort.
+- **Bitbucket's merge-conflict warning is derived, not authoritative.** Bitbucket Cloud's PR payload
+  has no mergeability field, and its dedicated conflicts endpoint does not accept the Atlassian
+  API-token auth this package uses (see `todo.md` for the confirmed details). The warning is instead
+  inferred from the per-file `status` in the PR's diffstat (a `"merge conflict"` entry), which is
+  reachable with this package's credentials but not independently verified against a live conflicted
+  PR -- treat it as a best-effort hint rather than as reliable as GitHub's own "Cannot merge" state.
 
 
 ## FAQ

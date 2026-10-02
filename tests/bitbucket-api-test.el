@@ -541,6 +541,33 @@ of falling back."
         (bitbucket-pull-request-stats "acme/repo" 180 pr2)
         (should (= computes 2))))))
 
+(ert-deftest bitbucket-test-mergeability-conflict-file ()
+  "A diffstat file with status \"merge conflict\" reports MERGEABLE nil."
+  (cl-letf (((symbol-function 'bitbucket-pull-request)
+             (lambda (&rest _) '((id . 180))))
+            ((symbol-function 'bitbucket-pull-request-stats)
+             (lambda (&rest _)
+               (list :file-list (list (list :path "a.el" :status "modified")
+                                       (list :path "b.el" :status "merge conflict"))))))
+    (should (equal (bitbucket-pull-request-mergeability "acme/repo" 180)
+                   '(nil . "unverified")))))
+
+(ert-deftest bitbucket-test-mergeability-clean ()
+  "No conflicted file in the diffstat reports MERGEABLE t."
+  (cl-letf (((symbol-function 'bitbucket-pull-request)
+             (lambda (&rest _) '((id . 180))))
+            ((symbol-function 'bitbucket-pull-request-stats)
+             (lambda (&rest _)
+               (list :file-list (list (list :path "a.el" :status "modified"))))))
+    (should (equal (bitbucket-pull-request-mergeability "acme/repo" 180)
+                   '(t . "unverified")))))
+
+(ert-deftest bitbucket-test-mergeability-no-diffstat-is-nil ()
+  "No file-list at all (PR or stats fetch failed) means \"cannot answer\"."
+  (cl-letf (((symbol-function 'bitbucket-pull-request)
+             (lambda (&rest _) nil)))
+    (should (null (bitbucket-pull-request-mergeability "acme/repo" 180)))))
+
 (ert-deftest bitbucket-test-diff-cached-by-commit ()
   "The diff is cached when a commit hash is supplied; absent it, never cached."
   (let ((bitbucket-cache-ttl 300)
