@@ -123,5 +123,37 @@ let gp-watch's unshadowed keys (`C-c B p') through."
       (should (eq (key-binding (kbd "C-c B g")) 'gp-magit-refresh-comments))
       (should (eq (key-binding (kbd "C-c B p")) 'gp-watch-visit-branch-pr)))))
 
+(ert-deftest gp-magit-pr-resolves-from-range-tip-not-head ()
+  "A PR diff names `origin/dest...origin/src'; the PR comes from SRC,
+even when the checked-out branch is something else."
+  (skip-unless (require 'gp-watch nil t))
+  (with-temp-buffer
+    (setq-local magit-buffer-diff-range "origin/main...origin/feat/x")
+    (let ((gp-watch-mode t)
+          (asked nil))
+      (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _) t))
+                ((symbol-function 'gp-watch--repo-for-file) (lambda (_) "ws/repo"))
+                ((symbol-function 'gp-watch--current-branch) (lambda (_) "main"))
+                ((symbol-function 'gp-watch--pr-for)
+                 (lambda (_full-name branch)
+                   (push branch asked)
+                   (and (equal branch "feat/x") '((id . 7))))))
+        (should (equal (gp-magit--pr) '((id . 7))))
+        (should (equal asked '("feat/x")))))))
+
+(ert-deftest gp-magit-pr-falls-back-to-checked-out-branch ()
+  "A range ending at HEAD resolves the PR from the checked-out branch."
+  (skip-unless (require 'gp-watch nil t))
+  (with-temp-buffer
+    (setq-local magit-buffer-diff-range "origin/main...HEAD")
+    (let ((gp-watch-mode t))
+      (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _) t))
+                ((symbol-function 'gp-watch--repo-for-file) (lambda (_) "ws/repo"))
+                ((symbol-function 'gp-watch--current-branch) (lambda (_) "feat/y"))
+                ((symbol-function 'gp-watch--pr-for)
+                 (lambda (_full-name branch)
+                   (and (equal branch "feat/y") '((id . 8))))))
+        (should (equal (gp-magit--pr) '((id . 8))))))))
+
 (provide 'gp-magit-test)
 ;;; gp-magit-test.el ends here

@@ -32,6 +32,7 @@
 (declare-function magit-diff-hunk-line "magit-diff")
 (declare-function magit-section-ident "magit-section")
 (defvar magit-root-section)
+(defvar gp-checkout-remote)
 (declare-function gp-watch--repo-for-file "gp-watch")
 (declare-function gp-watch--current-branch "gp-watch")
 (declare-function gp-watch--pr-for "gp-watch")
@@ -42,18 +43,39 @@
 
 ;;;; Context resolution -------------------------------------------------------
 
+(defun gp-magit--range-tip-branch ()
+  "Return the branch at the tip of this diff's range, or nil.
+`origin/main...origin/feat' gives \"feat\".  Nil for a range ending
+at HEAD or with no tip, so the caller falls back to the checked-out
+branch.  Reads `magit-buffer-diff-range' (magit >= 4.6) or the older
+`magit-buffer-range'."
+  (require 'gp-checkout)
+  (let ((range (or (bound-and-true-p magit-buffer-diff-range)
+                   (bound-and-true-p magit-buffer-range))))
+    (when (and (stringp range)
+               (string-match "\\.\\.\\.?\\(.+\\)\\'" range))
+      (let ((tip (match-string 1 range)))
+        (unless (equal tip "HEAD")
+          (string-remove-prefix (concat gp-checkout-remote "/") tip))))))
+
 (defun gp-magit--pr ()
   "Return the open PR for this magit-diff buffer's repo+branch, or nil.
-Only when `gp-watch-mode' is on and we are in a `magit-diff-mode'
-buffer; reuses the watch-mode resolvers (and their caches)."
+The branch is the diff range's tip when it names one (the PR diff
+compares remote-tracking refs, not HEAD), else the checked-out
+branch.  Only when `gp-watch-mode' is on and we are in a
+`magit-diff-mode' buffer; reuses the watch-mode resolvers (and
+their caches)."
   (when (and (bound-and-true-p gp-watch-mode)
              (derived-mode-p 'magit-diff-mode)
              default-directory)
     (require 'gp-watch)
     (let* ((probe (expand-file-name "x" default-directory))
            (full-name (gp-watch--repo-for-file probe))
-           (branch (and full-name (gp-watch--current-branch probe))))
-      (and full-name branch (gp-watch--pr-for full-name branch)))))
+           (tip (gp-magit--range-tip-branch)))
+      (when full-name
+        (or (and tip (gp-watch--pr-for full-name tip))
+            (when-let* ((branch (gp-watch--current-branch probe)))
+              (gp-watch--pr-for full-name branch)))))))
 
 (defun gp-magit--file-line-at-point ()
   "Return (PATH . LINE) for the new-side diff location at point, or nil."

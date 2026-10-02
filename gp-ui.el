@@ -2206,7 +2206,15 @@ Refreshes the detail buffer afterwards."
 
 Shows the diff against the current local refs right away (no
 network wait), then fetches source+base in the background and
-refreshes the diff buffer so it converges on the server's view."
+refreshes the diff buffer so it converges on the server's view.
+
+Diffs the remote-tracking refs (`origin/dest...origin/src'), not
+`HEAD' -- a `git fetch' only moves remote-tracking refs, never the
+local branch, so a `HEAD'-based range would keep showing the diff
+as of the last checkout/pull no matter how many times it refetches
+and refreshes.  This does not change what visiting a file from the
+diff opens: that always jumps into the worktree file on disk,
+regardless of which refs the diff range names."
   (unless (require 'magit nil t)
     (user-error "Magit is not available"))
   ;; fast: ensure we're on the branch (no fetch if already there)
@@ -2214,7 +2222,7 @@ refreshes the diff buffer so it converges on the server's view."
          (dest (gp-pr-destination-branch pr))
          (src (gp-pr-source-branch pr))
          (default-directory (file-name-as-directory dir)))
-    (gp-ui--magit-pr-diff dest)
+    (gp-ui--magit-pr-diff dest src)
     ;; background: refresh the remote refs, then redraw the diff
     (let ((buf (current-buffer))
           (remote gp-checkout-remote))
@@ -2229,11 +2237,15 @@ refreshes the diff buffer so it converges on the server's view."
              (when (derived-mode-p 'magit-diff-mode)
                (ignore-errors (magit-refresh))))))))))
 
-(defun gp-ui--magit-pr-diff (dest)
-  "Run the magit diff for the PR base branch DEST in `default-directory'.
-Diffs against the remote base via merge-base, so it matches the
-server's diff regardless of local base staleness."
-  (magit-diff-range (format "%s/%s...HEAD" gp-checkout-remote dest)))
+(defun gp-ui--magit-pr-diff (dest src)
+  "Run the magit diff for the PR's DEST...SRC branches in `default-directory'.
+Diffs remote-tracking refs, not local ones, so it matches the
+server's diff regardless of local branch staleness, and so a
+background `git fetch' (which only moves remote-tracking refs) is
+enough to bring a redraw up to date -- see `gp-ui-show-diff-in-magit'."
+  (magit-diff-range (format "%s/%s...%s/%s"
+                             gp-checkout-remote dest
+                             gp-checkout-remote src)))
 
 (defun gp-ui-back-to-list ()
   "Return to the PR overview (Helm if available, else the list)."
