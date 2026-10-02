@@ -8,53 +8,18 @@ workspace, drill into changed files and comments with Helm, jump to the matching
 and switch branches safely, see inline review comments as overlays on the code, and watch live PR
 counts in the mode line.
 
-## Why I build this
+## Why I built this
 
-- Managing pull requests (review and feedback) right in my IDE allows me to work on them
-  faster. Less context switches and less clicking.
-- The helm interface makes for great search, sometimes exceeding the original search capability of
-  the official UIs (bitbucket, github, etc.)
-- The underlying git-platform becomes exchangeable. My workflow needs to be great independent
-  while the underlying system stays replacable. Especially true when the employer picks bitbucket.
+As AI adoption grows, models improve and code throughput increases, code reviews stay an important
+part of the work. Due to these factors, I chose to build a great reviewing experience right inside
+my IDE.
 
-## Extensibility
+While performance of git platforms like github have been disappointing, and different companies
+use different solutions, having one such local interface across them all should help with staying
+efficient.
 
-It talks to a forge through a backend protocol (`git-platform`).  **Bitbucket Cloud and GitHub are
-both implemented**; the UI, overlays, checkout service and Helm front-end are all
-platform-agnostic — adding another forge (GitLab, …) is a matter of writing one backend.
-
-> Nothing is hardcoded to a workspace or host — every value is a `defcustom`, and credentials come
-> from the environment or `auth-source`.
-
-Set `git-platform-default-backend` to `'github` to talk to GitHub instead of Bitbucket, and
-configure a token via `github-api-token`, the `GITHUB_TOKEN` environment variable, or an
-`auth-source` entry for host `api.github.com`.  A token is optional for read-only access to public
-repos (GitHub's unauthenticated rate limit applies); write operations require one.
-
-**Token permissions.** For a fine-grained PAT scoped to the repo(s) you want to use:
-
-| Permission | Access | Why |
-|---|---|---|
-| Contents | Read and write | Reading files/diffs; pushing branches when creating a PR |
-| Pull requests | Read and write | List/view/create PRs, reviews, approve/request-changes, draft toggle |
-| Issues | Read and write | General (non-inline) PR comments and PR labels go through the Issues API |
-| Actions | Read and write | Workflow runs/jobs/logs, re-running a job, dispatching a workflow |
-| Commit statuses | Read | Combined commit status for build-state badges |
-| Metadata | Read | Mandatory default, always required |
-
-Comment resolution goes through GraphQL rather than REST, but needs no separate scope — GraphQL
-mutations are gated by the same underlying permission (Pull requests: write).
-
-With a classic PAT, the closest equivalent is the `repo` scope plus `workflow` (the latter needed
-specifically for dispatching/re-running Actions runs).
-
-The one thing GitHub's API genuinely cannot do, at all, regardless of implementation: a queryable
-repo-level "default reviewers" list (closest is CODEOWNERS, which isn't one).
-
-Everything else — comment resolution, withdrawing a review, converting a PR back to draft,
-re-running a CI step — works, just routed through whatever GitHub API actually supports it
-(REST where it can, GraphQL where REST has no equivalent — see `github-api.el`'s Commentary for
-specifics), with the UI adapting itself to what's available rather than guessing.
+Even in its early stages, this local tool can already provide consistent search capabilities and
+functionality across providers, which sometimes even exceeds the official UI flows.
 
 ## Install
 
@@ -99,7 +64,7 @@ Installing the package pulls in everything it needs:
 
 ### Credentials
 
-Set three environment variables (an API token, not your password):
+**Bitbucket** (the default backend): set three environment variables (an API token, not your password):
 
 ```sh
 export BITBUCKET_WORKSPACE="your-workspace"
@@ -123,6 +88,21 @@ Grant the token these scopes:
 
 Everything except the two **Write** scopes works read-only — omit them for a strictly read-only
 setup (the write actions simply 403).
+
+**GitHub**: set `git-platform-default-backend` to `'github` and provide a token via `GITHUB_TOKEN`,
+`github-api-token`, or `auth-source` (host `api.github.com`). Without a token, public repos are
+read-only. For a fine-grained PAT, grant:
+
+| Permission | Access | Needed for |
+|---|---|---|
+| Contents | Read and write | files and diffs; pushing branches when creating a PR |
+| Pull requests | Read and write | PRs, reviews, comments (resolution via GraphQL needs nothing extra) |
+| Issues | Read and write | general PR comments and labels |
+| Actions | Read and write | workflow runs and logs, re-running and dispatching |
+| Commit statuses | Read | build-state badges |
+| Metadata | Read | always required |
+
+With a classic PAT, use the `repo` and `workflow` scopes.
 
 > **macOS GUI Emacs** doesn't source your shell rc, so exports in `~/.zshrc`
 > are invisible. The optional `bitbucket-env` helper reads them out without
@@ -230,13 +210,29 @@ delete, `V` reviewers, `L` labels), so a stray lowercase key can't mutate anythi
   `gp-helm-labels-width` (0 hides the column), `gp-label-colors`.
 - **CI pipelines**: finished ones start collapsed (`TAB` expands). `s` stops, `T` triggers or starts
   a manual step, `P` re-runs one step where supported, `l` opens a step's log (polled while
-  running). Stop/trigger are whole-pipeline only; needs **Pipelines: Read**, plus **Write** for
-  stop/trigger.
+  running). Stop/trigger are whole-pipeline only.
 - **Commits**: `RET` or `v` opens one in Magit. Tunables: `gp-detail-max-commits` (50),
   `gp-detail-commits-collapsed`.
 
 In the helm picker the title column takes all spare width; lower `gp-helm-repo-width` (38) to give
 it more. Every buffer is named `*gp: …*` (`gp-buffer-name-prefix`) so one filter finds them all.
+
+## Extensibility
+
+It talks to a forge through a backend protocol (`git-platform`).  **Bitbucket Cloud and GitHub are
+both implemented**; the UI, overlays, checkout service and Helm front-end are all
+platform-agnostic — adding another forge (GitLab, …) is a matter of writing one backend.
+
+> Nothing is hardcoded to a workspace or host — every value is a `defcustom`, and credentials come
+> from the environment or `auth-source`.
+
+The one thing GitHub's API genuinely cannot do, at all, regardless of implementation: a queryable
+repo-level "default reviewers" list (closest is CODEOWNERS, which isn't one).
+
+Everything else — comment resolution, withdrawing a review, converting a PR back to draft,
+re-running a CI step — works, just routed through whatever GitHub API actually supports it
+(REST where it can, GraphQL where REST has no equivalent — see `github-api.el`'s Commentary for
+specifics), with the UI adapting itself to what's available rather than guessing.
 
 ## Limitations
 
