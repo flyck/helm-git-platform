@@ -157,6 +157,7 @@ setup (the write actions simply 403).
 | **Comment reactions** — 👍 and the rest on PR comments (`+` / `!`) | GitHub only, on by default | nothing to turn off; hidden entirely on Bitbucket, whose API has none |
 | **Shell-rc env import** (macOS convenience) | `(require 'bitbucket-env)` + `(bitbucket-env-load)` | omit it (default) |
 | **Send a PR comment to an AI terminal session** (iTerm2 or Ghostty) | `(setq gp-helm-terminal-backend 'iterm2)` or `'ghostty` | omit it (default) |
+| **New inline comments join a review batch** — invisible to others until you submit the review | on by default | `(setq gp-review-batch-default nil)`, or `C-c C-b` per comment while composing it |
 | **Recover a checkout whose branch name was reused** — offers to back up and recreate a local branch that has diverged from a same-named remote branch (typically: the old one merged, a colleague pushed a new one under the same name) instead of a raw `pull --ff-only` failure | on by default | `(setq gp-checkout-recover-diverged-branch nil)` |
 
 The core browsing (`gp-helm`, `gp-list`, checkout) works with none of these on.
@@ -185,6 +186,43 @@ buffer:
 Both keys are no-ops outside a PR-branch diff, so ordinary magit use (status, log, rebase) is
 untouched. Comments are cached for `gp-magit-comments-cache-ttl` seconds (60) so redraws on every
 magit refresh stay off the network; `C-c B g` always refetches.
+
+### Batching a review
+
+Both Bitbucket and GitHub let you leave a set of inline comments that stay invisible to everyone
+else until you explicitly submit the review, so a review-in-progress never dribbles out one
+notification per comment. A new inline comment (`C-c B n` in a magit diff, or a fresh comment on
+the file:line at point in an overlay-mode file buffer) joins that batch by default
+(`gp-review-batch-default`); `C-c C-b` in the compose buffer flips it for that one comment before
+you submit it.
+
+In the PR detail buffer (or as an overlay), a comment still in the batch is marked "pending review"
+and offers only edit/remove-from-batch — nobody else can see it yet, so reply/react/resolve don't
+apply. Once any batched comments exist in the detail buffer, `S` submits the whole batch; `C-c C-k`
+discards it instead, deleting every batched comment unposted.
+
+The two platforms implement this very differently under the hood, and **Bitbucket's side needs a
+workaround**: GitHub adds comments one at a time (via GraphQL) to a real PENDING review object, and
+submitting it (`COMMENT`/`APPROVE`/`REQUEST_CHANGES`) is one atomic, documented action that makes
+every comment in it visible. Bitbucket Cloud comments are created immediately with a `pending`
+flag, but its public API has **no documented way to un-pend one afterwards**:
+
+- `PUT .../comments/{id}` with a `pending` key is rejected outright (`400`, "extra keys not
+  allowed") — confirmed live, even though the very same field is accepted on create.
+- There is no separate "finish review" endpoint on Cloud (that only exists in Bitbucket **Data
+  Center**, a different product, and is not reachable with this package's credentials either way).
+- The web UI's own "Finish review" button calls an *internal*, undocumented endpoint —
+  `POST bitbucket.org/!api/internal/repositories/{ws}/{repo}/pullrequests/{id}/review` (caught live
+  in a browser's network tab) — authenticated by browser session cookie, not an API token. It is
+  not reachable from here, and approving/requesting changes was confirmed live to **not** trigger
+  it as a side effect: the verdict posts successfully, but the comment stays pending regardless.
+
+So `gp-submit-review-batch` on Bitbucket instead recreates each pending comment as an ordinary
+\(non-pending\) one with the same text and inline location, then deletes the pending original —
+entirely within the documented, token-authenticated public API. The tradeoff: the recreated
+comment gets a new id and a fresh `created_on` (now, not when it was first written). Nothing else
+can have replied to or reacted to it in the meantime, since nobody but you could see it while it
+was pending, so nothing is lost there.
 
 ### Running a gated deploy step
 

@@ -1018,6 +1018,58 @@ a visible stall once per interval in any open detail buffer."
         (let ((text (substring-no-properties (buffer-string))))
           (should (string-match-p "mark \\[m\\]" text)))))))
 
+(ert-deftest gp-test-render-detail-shows-pending-comment-and-submit-action ()
+  "A pending review-batch comment renders distinctly, with only edit and
+remove-from-batch actions, and the header gains a Submit review action."
+  (let* ((pr (car (gp-test--mock-prs)))
+         (ordinary (car (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
+         (pending (append '((pending . t) (id . 999999)) ordinary))
+         (comments (list ordinary pending)))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "pending review" text))
+          (should (string-match-p "remove from batch \\[K\\]" text))
+          (should (string-match-p "Submit review (1) \\[S\\]" text)))))))
+
+(ert-deftest gp-test-render-detail-hides-submit-action-with-no-pending-comments ()
+  (let ((pr (car (gp-test--mock-prs)))
+        (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should-not (string-match-p "Submit review" text)))))))
+
+(ert-deftest gp-test-submit-review-batch-offers-same-choices-on-both-backends ()
+  "The verdict prompt is backend-agnostic: both Bitbucket and GitHub can
+now genuinely act on all three choices, Bitbucket via delete+recreate
+\(see `bitbucket-submit-review-batch') and GitHub via its native
+COMMENT/APPROVE/REQUEST_CHANGES review events."
+  (dolist (backend (list (git-platform-bitbucket) (git-platform-github)))
+    (let ((git-platform-current-backend backend)
+          (pr '((id . 11) (destination (repository (full_name . "acme/x")))
+                (head (repo (full_name . "acme/x")))))
+          (offered nil))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (setq offered collection)
+                   (car collection)))
+                ((symbol-function 'read-string) (lambda (&rest _) ""))
+                ((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/x"))
+                ((symbol-function 'gp-submit-review-batch) #'ignore)
+                ((symbol-function 'gp-invalidate-pr-caches) #'ignore)
+                ((symbol-function 'gp-detail-refresh) #'ignore))
+        (gp-ui-submit-review-batch pr)
+        (should (member "Approve" offered))
+        (should (member "Request changes" offered))
+        (should (member "Comment only (no verdict)" offered))))))
+
 (ert-deftest gp-test-detail-browse-opens-comment-url-at-comment-point ()
   (let ((comment '((links (html (href . "https://example.test/comment/1")))))
         (opened nil))

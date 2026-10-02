@@ -68,12 +68,21 @@ Dispatches on PATH to a fixture.  Records the call and honours
     ;; resolve / reopen a comment
     ((string-match-p "/comments/[0-9]+/resolve\\'" path)
      (if (equal method "DELETE") nil '((user (display_name . "Me")))))
+    ;; edit or delete a single comment by id (PUT echoes DATA back; DELETE
+    ;; answers nil, matching a real 204)
+    ((and (equal method "PUT") (string-match-p "/comments/[0-9]+\\'" path))
+     (append `((id . ,(string-to-number (car (last (split-string path "/" t)))))) data))
+    ((and (equal method "DELETE") (string-match-p "/comments/[0-9]+\\'" path))
+     nil)
     ;; create a comment (POST .../comments) -> echo it back with an id
     ((and (equal method "POST")
           (string-match-p "/pullrequests/[0-9]+/comments\\'" path))
      (append '((id . 99999)) data))
     ((string-match-p "/pullrequests/[0-9]+/comments" path)
      (bitbucket-mock--fixture "pr-comments.json"))
+    ;; approve / request-changes (POST sets, DELETE retracts)
+    ((string-match-p "/pullrequests/[0-9]+/\\(approve\\|request-changes\\)\\'" path)
+     (if (equal method "DELETE") nil '((approved . t))))
     ((string-match-p "/workspaces/[^/]+/pullrequests/" path)
      (bitbucket-mock--fixture "workspace-prs.json"))
     ((string-match-p "/pullrequests/[0-9]+\\'" path)

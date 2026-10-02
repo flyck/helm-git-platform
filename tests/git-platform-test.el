@@ -65,7 +65,8 @@
         (when comments
           (should (memq (gp-comment-resolved-p (car comments)) '(t nil)))
           (should (memq (gp-comment-resolvable-p (car comments)) '(t nil)))
-          (should (memq (gp-comment-own-p (car comments) uuid) '(t nil))))))))
+          (should (memq (gp-comment-own-p (car comments) uuid) '(t nil)))
+          (should (memq (gp-comment-pending-p (car comments)) '(t nil))))))))
 
 (ert-deftest git-platform-test-bitbucket-conformance ()
   "The Bitbucket backend satisfies the git-platform protocol."
@@ -99,6 +100,133 @@
     (bitbucket-mock-with-service
       ;; would error if gp-user-uuid still required a backend arg
       (should (stringp (gp-user-uuid))))))
+
+(ert-deftest git-platform-test-bitbucket-review-batch-add ()
+  "Bitbucket: adding a review-batch comment creates it with pending:t."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (bitbucket-mock-with-service
+      (let ((added (gp-add-review-batch-comment
+                    "acme/web" 42 "Looks off" (cons "a.el" 10))))
+        (should (equal (alist-get 'pending added) t))
+        (should (gp-comment-pending-p added))))))
+
+(ert-deftest git-platform-test-bitbucket-review-batch-list-and-submit ()
+  "Bitbucket: only pending comments list as the batch; submitting
+recreates each pending comment as an ordinary one and deletes the
+pending original, since the public API has no way to un-pend one in
+place (see `bitbucket-submit-review-batch'), then applies EVENT."
+  (let ((git-platform-current-backend (git-platform-bitbucket))
+        (full-name "acme/web") (id 42))
+    (bitbucket-mock-with-service
+      (let ((bitbucket-mock-overrides
+             `(("/pullrequests/42/comments\\'" .
+                ((values . (((id . 1) (pending . t) (deleted . nil)
+                             (content (raw . "Looks off"))
+                             (inline (path . "a.el") (to . 10)))
+                            ((id . 2) (pending . nil) (deleted . nil)
+                             (content (raw . "already posted"))))))))))
+        (let ((batch (gp-review-batch-comments full-name id)))
+          (should (= (length batch) 1))
+          (should (= (alist-get 'id (car batch)) 1)))
+        (let (async-batch)
+          (gp-review-batch-comments-async full-name id (lambda (v) (setq async-batch v)))
+          (should (= (length async-batch) 1)))
+        (setq bitbucket-mock-calls nil)
+        (gp-submit-review-batch full-name id 'approve)
+        ;; recreated as an ordinary (non-pending) comment, same text/inline
+        (let ((created (cl-find-if
+                        (lambda (c) (and (equal (nth 0 c) "POST")
+                                        (string-match-p "/comments\\'" (nth 1 c))))
+                        bitbucket-mock-calls)))
+          (should created)
+          (should (equal (let-alist (nth 3 created) .content.raw) "Looks off"))
+          (should-not (assq 'pending (nth 3 created))))
+        ;; the pending original is deleted
+        (should (cl-find-if (lambda (c) (and (equal (nth 0 c) "DELETE")
+                                             (string-match-p "/comments/1\\'" (nth 1 c))))
+                            bitbucket-mock-calls))
+        (should (cl-find-if (lambda (c) (string-match-p "/approve\\'" (nth 1 c)))
+                            bitbucket-mock-calls))))))
+
+(ert-deftest git-platform-test-bitbucket-review-batch-discard ()
+  "Bitbucket: discarding the batch deletes each of its pending comments."
+  (let ((git-platform-current-backend (git-platform-bitbucket))
+        (full-name "acme/web") (id 42))
+    (bitbucket-mock-with-service
+      (let ((bitbucket-mock-overrides
+             `(("/pullrequests/42/comments\\'" .
+                ((values . (((id . 1) (pending . t) (deleted . nil)
+                             (content (raw . "Looks off")))))))))
+            (deleted nil))
+        (cl-letf (((symbol-function 'bitbucket-delete-comment)
+                   (lambda (fn pid cid) (push (list fn pid cid) deleted) t)))
+          (gp-discard-review-batch full-name id)
+          (should (equal deleted '(("acme/web" 42 1)))))))))
+
+(defun git-platform-test--gh-pending-comment-node ()
+  "One GraphQL comment node, as `github--pending-review-query' returns it."
+  '((id . "NODE_1") (databaseId . 1)
+    (body . "Looks off") (path . "a.el") (line . 10)
+    (author (login . "ada") (avatarUrl . "u"))
+    (createdAt . "2026-01-01T00:00:00Z")
+    (url . "https://x")))
+
+(defun git-platform-test--gh-pending-review (comment-nodes)
+  "A `reviews(states:PENDING...)' GraphQL response holding COMMENT-NODES."
+  (let* ((comments `((nodes . ,(vconcat comment-nodes))))
+         (review `((id . "REVIEW_1") (databaseId . 900) (comments . ,comments)))
+         (reviews `((nodes . ,(vector review))))
+         (pr `((reviews . ,reviews)))
+         (repo `((pullRequest . ,pr))))
+    `((repository . ,repo))))
+
+(ert-deftest git-platform-test-github-review-batch-round-trip ()
+  "GitHub: add/list/submit a review batch, dispatched through gp-, via GraphQL."
+  (let ((git-platform-current-backend (git-platform-github)))
+    (github-mock-with-service
+      (let ((full-name "acme/web") (id 42)
+            (graphql-responses
+             (list
+              ;; 1: github--ensure-pending-review's own lookup -- none yet
+              (git-platform-test--gh-pending-review nil)
+              ;; 2: addPullRequestReview
+              '((addPullRequestReview (pullRequestReview (id . "REVIEW_1"))))
+              ;; 3: addPullRequestReviewThread
+              '((addPullRequestReviewThread (thread (id . "THREAD_1")))))))
+        (cl-letf (((symbol-function 'github-graphql-request)
+                   (lambda (query &optional variables)
+                     (push (list query variables) github-mock-graphql-calls)
+                     (pop graphql-responses))))
+          (gp-add-review-batch-comment full-name id "Looks off" (cons "a.el" 10)))
+        ;; now simulate the review existing with one comment, for list/submit
+        (let ((pending-review
+               (git-platform-test--gh-pending-review
+                (list (git-platform-test--gh-pending-comment-node)))))
+          (cl-letf (((symbol-function 'github-graphql-request)
+                     (lambda (query &optional variables)
+                       (push (list query variables) github-mock-graphql-calls)
+                       (cond
+                        ((string-match-p "reviews(states:PENDING" query) pending-review)
+                        ((string-match-p "submitPullRequestReview" query)
+                         '((submitPullRequestReview (pullRequestReview (id . "REVIEW_1")))))
+                        (t '((ok . t))))))
+                    ;; no mock for the async GraphQL entry point (nothing else
+                    ;; exercises it yet); delegate to the already-mocked sync
+                    ;; path, same trick `git-platform-test-github-conformance'
+                    ;; uses for `github-api-paged-async'.
+                    ((symbol-function 'github-graphql-request-async)
+                     (lambda (query variables callback)
+                       (funcall callback t (github-graphql-request query variables)))))
+            (let ((batch (gp-review-batch-comments full-name id)))
+              (should (= (length batch) 1))
+              (should (gp-comment-pending-p (car batch)))
+              (should (= (alist-get 'id (car batch)) 1)))
+            (let (async-batch)
+              (gp-review-batch-comments-async full-name id (lambda (v) (setq async-batch v)))
+              (should (= (length async-batch) 1)))
+            (gp-submit-review-batch full-name id 'approve)
+            (should (cl-find-if (lambda (c) (string-match-p "submitPullRequestReview" (car c)))
+                                github-mock-graphql-calls))))))))
 
 (ert-deftest git-platform-test-cache-remove ()
   (let ((gp--result-cache (make-hash-table :test 'equal))

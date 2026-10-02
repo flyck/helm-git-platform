@@ -127,6 +127,30 @@ the blocking-poll bug `gp-pipeline-fetch-for-pr-async' exists to
 avoid.")
 (gp-defop create-comment (full-name id text &optional inline parent-id)
   "Create a comment on PR FULL-NAME/ID.")
+(gp-defop add-review-batch-comment (full-name id text inline &optional parent-id)
+  "Add an inline comment on PR FULL-NAME/ID to the caller's review batch.
+Unlike `gp-create-comment', the comment is not visible to anyone else
+until `gp-submit-review-batch' is called -- both platforms have a
+native \"pending review\" mechanism for exactly this (Bitbucket Cloud's
+`pending' comment flag; GitHub's PENDING pull-request review, built up
+one `addPullRequestReviewThread' mutation at a time via GraphQL).")
+(gp-defop review-batch-comments (full-name id)
+  "Return the caller's own not-yet-submitted review-batch comments on PR.
+Shaped like `gp-pull-request-comments' entries (so the same renderer
+draws them, and `gp-comment-pending-p' answers non-nil).  Used by
+`gp-overlay-pr', which draws comments synchronously already.")
+(gp-defop review-batch-comments-async (full-name id callback)
+  "Async twin of `gp-review-batch-comments'; CALLBACK gets the list, or nil.
+Used to restore/count the batch when the PR detail buffer is
+\(re)opened, off the visible-render path -- see
+`gp--detail-load-review-batch'.")
+(gp-defop submit-review-batch (full-name id &optional event body)
+  "Submit every pending review-batch comment on PR FULL-NAME/ID.
+EVENT is `approve', `changes', `comment', or nil (post the comments
+with no PR-level verdict, where the platform allows it).  BODY is an
+optional summary comment posted alongside the verdict.")
+(gp-defop discard-review-batch (full-name id)
+  "Delete every pending review-batch comment on PR FULL-NAME/ID.")
 (gp-defop resolve-comment (full-name id comment-id)
   "Resolve COMMENT-ID on PR FULL-NAME/ID.")
 (gp-defop reopen-comment (full-name id comment-id)
@@ -416,6 +440,10 @@ should hide the resolve/reopen action entirely when this is nil
 rather than let it fail on click.")
 (gp-defop comment-own-p (comment uuid)
   "Return non-nil if COMMENT was written by UUID.")
+(gp-defop comment-pending-p (comment)
+  "Return non-nil if COMMENT is part of an unsubmitted review batch.
+Only ever true for the caller's own comments -- both platforms hide
+someone else's pending review entirely (see `gp-review-batch-comments').")
 
 (gp-defop inline-target-problem (full-name id path line)
   "Return a human explanation if PATH:LINE cannot take an inline comment.

@@ -296,7 +296,8 @@ once (`gp-user-uuid' is a network op) and pass it in; when omitted it
 is looked up lazily, and a lookup failure simply hides delete rather
 than aborting the render -- drawing comments must not depend on being
 authenticated."
-  (let* ((resolved (gp-comment-resolved-p comment))
+  (let* ((pending (gp-comment-pending-p comment))
+         (resolved (and (not pending) (gp-comment-resolved-p comment)))
          (collapsed (gp-overlay--collapsed-p comment))
          (face (if resolved 'gp-overlay-resolved-face 'gp-overlay-face))
          (author (let-alist comment (or .user.display_name "?")))
@@ -308,10 +309,11 @@ authenticated."
                   (let-alist comment .user.links.avatar.href)))
          (head (concat
                 "    "
-                (if avatar (propertize " " 'display avatar) "💬")
+                (if avatar (propertize " " 'display avatar) (if pending "🕓" "💬"))
                 " "
                 (propertize author 'face '(bold gp-overlay-face))
-                (cond (resolved "  ✓ resolved")
+                (cond (pending "  pending review")
+                      (resolved "  ✓ resolved")
                       (collapsed "  …"))
                 ": "))
          ;; Continuation lines line up under the comment text, past the
@@ -321,12 +323,14 @@ authenticated."
                  (gp-linkify-string (if collapsed first-line raw))
                  "       " (string-width head))
                 face))
-         (buttons (gp-overlay--comment-buttons
-                   comment resolved collapsed
-                   (gp-comment-resolvable-p comment)
-                   (ignore-errors
-                     (gp-comment-deletable-p
-                      comment (or uuid (gp-user-uuid)))))))
+         (buttons (if pending
+                      (gp-overlay--pending-comment-buttons comment collapsed)
+                    (gp-overlay--comment-buttons
+                     comment resolved collapsed
+                     (gp-comment-resolvable-p comment)
+                     (ignore-errors
+                       (gp-comment-deletable-p
+                        comment (or uuid (gp-user-uuid))))))))
     (concat (gp-overlay--face-body head face) body
             "\n" buttons "\n")))
 
@@ -362,6 +366,23 @@ action -- see `gp-comment-delete-others'."
                (when deletable
                  (gp-overlay--button "[delete]" "Delete this comment"
                                             'gp-overlay-delete comment))
+               (gp-overlay--button (if collapsed "[+]" "[−]")
+                                          "Minimise / expand this comment"
+                                          'gp-overlay-toggle-collapse comment)))
+   " "))
+
+(defun gp-overlay--pending-comment-buttons (comment collapsed)
+  "Return the action-button line for a pending (batched) COMMENT.
+Nobody but the author can see a pending comment, so reply and
+resolve don't apply here -- only removing it from the batch
+\(`gp-overlay-delete', which already routes a still-pending GitHub
+comment through the GraphQL fallback -- see
+`github-delete-review-batch-comment') and collapsing it do."
+  (string-join
+   (delq nil
+         (list "      "
+               (gp-overlay--button "[remove from batch]" "Delete this pending comment"
+                                          'gp-overlay-delete comment)
                (gp-overlay--button (if collapsed "[+]" "[−]")
                                           "Minimise / expand this comment"
                                           'gp-overlay-toggle-collapse comment)))
@@ -472,17 +493,22 @@ INLINE is a (PATH . LINE) cons; PARENT a comment id."
     (gp-compose (gp-overlay--target inline (alist-get 'id c)))))
 
 (defun gp-overlay-new-comment ()
-  "Start a brand-new inline comment on the file line at point."
+  "Start a brand-new inline comment on the file line at point.
+Eligible for the review batch (see `gp-review-batch-default') --
+a reply (`gp-overlay-reply') always posts immediately, since a
+half-finished conversation thread is not something to hide."
   (interactive)
   (require 'gp-compose)
   (let ((pr gp-overlay--pr))
     (unless pr (user-error "No PR associated with this buffer"))
     (gp-compose
-     (gp-overlay--target
-      (cons (file-relative-name
-             buffer-file-name
-             (gp-local-find-checkout (gp-pr-full-name pr)))
-            (line-number-at-pos))))))
+     (append
+      (gp-overlay--target
+       (cons (file-relative-name
+              buffer-file-name
+              (gp-local-find-checkout (gp-pr-full-name pr)))
+             (line-number-at-pos)))
+      '(:batchable t)))))
 
 (defun gp-overlay-resolve (&optional comment)
   "Resolve COMMENT (or the one at point) on the PR and locally."
@@ -664,7 +690,14 @@ comments.  Returns the total number of overlays drawn."
   (let* ((full-name (gp-pr-full-name pr))
          (id (alist-get 'id pr))
          (dir (gp-local-resolve-dir full-name t))
-         (comments (gp-pull-request-comments full-name id))
+         ;; Bitbucket's own comment fetch already includes the caller's
+         ;; pending (batched) comments; GitHub's REST endpoints never
+         ;; surface a comment still sitting in a PENDING review at all, so
+         ;; its batch has to be merged in from a second, GraphQL-backed
+         ;; fetch.  Deduping by id keeps this safe if that ever changes.
+         (comments (delete-dups
+                    (append (gp-pull-request-comments full-name id)
+                            (ignore-errors (gp-review-batch-comments full-name id)))))
          ;; fetch the diff so outdated comments (anchored to lines no
          ;; longer in the diff) can be filtered out; nil on any error
          ;; just disables the outdated filter, never breaks overlays.

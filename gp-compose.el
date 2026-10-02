@@ -33,11 +33,32 @@ Defaults to the shared `gp-buffer-name-prefix' tag."
   :type 'string
   :group 'bitbucket)
 
+(defcustom gp-review-batch-default t
+  "When non-nil, a new top-level inline comment defaults into the review batch.
+Both Bitbucket and GitHub have a native \"pending review\" mechanism:
+the comment is created for real but stays invisible to everyone else
+until the batch is submitted (see `gp-submit-review-batch').  Toggle
+a single comment's fate with `gp-compose-toggle-batch' (\\<gp-compose-mode-map>\\[gp-compose-toggle-batch]) while composing it.
+Only applies where the compose target says the comment is eligible
+\(a brand-new inline comment; see `gp-overlay-new-comment') -- replies
+and general comments always post immediately regardless of this."
+  :type 'boolean
+  :group 'bitbucket)
+
 (defvar-local gp-compose--target nil
   "Plist describing where the composed comment goes:
 \(:full-name S :id N :inline (PATH . LINE) :parent ID
- :submit-function FN :on-success FN).
-SUBMIT-FUNCTION defaults to `gp-create-comment' on the active backend.")
+ :submit-function FN :on-success FN :batchable BOOL).
+SUBMIT-FUNCTION defaults to `gp-create-comment' on the active backend,
+or to `gp-add-review-batch-comment' while :batchable is set and the
+buffer-local `gp-compose--batch' toggle (see `gp-compose-toggle-batch')
+is on.")
+
+(defvar-local gp-compose--batch nil
+  "Whether this buffer's comment goes into the review batch instead of
+posting immediately.  Seeded from `gp-review-batch-default' when
+TARGET's :batchable is set; meaningless otherwise.  See
+`gp-compose-toggle-batch'.")
 
 (defvar-local gp-compose--return-window nil
   "Window configuration to restore after the compose buffer closes.")
@@ -111,7 +132,8 @@ Triggers after a colon, e.g. typing \":think\" offers \":thinking:\"."
 (defvar-keymap gp-compose-mode-map
   "C-c C-c" #'gp-compose-submit
   "C-c C-k" #'gp-compose-cancel
-  "C-c C-p" #'gp-compose-preview)
+  "C-c C-p" #'gp-compose-preview
+  "C-c C-b" #'gp-compose-toggle-batch)
 
 (define-minor-mode gp-compose-mode
   "Minor mode active in a PR comment compose buffer.
@@ -184,16 +206,33 @@ description, say) via TARGET's `:what'."
 
 (defun gp-compose--do-submit (target text)
   "Send TEXT to the PR described by TARGET, returning the created comment.
-Honours TARGET's :submit-function, defaulting to
-`gp-create-comment' on the active backend."
+Honours TARGET's :submit-function; otherwise posts immediately via
+`gp-create-comment', unless TARGET is :batchable and the buffer's
+`gp-compose--batch' toggle is on, in which case it goes to the
+review batch via `gp-add-review-batch-comment' instead."
   (let ((fn (or (plist-get target :submit-function)
-                #'gp-create-comment)))
+                (if (and (plist-get target :batchable) gp-compose--batch)
+                    #'gp-add-review-batch-comment
+                  #'gp-create-comment))))
     (funcall fn
              (plist-get target :full-name)
              (plist-get target :id)
              text
              (plist-get target :inline)
              (plist-get target :parent))))
+
+(defun gp-compose-toggle-batch ()
+  "Toggle whether this buffer's comment joins the review batch.
+Only meaningful when the compose target is :batchable (a brand-new
+inline comment); a no-op with a clear message otherwise."
+  (interactive)
+  (unless (plist-get gp-compose--target :batchable)
+    (user-error "This comment cannot be batched into a review"))
+  (setq gp-compose--batch (not gp-compose--batch))
+  (gp-compose--update-header-line)
+  (message "%s" (if gp-compose--batch
+                    "Will be added to the review batch (not visible until submitted)"
+                  "Will post immediately")))
 
 (defcustom gp-compose-hard-line-breaks t
   "When non-nil, preserve single newlines as hard breaks in posted comments.
@@ -264,7 +303,8 @@ Lines that are blank, already end in two spaces, or sit inside a
                               (plist-get target :id)
                               (car inline) (cdr inline)))))
         (user-error "%s" problem)))
-    (let ((created (gp-compose--do-submit target text)))
+    (let* ((batched (and (plist-get target :batchable) gp-compose--batch))
+           (created (gp-compose--do-submit target text)))
       (let ((on-success (plist-get target :on-success)))
         (when on-success (funcall on-success created)))
       (kill-buffer (current-buffer))
@@ -272,7 +312,8 @@ Lines that are blank, already end in two spaces, or sit inside a
       (when winconf (set-window-configuration winconf))
       ;; a target with an :on-success of its own has already reported
       (unless (plist-get target :on-success)
-        (message "%s posted" (capitalize (gp-compose--noun target))))
+        (message "%s %s" (capitalize (gp-compose--noun target))
+                 (if batched "added to the review batch" "posted")))
       created)))
 
 (defun gp-compose-cancel ()
@@ -295,19 +336,36 @@ Lines that are blank, already end in two spaces, or sit inside a
     (cond (what (format "%s of PR #%s"
                         (capitalize what) (plist-get target :id)))
           (parent (format "Reply on PR #%s" (plist-get target :id)))
+          ;; the filename alone, not the full relative path: a deep path
+          ;; combined with the batch state and every shortcut would overflow
+          ;; the header line's single (non-wrapping) display line
           (inline (format "Inline comment on %s:%s"
-                          (car inline) (cdr inline)))
+                          (file-name-nondirectory (car inline)) (cdr inline)))
           (t (format "Comment on PR #%s" (plist-get target :id))))))
+
+(defun gp-compose--update-header-line ()
+  "Refresh the compose buffer's header line to reflect `gp-compose--batch'."
+  (setq header-line-format
+        (concat (gp-compose--describe-target gp-compose--target)
+                (if (plist-get gp-compose--target :batchable)
+                    (if gp-compose--batch " [batched]" " [immediate]")
+                  "")
+                "   C-c C-c submit · C-c C-p preview · C-c C-k cancel"
+                (if (plist-get gp-compose--target :batchable)
+                    " · C-c C-b batch"
+                  ""))))
 
 ;;;###autoload
 (defun gp-compose (target)
   "Open a compose buffer for a comment described by TARGET (a plist).
 TARGET keys: :full-name :id [:inline (PATH . LINE)] [:parent ID]
 [:submit-function FN] [:on-success FN] [:initial-text TEXT]
-[:what NOUN] [:no-hard-breaks BOOL] [:allow-empty BOOL].  See
-`gp-compose--target'.
+[:what NOUN] [:no-hard-breaks BOOL] [:allow-empty BOOL] [:batchable BOOL].
+See `gp-compose--target'.
 
-The last four let the same editor serve something that is not a
+`:batchable' marks a new inline comment as eligible for the review
+batch (see `gp-review-batch-default'/`gp-compose-toggle-batch'); the
+other four let the same editor serve something that is not a
 comment: `:what' names it in the header, prompts and messages;
 `:no-hard-breaks' keeps newlines verbatim; `:allow-empty' makes
 submitting nothing a confirmable clear rather than an error."
@@ -320,9 +378,9 @@ submitting nothing a confirmable clear rather than an error."
         (insert init))
       (setq gp-compose--target target
             gp-compose--return-window winconf
-            header-line-format
-            (concat (gp-compose--describe-target target)
-                    "   C-c C-c submit · C-c C-p preview · C-c C-k cancel")))
+            gp-compose--batch (and (plist-get target :batchable)
+                                   gp-review-batch-default))
+      (gp-compose--update-header-line))
     (pop-to-buffer buf)
     buf))
 

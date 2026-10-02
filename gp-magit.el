@@ -217,7 +217,9 @@ Returns the number drawn, or nil when not applicable."
 ;;;; Commands -----------------------------------------------------------------
 
 (defun gp-magit-add-comment ()
-  "Add an inline PR comment on the file:line at point in the magit diff."
+  "Add an inline PR comment on the file:line at point in the magit diff.
+Eligible for the review batch (see `gp-review-batch-default') --
+this is a brand-new comment, unlike a reply to an existing one."
   (interactive)
   (let ((pr (gp-magit--pr))
         (loc (gp-magit--file-line-at-point)))
@@ -228,6 +230,7 @@ Returns the number drawn, or nil when not applicable."
      (list :full-name (gp-pr-full-name pr)
            :id (alist-get 'id pr)
            :inline (cons (car loc) (cdr loc))
+           :batchable t
            :on-success (lambda (_c)
                          (when (derived-mode-p 'magit-diff-mode)
                            (gp-magit-draw-comments t)))))))

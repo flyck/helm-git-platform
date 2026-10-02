@@ -459,7 +459,8 @@ cannot resolve or unresolve a reply -- so a reply keeps its own
 thread."
   (let* ((depth (or depth 0))
          (ind (make-string (* depth 4) ?\s))
-         (resolved (gp-comment-resolved-p comment))
+         (pending (gp-comment-pending-p comment))
+         (resolved (and (not pending) (gp-comment-resolved-p comment)))
          (collapse (if by-id
                        (gp--comment-thread-resolved-p comment by-id)
                      resolved))
@@ -482,7 +483,7 @@ thread."
              ind
              (if (> depth 0) (propertize "↳ " 'face 'shadow) "")
              (gp--avatar-string .user.links.avatar.href
-                                       (if resolved "✅" "💬"))
+                                       (cond (pending "🕓") (resolved "✅") (t "💬")))
              " "
              (propertize (or .user.display_name "?")
                          'face 'gp-comment-author-face)
@@ -493,6 +494,7 @@ thread."
                (if ts (propertize (concat "  " (gp--relative-time ts))
                                   'face 'shadow)
                  ""))
+             (if pending (propertize "  pending review" 'face 'warning) "")
              (if resolved (propertize "  ✓ resolved" 'face 'success) "")
              (if outdated (propertize "  ⊘ outdated" 'face 'shadow) "")))
           (when (and pr .inline.path)
@@ -509,7 +511,21 @@ thread."
           (let ((body (string-trim-right
                        (gp--render-markdown (or .content.raw "")))))
             (insert (funcall pad (replace-regexp-in-string "^" "  " body)) "\n"))
-          (when pr
+          (when (and pr pending)
+            ;; Nobody but the author can see a pending comment, so reply,
+            ;; react, resolve and the AI-terminal actions are all
+            ;; meaningless here -- only editing its text and pulling it
+            ;; back out of the batch make sense.
+            (insert ind "  ")
+            (gp--insert-action-button
+             "edit [e]" "Edit this comment"
+             (lambda () (gp-ui-edit-comment pr comment)))
+            (insert " ")
+            (gp--insert-action-button
+             "remove from batch [K]" "Delete this pending comment, removing it from the review batch"
+             (lambda () (gp-ui-delete-comment pr comment)))
+            (insert "\n"))
+          (when (and pr (not pending))
             ;; the reactions line indents itself: emitting the indent here
             ;; left stray whitespace on the action row when a comment had no
             ;; reactions to draw
@@ -1340,6 +1356,19 @@ that is when you need a way to add the first one."
          (format "📤 Send %d marked [t]" (length gp--detail-marked-comment-ids))
          "Send all marked comments to the matching AI terminal session"
          (lambda () (gp-detail-send-to-terminal))))
+      (when-let* ((n (length (cl-remove-if-not #'gp-comment-pending-p comments)))
+                  ((> n 0)))
+        (insert "   ")
+        (let ((buf (current-buffer)))
+          (gp--insert-action-button/spinner
+           'submit-review (format "✅ Submit review (%d) [S]" n)
+           "Submit your pending review-batch comments, with an optional approve/request-changes verdict"
+           (lambda () (gp--detail-run-action
+                       buf 'submit-review (lambda () (gp-detail-submit-review-batch)))))
+          (insert " ")
+          (gp--insert-action-button
+           "discard batch [C-c C-k]" "Delete every pending review-batch comment without submitting"
+           (lambda () (gp-detail-discard-review-batch)))))
       ;; draft toggle, only on the user's own open PRs
       (when (and (gp-pr-authored-by-p pr (gp-user-uuid))
                  (gp-pr-open-p pr))
@@ -1479,7 +1508,9 @@ that is when you need a way to add the first one."
   "A"   #'gp-detail-pipeline-arm-deploy   ;; arm/disarm a deploy watcher
   "C-c A" #'gp-deploy-watch-list-show     ;; every armed watcher
   "m"   #'gp-detail-toggle-mark
-  "l"   #'gp-detail-pipeline-step-log)
+  "l"   #'gp-detail-pipeline-step-log
+  "S"     #'gp-detail-submit-review-batch  ;; submit pending review-batch comments
+  "C-c C-k" #'gp-detail-discard-review-batch) ;; discard the review batch
 
 (defun gp-detail-edit-reviewers ()
   "Add or remove reviewers on the PR shown in this buffer."
@@ -2098,6 +2129,59 @@ the active backend actually supports -- see `gp-review-retraction-kind'."
     (gp-ui-set-review pr 'changes
                       (eq (gp-pr-my-review-state pr (gp-user-uuid)) 'changes))))
 
+(defconst gp--review-batch-verdict-choices
+  '(("Approve" . approve)
+    ("Request changes" . changes)
+    ("Comment only (no verdict)" . nil))
+  "Choices offered by `gp-ui-submit-review-batch's verdict prompt.")
+
+(defun gp-ui-submit-review-batch (pr)
+  "Submit PR's pending review-batch comments, prompting for a verdict.
+Refreshes the detail buffer afterwards."
+  (let* ((full-name (gp-pr-full-name pr))
+         (id (alist-get 'id pr))
+         (label (completing-read "Submit review as: "
+                                 (mapcar #'car gp--review-batch-verdict-choices)
+                                 nil t))
+         (event (cdr (assoc label gp--review-batch-verdict-choices)))
+         (body (when (or event (yes-or-no-p "Add a summary comment? "))
+                 (let ((s (read-string "Summary (optional): ")))
+                   (unless (string-empty-p s) s)))))
+    (gp-submit-review-batch full-name id event body)
+    (message "PR #%s review submitted%s" id
+             (pcase event
+               ('approve " (approved)")
+               ('changes " (changes requested)")
+               (_ "")))
+    (gp-invalidate-pr-caches pr)
+    (gp-detail-refresh)))
+
+(defun gp-detail-submit-review-batch ()
+  "Submit the current PR's pending review-batch comments."
+  (interactive)
+  (let ((pr gp--pr))
+    (unless (cl-some #'gp-comment-pending-p gp--detail-comments)
+      (user-error "No pending review-batch comments to submit"))
+    (gp-ui-submit-review-batch pr)))
+
+(defun gp-ui-discard-review-batch (pr)
+  "Delete PR's pending review-batch comments after confirmation."
+  (let ((full-name (gp-pr-full-name pr))
+        (id (alist-get 'id pr)))
+    (when (yes-or-no-p "Discard every pending review-batch comment? ")
+      (gp-discard-review-batch full-name id)
+      (message "Review batch discarded")
+      (gp-invalidate-pr-caches pr)
+      (gp-detail-refresh))))
+
+(defun gp-detail-discard-review-batch ()
+  "Discard the current PR's pending review-batch comments."
+  (interactive)
+  (let ((pr gp--pr))
+    (unless (cl-some #'gp-comment-pending-p gp--detail-comments)
+      (user-error "No pending review-batch comments to discard"))
+    (gp-ui-discard-review-batch pr)))
+
 (defun gp-detail-toggle-draft ()
   "Toggle draft/ready on the current PR (must be your own)."
   (interactive)
@@ -2599,6 +2683,7 @@ fresh data bind `gp-cache-ttl' to 0 around the call."
                              gp--detail-stats gp--detail-diff gp--detail-pipelines)
                             ;; heavier data, deferred so it never blocks the paint
                             (gp--detail-load-stats-diff buf pr ttl)
+                            (gp--detail-load-review-batch buf pr)
                             (gp--detail-load-reviewers buf pr)
                             (gp--detail-load-commits buf pr)
                             (gp--detail-load-local-dirty buf pr)
@@ -2796,6 +2881,33 @@ NOT `run-with-idle-timer' -- see `gp--detail-load-stats-diff'."
                   (gp--detail-rerender buf)))))
          (error
           (gp-log-error "reviewers load failed: %s" (error-message-string e))))))))
+
+(defun gp--detail-load-review-batch (buf pr)
+  "Merge the caller's pending review-batch comments into BUF's comment list.
+Bitbucket's ordinary comment fetch already includes the caller's
+pending comments, so this is a no-op there in practice (the dedup
+below simply finds nothing new); GitHub's REST comment fetch never
+surfaces a comment still sitting in a PENDING review, so its batch
+only ever arrives through this GraphQL-backed call.  Deferred off the
+visible-render path like the other enrichment loads."
+  (run-at-time
+   0.1 nil
+   (lambda ()
+     (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
+       (condition-case e
+           (gp-review-batch-comments-async
+            (gp-pr-full-name pr) (alist-get 'id pr)
+            (lambda (batch)
+              (when (and batch (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
+                (with-current-buffer buf
+                  (let ((known (mapcar (lambda (c) (alist-get 'id c)) gp--detail-comments)))
+                    (setq gp--detail-comments
+                          (append gp--detail-comments
+                                  (cl-remove-if (lambda (c) (member (alist-get 'id c) known))
+                                               batch))))
+                  (gp--detail-rerender buf)))))
+         (error
+          (gp-log-error "review batch load failed: %s" (error-message-string e))))))))
 
 (defun gp--detail-load-pipelines (buf pr)
   "Fetch PR's pipelines on a separate idle timer and fold them into BUF.

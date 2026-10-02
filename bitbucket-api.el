@@ -1005,7 +1005,7 @@ Deleted comments are filtered out.  MAX-ITEMS caps the count."
                     "values.user.links.avatar.href,values.created_on,"
                     "values.resolution.user.display_name,"
                     "values.inline.path,values.inline.from,values.inline.to,"
-                    "values.links.html.href,"
+                    "values.links.html.href,values.pending,"
                     "values.parent.id,next")))
      max-items)))
 
@@ -1020,7 +1020,7 @@ CALLBACK receives (OK COMMENTS). Deleted comments are filtered out."
                    "values.user.links.avatar.href,values.created_on,"
                    "values.resolution.user.display_name,"
                    "values.inline.path,values.inline.from,values.inline.to,"
-                   "values.links.html.href,"
+                   "values.links.html.href,values.pending,"
                    "values.parent.id,next")))
    (lambda (ok comments)
      (funcall callback ok
@@ -1033,21 +1033,111 @@ CALLBACK receives (OK COMMENTS). Deleted comments are filtered out."
   "Return non-nil if COMMENT has been marked resolved on the PR."
   (and (alist-get 'resolution comment) t))
 
+(defun bitbucket-comment-pending-p (comment)
+  "Return non-nil if COMMENT is part of an unsubmitted review batch."
+  (eq (alist-get 'pending comment) t))
+
+(defun bitbucket--comment-data (text &optional inline parent-id pending)
+  "Build the JSON body for a comment write from TEXT and optional
+INLINE/PARENT-ID/PENDING.  Shared by `bitbucket-create-comment' and
+`bitbucket-add-review-batch-comment' so the two never drift."
+  (let ((data `((content . ((raw . ,text))))))
+    (when inline
+      (push `(inline . ((path . ,(car inline)) (to . ,(cdr inline)))) data))
+    (when parent-id
+      (push `(parent . ((id . ,parent-id))) data))
+    (when pending
+      (push '(pending . t) data))
+    data))
+
 (defun bitbucket-create-comment (full-name id text &optional inline parent-id)
   "Create a comment on PR ID in FULL-NAME with raw TEXT.
 INLINE, when non-nil, is a cons (PATH . LINE) anchoring an inline
 comment on the new side of the diff.  PARENT-ID, when non-nil,
 makes this a reply to that comment.  Returns the created comment.
 Requires a token with Pull-requests:Write."
-  (let ((data `((content . ((raw . ,text))))))
-    (when inline
-      (push `(inline . ((path . ,(car inline)) (to . ,(cdr inline)))) data))
-    (when parent-id
-      (push `(parent . ((id . ,parent-id))) data))
-    (bitbucket-api-request
-     "POST"
-     (format "/repositories/%s/pullrequests/%s/comments" full-name id)
-     nil data)))
+  (bitbucket-api-request
+   "POST"
+   (format "/repositories/%s/pullrequests/%s/comments" full-name id)
+   nil (bitbucket--comment-data text inline parent-id)))
+
+(defun bitbucket-add-review-batch-comment (full-name id text inline &optional parent-id)
+  "Create a PENDING inline comment on PR ID in FULL-NAME.
+Bitbucket Cloud's `pending' flag on a comment is its native batched-
+review mechanism: the comment is created for real, but the API only
+ever returns it to the user who wrote it until it is unpended (see
+`bitbucket-submit-review-batch').  Returns the created comment."
+  (bitbucket-api-request
+   "POST"
+   (format "/repositories/%s/pullrequests/%s/comments" full-name id)
+   nil (bitbucket--comment-data text inline parent-id t)))
+
+(defun bitbucket-review-batch-comments (full-name id)
+  "Return the caller's own pending (unsubmitted) comments on PR ID in FULL-NAME.
+Bitbucket only ever returns another user's pending comments as
+invisible, so no UUID filter is needed here -- everything the fetch
+returns with `pending' true is necessarily the caller's own."
+  (cl-remove-if-not
+   (lambda (c) (eq (alist-get 'pending c) t))
+   (bitbucket-pull-request-comments full-name id)))
+
+(defun bitbucket-review-batch-comments-async (full-name id callback)
+  "Async twin of `bitbucket-review-batch-comments'.  CALLBACK gets the list.
+Bitbucket already returns pending comments inline from the ordinary
+comments fetch, so this reuses that async fetch and filters the
+result rather than issuing a second request."
+  (bitbucket-pull-request-comments-async
+   full-name id
+   (lambda (ok comments)
+     (funcall callback
+              (if ok
+                  (cl-remove-if-not (lambda (c) (eq (alist-get 'pending c) t)) comments)
+                nil)))))
+
+(defun bitbucket-submit-review-batch (full-name id &optional event _body)
+  "Make every pending review-batch comment visible, then apply EVENT.
+Bitbucket Cloud's public API has NO documented way to un-pend an
+existing comment in place:
+  - `PUT .../comments/{id}' with a `pending' key 400s outright
+    (\"extra keys not allowed\"), confirmed live -- the field this
+    package's own POST sets to create a pending comment cannot be
+    unset through the same resource.
+  - There is no separate \"finish review\" endpoint (that exists only
+    in Bitbucket Data Center, a different product).
+  - The web UI's own \"Finish review\" button calls an *internal*
+    endpoint (`POST bitbucket.org/!api/internal/repositories/.../
+    pullrequests/{id}/review', confirmed by inspecting the browser's
+    network tab), authenticated by browser session cookie rather than
+    an API token -- not reachable from here, and approving/requesting
+    changes was confirmed NOT to trigger it as a side effect (an
+    earlier assumption to that effect was wrong; verified live: the
+    verdict posts successfully but the comment stays pending).
+So instead this recreates each pending comment as an ordinary
+\(non-pending, immediately visible\) one with the same text and inline
+location, then deletes the original pending copy -- fully within the
+documented, token-authenticated public API.  The tradeoff: the
+recreated comment gets a new id and `created_on' (now, not when it
+was originally written); nothing else can have replied to or reacted
+to a pending comment in the meantime, since nobody else could see it,
+so nothing is lost there.  EVENT is `approve', `changes', or nil
+\(comments-only, still meaningful now that un-pending is real work
+rather than a side effect of the verdict)."
+  (dolist (c (bitbucket-review-batch-comments full-name id))
+    (let-alist c
+      (bitbucket-create-comment
+       full-name id .content.raw
+       (and .inline.path (cons .inline.path (or .inline.to .inline.from)))
+       .parent.id))
+    (bitbucket-delete-comment full-name id (alist-get 'id c)))
+  (pcase event
+    ('approve (bitbucket-approve-pr full-name id))
+    ('changes (bitbucket-request-changes-pr full-name id))
+    (_ nil)))
+
+(defun bitbucket-discard-review-batch (full-name id)
+  "Delete every pending review-batch comment on PR ID in FULL-NAME."
+  (dolist (c (bitbucket-review-batch-comments full-name id))
+    (bitbucket-delete-comment full-name id (alist-get 'id c))))
 
 (defun bitbucket-resolve-comment (full-name id comment-id)
   "Mark COMMENT-ID on PR ID in FULL-NAME as resolved.

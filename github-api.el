@@ -1548,28 +1548,74 @@ See `github-resolve-comment'."
 
 (defun github-delete-comment (full-name number comment-id)
   "Delete COMMENT-ID on PR NUMBER in FULL-NAME.
-Tries the review-comments endpoint first, falling back to the issue
-comment one, since the caller only has a comment id and not which
-kind it is."
-  (ignore number)
+Tries the review-comments endpoint first, then the issue comment one,
+since the caller only has a comment id and not which kind it is; then
+falls back to `github-delete-review-batch-comment' for a comment that
+is still sitting in the caller's own PENDING review -- REST 404s on
+those (they are not \"real\" comments yet), and only GraphQL's
+`deletePullRequestReviewComment' (by node id, not this databaseId)
+can remove one without discarding the whole batch."
   (condition-case nil
       (github-api-request "DELETE" (format "/repos/%s/pulls/comments/%s" full-name comment-id))
     (error
-     (github-api-request "DELETE" (format "/repos/%s/issues/comments/%s" full-name comment-id)))))
+     (condition-case nil
+         (github-api-request "DELETE" (format "/repos/%s/issues/comments/%s" full-name comment-id))
+       (error (github-delete-review-batch-comment full-name number comment-id))))))
+
+(defun github-delete-review-batch-comment (full-name number comment-id)
+  "Delete pending COMMENT-ID (a databaseId) from the caller's review batch.
+Looks up its GraphQL node id among the pending review's own comments,
+since `deletePullRequestReviewComment' takes that, not the databaseId
+REST and the rest of this package use everywhere else."
+  (let* ((review (github--pending-review full-name number))
+         (node-id (cl-loop for c in (append (let-alist review .comments.nodes) nil)
+                            when (equal (alist-get 'databaseId c) comment-id)
+                            return (alist-get 'id c))))
+    (unless node-id
+      (user-error "Comment %s is not in your pending review" comment-id))
+    (github-graphql-request
+     "mutation($id:ID!){deletePullRequestReviewComment(input:{id:$id}){
+        pullRequestReview{id}}}"
+     `((id . ,node-id)))))
 
 (defun github-edit-comment (full-name number comment-id text)
   "Replace COMMENT-ID's body with raw TEXT on PR NUMBER in FULL-NAME.
-Tries the review-comments endpoint first, then falls back to the
-issue comment endpoint (same ambiguity as `github-delete-comment')."
-  (ignore number)
+Tries the review-comments endpoint first, then the issue comment one,
+then falls back to `github-edit-review-batch-comment' for a comment
+still sitting in the caller's own PENDING review (same reasoning as
+`github-delete-comment')."
   (condition-case nil
       (github--reshape-review-comment
        (github-api-request "PATCH" (format "/repos/%s/pulls/comments/%s" full-name comment-id)
                            nil `((body . ,text))))
     (error
-     (github--reshape-issue-comment
-      (github-api-request "PATCH" (format "/repos/%s/issues/comments/%s" full-name comment-id)
-                          nil `((body . ,text)))))))
+     (condition-case nil
+         (github--reshape-issue-comment
+          (github-api-request "PATCH" (format "/repos/%s/issues/comments/%s" full-name comment-id)
+                              nil `((body . ,text))))
+       (error (github-edit-review-batch-comment full-name number comment-id text))))))
+
+(defun github-edit-review-batch-comment (full-name number comment-id text)
+  "Replace the body of pending COMMENT-ID (a databaseId) with TEXT.
+Same node-id lookup as `github-delete-review-batch-comment', for the
+same reason: `updatePullRequestReviewComment' needs the GraphQL node
+id, not the databaseId REST and this package use elsewhere."
+  (let* ((review (github--pending-review full-name number))
+         (node-id (cl-loop for c in (append (let-alist review .comments.nodes) nil)
+                            when (equal (alist-get 'databaseId c) comment-id)
+                            return (alist-get 'id c))))
+    (unless node-id
+      (user-error "Comment %s is not in your pending review" comment-id))
+    (let ((data (github-graphql-request
+                 "mutation($id:ID!,$body:String!){
+                    updatePullRequestReviewComment(input:{
+                      pullRequestReviewCommentId:$id,body:$body}){
+                      pullRequestReviewComment{databaseId body path line
+                        author{login avatarUrl} createdAt url}}}"
+                 `((id . ,node-id) (body . ,text)))))
+      (let-alist data
+        (github--reshape-pending-comment
+         (append .updatePullRequestReviewComment.pullRequestReviewComment `((id . ,node-id))))))))
 
 ;;;; Reviews (approve / request changes) ---------------------------------------
 
@@ -1619,6 +1665,156 @@ Withdrawing a review here always goes through
 `github--dismiss-own-review', which leaves a visible dismissal event
 on the PR's timeline rather than making the review disappear."
   'dismiss)
+
+;;;; Review batch (pending review, GraphQL only) --------------------------------
+
+;; REST's \"create a review\" (POST .../pulls/{n}/reviews) can only submit a
+;; whole `comments' array in one call -- there is no REST way to add one more
+;; comment to a review already sitting PENDING.  GraphQL can:
+;; `addPullRequestReviewThread' takes a `pullRequestReviewId' and adds a
+;; single new inline thread to that review, whatever state it is in.  So the
+;; whole batch flow (find-or-create the pending review, add threads to it one
+;; at a time, submit or delete it) goes through GraphQL, mirroring how
+;; comment resolution above already has to.
+
+(defun github--pr-node-id (full-name number)
+  "Return the GraphQL node id of PR NUMBER in FULL-NAME."
+  (alist-get 'node_id (github-pull-request full-name number)))
+
+(defconst github--pending-review-query
+  "query($owner:String!,$repo:String!,$number:Int!){
+     repository(owner:$owner,name:$repo){
+       pullRequest(number:$number){
+         reviews(states:PENDING,first:1,author:\"me\"){nodes{
+           id databaseId
+           comments(first:100){nodes{
+             id databaseId body path line
+             author{login avatarUrl}
+             createdAt url}}}}}}}"
+  "GraphQL query behind `github--pending-review' and its async twin.
+Kept as one constant so the sync/async paths can never drift apart.
+Each comment's GraphQL `id' (distinct from `databaseId') is fetched
+here because `github-delete-review-batch-comment' needs it -- REST's
+comment delete endpoint 404s on a comment still inside a pending
+review; only the GraphQL node id works with
+`deletePullRequestReviewComment'.")
+
+(defun github--pending-review (full-name number)
+  "Return the caller's own PENDING review object on PR NUMBER, or nil.
+Fetched fresh every time (no cache): the batch's contents are what
+`github-review-batch-comments' shows, and a stale review id would
+either 404 on submit or silently reuse a review the user already
+submitted or deleted from the web UI."
+  (let* ((owner (car (split-string full-name "/")))
+         (repo (cadr (split-string full-name "/")))
+         (data (github-graphql-request
+                github--pending-review-query
+                `((owner . ,owner) (repo . ,repo) (number . ,number)))))
+    (let-alist data
+      (car (append .repository.pullRequest.reviews.nodes nil)))))
+
+(defun github--ensure-pending-review (full-name number)
+  "Return the Node ID of the caller's PENDING review, creating one if needed."
+  (or (alist-get 'id (github--pending-review full-name number))
+      (let* ((pr-id (github--pr-node-id full-name number))
+             (data (github-graphql-request
+                    "mutation($pr:ID!){addPullRequestReview(input:{pullRequestId:$pr}){
+                       pullRequestReview{id}}}"
+                    `((pr . ,pr-id)))))
+        (let-alist data .addPullRequestReview.pullRequestReview.id))))
+
+(defun github--reshape-pending-comment (c)
+  "Reshape a pending-review GraphQL comment node C into the shared shape.
+Mirrors `github--reshape-review-comment', with `pending' set so
+`github-comment-pending-p' can tell it apart -- these never go
+through the REST reshapers, since REST does not surface a comment
+still sitting in a PENDING review."
+  (let-alist c
+    `((pending . t)
+      (id . ,.databaseId)
+      (node-id . ,.id)
+      (content (raw . ,.body))
+      (user (display_name . ,.author.login)
+            (uuid . ,.author.login)
+            (links (avatar (href . ,.author.avatarUrl))))
+      (created_on . ,.createdAt)
+      (links (html (href . ,.url)))
+      (inline (path . ,.path) (from . ,.line) (to . ,.line)))))
+
+(defun github-add-review-batch-comment (full-name number text inline &optional parent-id)
+  "Add a PENDING inline comment on PR NUMBER in FULL-NAME to the caller's batch.
+INLINE is a cons (PATH . LINE).  PARENT-ID replies to an existing
+review comment -- `addPullRequestReviewThreadReply' takes the
+comment's REST/databaseId directly, no thread lookup needed, unlike
+resolving (`github--review-thread-id')."
+  (let* ((review-id (github--ensure-pending-review full-name number)))
+    (if parent-id
+        (github-graphql-request
+         "mutation($review:ID!,$comment:Int!,$body:String!){
+            addPullRequestReviewThreadReply(input:{
+              pullRequestReviewId:$review,inReplyTo:$comment,body:$body}){
+              comment{databaseId}}}"
+         `((review . ,review-id) (comment . ,parent-id) (body . ,text)))
+      (github-graphql-request
+       "mutation($review:ID!,$path:String!,$line:Int!,$body:String!){
+          addPullRequestReviewThread(input:{
+            pullRequestReviewId:$review,path:$path,line:$line,body:$body}){
+            thread{id}}}"
+       `((review . ,review-id) (path . ,(car inline)) (line . ,(cdr inline))
+         (body . ,text))))))
+
+(defun github-review-batch-comments (full-name number)
+  "Return the caller's own pending (unsubmitted) comments on PR NUMBER
+in FULL-NAME."
+  (let ((review (github--pending-review full-name number)))
+    (mapcar #'github--reshape-pending-comment
+            (append (let-alist review .comments.nodes) nil))))
+
+(defun github-review-batch-comments-async (full-name number callback)
+  "Async twin of `github-review-batch-comments'.  CALLBACK gets the list, or nil."
+  (let ((owner (car (split-string full-name "/")))
+        (repo (cadr (split-string full-name "/"))))
+    (github-graphql-request-async
+     github--pending-review-query
+     `((owner . ,owner) (repo . ,repo) (number . ,number))
+     (lambda (ok data)
+       (funcall callback
+                (when ok
+                  (let-alist data
+                    (mapcar #'github--reshape-pending-comment
+                            (append (let-alist (car (append .repository.pullRequest.reviews.nodes nil))
+                                      .comments.nodes)
+                                    nil)))))))))
+
+(defun github-submit-review-batch (full-name number &optional event body)
+  "Submit the caller's pending review on PR NUMBER in FULL-NAME.
+EVENT is `approve', `changes', `comment', or nil (treated as
+`comment': GitHub requires an explicit event to submit at all).
+BODY is an optional summary attached to the review."
+  (let ((review-id (github--ensure-pending-review full-name number))
+        (gh-event (pcase event
+                    ('approve "APPROVE")
+                    ('changes "REQUEST_CHANGES")
+                    (_ "COMMENT"))))
+    (github-graphql-request
+     "mutation($review:ID!,$event:PullRequestReviewEvent!,$body:String){
+        submitPullRequestReview(input:{
+          pullRequestReviewId:$review,event:$event,body:$body}){
+          pullRequestReview{id}}}"
+     `((review . ,review-id) (event . ,gh-event) (body . ,body)))))
+
+(defun github-discard-review-batch (full-name number)
+  "Delete the caller's pending review on PR NUMBER in FULL-NAME, if any."
+  (when-let* ((review (github--pending-review full-name number))
+              (review-id (alist-get 'id review)))
+    (github-graphql-request
+     "mutation($review:ID!){deletePullRequestReview(input:{pullRequestReviewId:$review}){
+        clientMutationId}}"
+     `((review . ,review-id)))))
+
+(defun github-comment-pending-p (comment)
+  "Return non-nil if COMMENT is part of the caller's unsubmitted review batch."
+  (eq (alist-get 'pending comment) t))
 
 ;;;; Diff / stats ---------------------------------------------------------------
 

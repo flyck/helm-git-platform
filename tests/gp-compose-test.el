@@ -33,6 +33,58 @@
                          '("ws/slug" 12 "hello **world**" ("a.ts" . 5) 7))))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
+(ert-deftest gp-test-compose-batchable-defaults-from-custom ()
+  "A :batchable target seeds `gp-compose--batch' from `gp-review-batch-default'."
+  (let ((gp-review-batch-default t)
+        (target (list :full-name "ws/slug" :id 12 :inline '("a.ts" . 5)
+                      :batchable t)))
+    (let ((buf (gp-compose target)))
+      (unwind-protect
+          (with-current-buffer buf
+            (should gp-compose--batch))
+        (kill-buffer buf))))
+  (let ((gp-review-batch-default nil)
+        (target (list :full-name "ws/slug" :id 12 :inline '("a.ts" . 5)
+                      :batchable t)))
+    (let ((buf (gp-compose target)))
+      (unwind-protect
+          (with-current-buffer buf
+            (should-not gp-compose--batch))
+        (kill-buffer buf)))))
+
+(ert-deftest gp-test-compose-non-batchable-ignores-default ()
+  "A target without :batchable never enters batch mode, whatever the default."
+  (let ((gp-review-batch-default t)
+        (target (list :full-name "ws/slug" :id 12)))
+    (let ((buf (gp-compose target)))
+      (unwind-protect
+          (with-current-buffer buf
+            (should-not gp-compose--batch)
+            (should-error (gp-compose-toggle-batch) :type 'user-error))
+        (kill-buffer buf)))))
+
+(ert-deftest gp-test-compose-toggle-batch-flips-and-routes-submit ()
+  "Toggling batch mode routes submission through the batch add function."
+  (let* ((gp-review-batch-default nil)
+         (calls nil)
+         (target (list :full-name "ws/slug" :id 12 :inline '("a.ts" . 5)
+                       :batchable t)))
+    (cl-letf (((symbol-function 'gp-create-comment)
+               (lambda (&rest args) (push (cons 'immediate args) calls) '((id . 1))))
+              ((symbol-function 'gp-add-review-batch-comment)
+               (lambda (&rest args) (push (cons 'batched args) calls) '((id . 2) (pending . t)))))
+      (let ((buf (gp-compose target)))
+        (unwind-protect
+            (with-current-buffer buf
+              (insert "looks off")
+              (should-not gp-compose--batch)
+              (gp-compose-toggle-batch)
+              (should gp-compose--batch)
+              (cl-letf (((symbol-function 'set-window-configuration) #'ignore))
+                (gp-compose-submit))
+              (should (eq (caar calls) 'batched)))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
+
 (ert-deftest gp-test-compose-submit-kills-lingering-preview-buffer ()
   "A preview opened before submitting must not linger afterwards."
   (let* ((target (list :full-name "ws/slug" :id 12

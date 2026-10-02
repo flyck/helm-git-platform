@@ -34,6 +34,74 @@ and is not resolvable -- GitHub has no \"resolve\" concept for it."
     (should-not (github-comment-resolved-p open-review))
     (should (github-comment-resolvable-p open-review))))
 
+(defun github-test--pending-review (comment-nodes)
+  "A `reviews(states:PENDING...)' GraphQL response holding COMMENT-NODES."
+  (let* ((comments `((nodes . ,(vconcat comment-nodes))))
+         (review `((id . "REVIEW_1") (databaseId . 900) (comments . ,comments)))
+         (reviews `((nodes . ,(vector review))))
+         (pr `((reviews . ,reviews)))
+         (repo `((pullRequest . ,pr))))
+    `((repository . ,repo))))
+
+(defconst github-test--pending-comment-node
+  '((id . "NODE_1") (databaseId . 1)
+    (body . "x") (path . "a.el") (line . 1)
+    (author (login . "ada") (avatarUrl . "u"))
+    (createdAt . "2026-01-01T00:00:00Z")
+    (url . "https://x")))
+
+(ert-deftest github-test-delete-comment-falls-back-to-review-batch ()
+  "A comment id that 404s on both REST endpoints is deleted via GraphQL,
+by looking its node id up among the pending review's own comments."
+  (github-mock-with-service
+    (let ((pending-review (github-test--pending-review
+                           (list github-test--pending-comment-node)))
+          (deleted-ids nil))
+      (cl-letf (((symbol-function 'github-api-request)
+                 (lambda (method &rest _) (ignore method) (error "not found")))
+                ((symbol-function 'github-graphql-request)
+                 (lambda (query &optional _variables)
+                   (cond
+                    ((string-match-p "reviews(states:PENDING" query) pending-review)
+                    ((string-match-p "deletePullRequestReviewComment" query)
+                     (push query deleted-ids)
+                     '((deletePullRequestReviewComment (pullRequestReview (id . "REVIEW_1")))))
+                    (t (error "unexpected query: %s" query))))))
+        (github-delete-comment "acme/web" 42 1)
+        (should (= (length deleted-ids) 1))))))
+
+(ert-deftest github-test-delete-comment-not-in-pending-review-errors ()
+  "A comment id absent from every fallback (REST or the pending review)
+signals a clear user-error rather than a bare GraphQL failure."
+  (github-mock-with-service
+    (cl-letf (((symbol-function 'github-api-request)
+               (lambda (method &rest _) (ignore method) (error "not found")))
+              ((symbol-function 'github-graphql-request)
+               (lambda (&rest _) (github-test--pending-review nil))))
+      (should-error (github-delete-comment "acme/web" 42 999) :type 'user-error))))
+
+(ert-deftest github-test-edit-comment-falls-back-to-review-batch ()
+  "Editing a comment still in the pending review updates it via GraphQL."
+  (github-mock-with-service
+    (let ((pending-review (github-test--pending-review
+                           (list github-test--pending-comment-node))))
+      (cl-letf (((symbol-function 'github-api-request)
+                 (lambda (method &rest _) (ignore method) (error "not found")))
+                ((symbol-function 'github-graphql-request)
+                 (lambda (query &optional _variables)
+                   (cond
+                    ((string-match-p "reviews(states:PENDING" query) pending-review)
+                    ((string-match-p "updatePullRequestReviewComment" query)
+                     '((updatePullRequestReviewComment
+                        (pullRequestReviewComment
+                         (databaseId . 1) (body . "new") (path . "a.el") (line . 1)
+                         (author (login . "ada") (avatarUrl . "u"))
+                         (createdAt . "2026-01-01T00:00:00Z") (url . "https://x")))))
+                    (t (error "unexpected query: %s" query))))))
+        (let ((updated (github-edit-comment "acme/web" 42 1 "new")))
+          (should (gp-comment-pending-p updated))
+          (should (equal (let-alist updated .content.raw) "new")))))))
+
 (ert-deftest github-test-suggested-reviewers-excludes-self-and-reshapes ()
   "Collaborators are reshaped to the shared reviewer alist shape,
 with the authenticated user (\"ada\", per `github-mock--user') excluded."
