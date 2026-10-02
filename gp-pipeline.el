@@ -678,6 +678,10 @@ not popped up -- the result arrives as an OS notification (see
 A browser-driven deploy runs long enough that the user has usually
 switched away from Emacs, so the echo-area message alone is missed.
 
+Reports that the step was TRIGGERED, not that the deployment finished:
+the script's job is to click the step, and Bitbucket runs the deploy
+afterwards.  Use `gp-deploy-watch' to be told the actual outcome.
+
 Narrows the package-wide `gp-notify': the notification is sent only
 when both are non-nil.  Set this to nil to keep just deploy results
 in the echo area and `gp-pipeline-deploy-buffer'."
@@ -784,12 +788,16 @@ local process is running at all."
            (let ((inhibit-read-only t))
              (goto-char (point-max))
              (insert (format "=== %s ===\n" (string-trim event)))))
+         ;; OK means the trigger script exited 0 -- it clicked the step and
+         ;; Bitbucket accepted it.  The deploy itself then runs on Bitbucket
+         ;; for minutes afterwards, so this must not claim the DEPLOYMENT
+         ;; succeeded; only the watcher (`gp-deploy-watch') sees that verdict.
          (when gp-pipeline-deploy-notify
-           (gp-notify (if ok "Deploy succeeded" "Deploy failed")
+           (gp-notify (if ok "Deploy triggered" "Deploy trigger failed")
                       (format "%s — %s" name full-name)
                       (not ok)))
          (when ok
-           (message "Deploy script finished for %S" name)
+           (message "Deploy triggered for %S; Bitbucket is now running it" name)
            ;; A deploy to a shared environment can supersede what an
            ;; EARLIER pr's successful deploy step left behind; that pr's
            ;; own commit never changes, so only a repo-wide bust (not

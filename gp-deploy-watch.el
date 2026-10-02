@@ -476,7 +476,7 @@ you waited twenty minutes for has just started over."
                (lambda (ok)
                  (if ok
                      (gp-deploy-watch--set-state
-                      w 'done "deploy script finished for %S"
+                      w 'done "deploy triggered for %S; Bitbucket is running it"
                       (gp-deploy-watch-step-name w))
                    (gp-deploy-watch--set-state
                     w 'failed "deploy script failed for %S; see %s"
@@ -502,9 +502,13 @@ you outside the frame you are no longer watching."
     ;; without parsing the sentence.  Desktop notifiers give no colour
     ;; control (`notifications-notify' urgency styles the popup itself on
     ;; Linux; macOS offers nothing), so the emoji carries the status.
+    ;; "Triggered", not "Deployed": the watcher's job ends when it presses
+    ;; the gate, and Bitbucket then runs the deploy for minutes afterwards.
+    ;; Claiming the deployment succeeded here would be a verdict nothing in
+    ;; this package actually observed.
     (gp-notify (format "%s %s %s"
                        (if failed "🔴" "🟢")
-                       (if failed "Deploy blocked:" "Deployed:")
+                       (if failed "Deploy blocked:" "Deploy triggered:")
                        (gp-deploy-watch-step-name w))
                (format "%s\n%s on %s"
                        (gp-deploy-watch-detail w)
