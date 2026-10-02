@@ -2,7 +2,7 @@
 
 ;; Author: Felix Brilej
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (magit-section "3.0") (transient "0.3") (helm "3.0"))
+;; Package-Requires: ((emacs "28.1") (magit-section "3.0") (transient "0.3") (helm "3.0") (magit "3.0") (markdown-mode "2.5") (emojify "1.2"))
 ;; Keywords: tools, vc
 ;; URL: https://github.com/flyck/helm-git-platform
 

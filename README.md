@@ -90,23 +90,12 @@ A fuller, annotated example is in [`examples/use-package.el`](examples/use-packa
 
 ### Dependencies
 
-| Package | Needed for | Pulled automatically? |
-|---|---|---|
-| `magit-section`, `transient` | core rendering | yes (declared in `Package-Requires`) |
-| `helm` | the `gp-helm` browser — the main entry point | **no, install it yourself** |
-| `magit` (full) | the `d` diff, "open in IDE", `gp-magit-mode` | no |
-| `markdown-mode` | the Markdown compose buffer + preview | no |
-| `emojify` | `:emoji:` shortcodes and completion | no |
+Installing the package pulls in everything it needs:
 
-Only `magit-section` and `transient` are pulled in by `:vc`/`:straight`. The rest are soft
-dependencies — install the ones you want with `M-x package-install` (most setups already have
-`magit` and `helm`).
-
-> The example config uses `:after (magit emojify)`, which means use-package
-> won't load the package until **both** are present. Drop names you don't
-> install from that list, or remove `:after` entirely, otherwise the package
-> silently never loads. Without `helm`, `gp-helm` (and the `C-c b` binding)
-> won't work — use `gp-list` instead, or install helm.
+- `helm` — the `gp-helm` PR browser, the main entry point
+- `magit` — PR diffs, checkouts, and comments in magit diffs (`gp-magit-mode`)
+- `markdown-mode` — the Markdown compose buffer and preview
+- `emojify` — `:emoji:` shortcodes and completion
 
 ### Credentials
 
@@ -189,145 +178,65 @@ magit refresh stay off the network; `C-c B g` always refetches.
 
 ### Batching a review
 
-Both Bitbucket and GitHub let you leave a set of inline comments that stay invisible to everyone
-else until you explicitly submit the review, so a review-in-progress never dribbles out one
-notification per comment. A new inline comment (`C-c B n` in a magit diff, or a fresh comment on
-the file:line at point in an overlay-mode file buffer) joins that batch by default
-(`gp-review-batch-default`); `C-c C-b` in the compose buffer flips it for that one comment before
-you submit it.
+New inline comments (`C-c B n` in a magit diff, or on the line at point in an overlay buffer) join a
+pending review by default (`gp-review-batch-default`), so they stay invisible to others until you
+submit. `C-c C-b` while composing flips it for that one comment. Pending comments are marked
+"pending review" and can only be edited or removed. In the detail buffer, `S` submits the batch
+(with an optional approve / request-changes verdict) and `C-c C-k` discards it.
 
-In the PR detail buffer (or as an overlay), a comment still in the batch is marked "pending review"
-and offers only edit/remove-from-batch — nobody else can see it yet, so reply/react/resolve don't
-apply. Once any batched comments exist in the detail buffer, `S` submits the whole batch; `C-c C-k`
-discards it instead, deleting every batched comment unposted.
-
-The two platforms implement this very differently under the hood, and **Bitbucket's side needs a
-workaround**: GitHub adds comments one at a time (via GraphQL) to a real PENDING review object, and
-submitting it (`COMMENT`/`APPROVE`/`REQUEST_CHANGES`) is one atomic, documented action that makes
-every comment in it visible. Bitbucket Cloud comments are created immediately with a `pending`
-flag, but its public API has **no documented way to un-pend one afterwards**:
-
-- `PUT .../comments/{id}` with a `pending` key is rejected outright (`400`, "extra keys not
-  allowed") — confirmed live, even though the very same field is accepted on create.
-- There is no separate "finish review" endpoint on Cloud (that only exists in Bitbucket **Data
-  Center**, a different product, and is not reachable with this package's credentials either way).
-- The web UI's own "Finish review" button calls an *internal*, undocumented endpoint —
-  `POST bitbucket.org/!api/internal/repositories/{ws}/{repo}/pullrequests/{id}/review` (caught live
-  in a browser's network tab) — authenticated by browser session cookie, not an API token. It is
-  not reachable from here, and approving/requesting changes was confirmed live to **not** trigger
-  it as a side effect: the verdict posts successfully, but the comment stays pending regardless.
-
-So `gp-submit-review-batch` on Bitbucket instead recreates each pending comment as an ordinary
-\(non-pending\) one with the same text and inline location, then deletes the pending original —
-entirely within the documented, token-authenticated public API. The tradeoff: the recreated
-comment gets a new id and a fresh `created_on` (now, not when it was first written). Nothing else
-can have replied to or reacted to it in the meantime, since nobody but you could see it while it
-was pending, so nothing is lost there.
+GitHub submits a real PENDING review in one call. Bitbucket Cloud's public API cannot un-pend a
+comment, so on submit each pending comment is reposted as a normal comment and the original
+deleted. The reposted comment gets a new id and timestamp; nothing else can reference it while it's
+pending, so nothing is lost.
 
 ### Running a gated deploy step
 
-Bitbucket Cloud has no REST endpoint that advances an individual halted manual step
-([BCLOUD-20050](https://jira.atlassian.com/browse/BCLOUD-20050)), so `T` on a waiting gate can only
-open the web UI or start a **new** pipeline run that re-executes everything before the gate.
-
-If you have another way to click that gate — typically a browser-automation script driving a
-logged-in session — point `gp-pipeline-deploy-script` at it. `T` then runs it directly, with no
-prompt: it is the only route that advances the current build in place. Clear the setting to get the
-browser / new-run choice back.
+Bitbucket Cloud can't advance a single halted manual step
+([BCLOUD-20050](https://jira.atlassian.com/browse/BCLOUD-20050)): `T` on a waiting gate can only
+open the web UI or start a new run, which re-executes every earlier step. To press the gate in
+place, point `gp-pipeline-deploy-script` at a script that can, typically browser automation on a
+logged-in session:
 
 ```elisp
 (setq gp-pipeline-deploy-script '("~/bin/gp-deploy"))
 ```
 
-The script receives its context in the environment, so one script serves every repo and step:
-`GP_WORKSPACE`, `GP_REPO`, `GP_FULL_NAME`, `GP_BRANCH`, `GP_PIPELINE_ID`, `GP_PIPELINE_UUID`,
-`GP_STEP_NAME`, `GP_STEP_UUID`, `GP_STEP_STATE`, `GP_PR_ID`, `GP_WEB_URL`. Values that cannot be
-resolved are left unset rather than exported empty, so `-z` tests work. Prefer `GP_STEP_NAME` over
-`GP_STEP_UUID`: step uuids change every time a step is re-run.
+`T` then runs it asynchronously, with output in `*gp-deploy*` and the result as a notification.
+The script gets its context from `GP_*` environment variables (`GP_FULL_NAME`, `GP_BRANCH`,
+`GP_PIPELINE_ID`, `GP_STEP_NAME`, `GP_PR_ID`, …); unresolved values are left unset. Prefer
+`GP_STEP_NAME` over `GP_STEP_UUID`, since uuids change on every re-run. See
+[`docs/deploy-hook-example.sh`](docs/deploy-hook-example.sh).
 
-It runs asynchronously with output streamed to `*gp-deploy*`. The buffer is not popped up — the
-result arrives as an OS notification and an echo-area message, since a browser-driven deploy
-usually outlasts your attention. See
-[`docs/deploy-hook-example.sh`](docs/deploy-hook-example.sh) for a working wrapper.
+**Deploy watcher.** `A` on a manual step arms a watcher that polls in the background and fires the
+step once its gate is open, pressing any earlier gates on the way (arm `deploy-live` and it presses
+`deploy-dev` first). It stops and names the step if one ahead of the target fails, and notifies on
+every outcome (🟢 triggered, 🔴 blocked). Watchers are global and in-memory only: `A` again disarms,
+`C-c A` lists them (`RET` log, `k` cancel, `C` clear finished). Without a deploy script, firing falls
+back to re-triggering the whole pipeline. Tunables: `gp-deploy-watch-interval`,
+`gp-deploy-watch-timeout`, `gp-deploy-watch-confirm`, `gp-deploy-watch-log-max`.
 
-Notifications are controlled by `gp-notify` (the package-wide master switch — set it to nil to
-silence everything) and narrowed per feature by `gp-pipeline-deploy-notify`. Set `gp-notify-function`
-to route them through `alert` or anything else; the default uses D-Bus on Linux, `osascript` on
-macOS, and the echo area elsewhere.
+Notifications go through `gp-notify` (nil silences everything; `gp-pipeline-deploy-notify` narrows
+deploy results), routed by `gp-notify-function`.
 
-In the detail buffer and on overlays, most actions show their key in `[brackets]` and the buttons
-are clickable (reply, resolve, new comment, open, diff). Comments are written in Markdown with
-`C-c C-c` to post. Actions that write to the PR sit on **capital** letters (`R` reply, `X` resolve,
-`K` delete, `V` edit reviewers, `L` edit labels), so a stray lowercase keypress while reading can't
-mutate anything.
+### The PR detail buffer
 
-**Reviewers** can be picked as checkboxes both when creating a PR and afterwards (`V` on an open
-PR). Candidates come from the workspace members on Bitbucket and the repo collaborators on GitHub;
-anyone who has already submitted a review is shown locked, since dropping them from the list cannot
-withdraw a review that is already on the record.
+Actions show their key in `[brackets]` and buttons are clickable. Comments are Markdown, posted with
+`C-c C-c`. Actions that write to the PR sit on **capital** letters (`R` reply, `X` resolve, `K`
+delete, `V` reviewers, `L` labels), so a stray lowercase key can't mutate anything.
 
-**Labels** (GitHub only) show in the helm picker as their own column, in the PR list and in the
-detail header, each in the colour GitHub gives it. `L` on an open PR edits the set, completing on the
-repo's labels. Bitbucket has none, so nothing label-shaped is drawn there. Tunables:
-`gp-helm-labels-width` (0 hides the column) and `gp-label-colors` (nil for one uniform face).
+- **Reviewers** (`V`): checkboxes from workspace members (Bitbucket) or collaborators (GitHub).
+  Anyone who has already reviewed is locked, since removing them can't withdraw the review.
+- **Labels** (`L`, GitHub only): shown in GitHub's colours in the picker, list and header. Tunables:
+  `gp-helm-labels-width` (0 hides the column), `gp-label-colors`.
+- **CI pipelines**: finished ones start collapsed (`TAB` expands). `s` stops, `T` triggers or starts
+  a manual step, `P` re-runs one step where supported, `l` opens a step's log (polled while
+  running). Stop/trigger are whole-pipeline only; needs **Pipelines: Read**, plus **Write** for
+  stop/trigger.
+- **Commits**: `RET` or `v` opens one in Magit. Tunables: `gp-detail-max-commits` (50),
+  `gp-detail-commits-collapsed`.
 
-The title column is the one that auto-grows, so on a wide window every spare column lands there;
-`gp-helm-repo-width` (38) is sized for the descriptive, prefixed slugs real workspaces use rather
-than a short one-word name. Lower it to hand those columns back to the title.
-
-Every buffer the package opens is tagged `*gp: …*` (`*gp: PRs*`, `*gp: PR #101 …*`,
-`*gp: reviewers #101*`, `*gp: log*`, …) so one filter finds them all; retag with
-`gp-buffer-name-prefix`.
-
-The detail buffer also shows the PR branch's **CI pipelines** (the one with the most steps on top;
-finished pipelines start collapsed, `TAB` expands). On a pipeline or step: `s` stops the running
-pipeline, `T` triggers/re-runs it (and starts a waiting *manual* step), `P` re-runs a single
-finished step where the platform supports it, and `l` opens a step's log in a buffer (tailed live
-while it runs, historical once finished).
-
-**Deploy when the build gets there.** A manual step usually means waiting: you cannot start
-`deploy-dev` until the steps before it pass, so you sit and watch the pipeline to press `T` at the
-right moment. `A` on a manual step arms a **deploy watcher** that does the sitting -- it polls in the
-background and fires the step the moment the backend reports its gate genuinely open. Step order is
-the pipeline's business, not ours: the watcher never models the dependency graph, it just refuses to
-act until the gate is actually open, so it cannot fire early.
-
-Only *triggerable* steps can be scheduled -- waiting for a step that runs itself would be waiting for
-nothing to happen.
-
-Arming a step also **auto-approves any earlier gates in its way**. Schedule `deploy-live` on a
-pipeline that gates `deploy-dev` first, and the watcher waits for lint and build, presses `deploy-dev`
-when that gate opens, waits again, then fires `deploy-live` -- each gate pressed once, in order.
-Getting to live is what you asked for, so it does not stop to ask again on the way. If a step ahead
-of the target fails, the target is unreachable: the watcher stops immediately and names the step that
-broke, rather than waiting out its timeout. Every outcome raises a desktop notification (🟢 deployed,
-🔴 blocked) -- you armed it so you could stop watching, so the result has to find you.
-
-Watchers are global, not tied to the PR buffer -- closing it (or wandering off to another PR) will
-not silently cancel a deploy you are waiting on. Each keeps an in-memory event log. `A` again
-disarms; `C-c A` lists every watcher, where `RET` opens one's log, `k` cancels, and `C` clears the
-finished ones. The armed state also shows inline on the step line. Nothing is persisted: a watcher
-does not survive Emacs exiting.
-
-How it fires depends on what the backend can do. With `gp-pipeline-deploy-script` set, that script
-runs -- the only route that advances *this* build's gate in place. Without one it falls back to the
-backend's manual-step API, which on Bitbucket means re-triggering the pipeline (Cloud exposes no
-per-step run endpoint, BCLOUD-20050) and therefore **re-runs the steps before the gate** -- the
-watcher says so in its log and state rather than reporting a plain success. GitHub Actions has no
-per-job gate in this model, so nothing reports as manual there and arming tells you as much. Tunables:
-`gp-deploy-watch-interval` (poll seconds), `gp-deploy-watch-timeout` (give-up limit, nil for none),
-`gp-deploy-watch-confirm` (nil to arm without asking) and `gp-deploy-watch-log-max`.
-
-> The platform allows stop and trigger only at the **whole-pipeline** level —
-> there is no per-step stop/trigger API — and step logs are fetched, not
-> streamed (so "live" means polled). Requires a token with **Pipelines: Read**,
-> plus **Pipelines: Write** for stop/trigger/manual-run.
-
-It also lists the PR's **commits** (newest first, with author and age). `RET` or `v` on one opens
-just that commit in Magit — its own message and diff, rather than the whole-branch diff `d` gives.
-The branch is checked out on demand, and a commit the local clone has not fetched yet triggers a
-fetch before it gives up. Cap the list with `gp-detail-max-commits` (50 by default) or start the
-section folded with `gp-detail-commits-collapsed`.
+In the helm picker the title column takes all spare width; lower `gp-helm-repo-width` (38) to give
+it more. Every buffer is named `*gp: …*` (`gp-buffer-name-prefix`) so one filter finds them all.
 
 ## Limitations
 
@@ -341,12 +250,6 @@ section folded with `gp-detail-commits-collapsed`.
   inferred from the per-file `status` in the PR's diffstat (a `"merge conflict"` entry), which is
   reachable with this package's credentials but not independently verified against a live conflicted
   PR -- treat it as a best-effort hint rather than as reliable as GitHub's own "Cannot merge" state.
-
-
-## FAQ
-- How do I open the **side-by-side diff view?** Opening a detail buffer, you can press [d] to show
-  the diff in magit. From there, press [e] to lauch ediff, followed by [|] to toggle into
-  horizontal view
 
 ## Tests
 
