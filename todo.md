@@ -1,5 +1,31 @@
 # TODO
 
+## Idea: one perspective.el workspace per project for PR buffers (unproven)
+
+Users running `perspective.el' + `projectile' + `persp-projectile' have a
+"tab" per project already (a perspective, not `tab-bar-mode'). Without
+help, this package's detail/diff/overlay buffers get claimed by whatever
+perspective happens to be active when they're created -- `persp-mode'
+auto-claims a new buffer into the *current* perspective, and this
+package has no perspective awareness at all -- so revisiting a PR whose
+detail buffer already exists in a different perspective can otherwise
+look like it "jumped tabs" (really: `display-buffer-reuse-window'
+finding that other perspective's window on the same frame, since
+perspectives share one frame).
+
+Fix tried as personal config (advice on `gp-show-pr' /
+`gp-ui-show-diff-in-magit' / `gp-ui-open-in-ide' / `gp-ui-goto-comment-file',
+each switching to the PR's local checkout's own perspective via
+`projectile-persp-switch-project' -- resolved read-only via
+`gp-local-find-checkout', never `-resolve-dir'/`-ensure-checkout', so
+just looking at a PR never triggers a clone or branch switch as a side
+effect) *before* documenting it as a recommended pattern in the README.
+Not promoted there yet -- wants real usage first to see whether the
+per-perspective window layout (esp. the existing rightward-split
+`display-buffer-alist' rule, which only controls placement *within* one
+perspective) actually feels right once several PRs across different
+projects are open at once.
+
 ## Persist the overview's search filter for the session
 
 Currently `gp-helm--list' never passes `:input'/`:resume' to `helm', so
