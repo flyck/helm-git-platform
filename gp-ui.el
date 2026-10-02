@@ -42,7 +42,7 @@
 (declare-function magit-diff-range "magit-diff")
 (declare-function magit-show-commit "magit-diff")
 (declare-function magit-rev-verify "magit-git")
-(declare-function magit-status "magit-status")
+(declare-function magit-status-setup-buffer "magit-status")
 (declare-function magit-refresh "magit-mode")
 (declare-function gp-overlay--avatar-image "gp-overlay")
 (defvar gp-helm--last-visited-pr-id)
@@ -1694,7 +1694,7 @@ bare position, since marking them is the explicit act."
     (unless dir
       (user-error "No local checkout of %s under %s"
                   full-name gp-local-git-root))
-    (magit-status dir)))
+    (magit-status-setup-buffer dir)))
 
 ;;;; Section accessors -------------------------------------------------------
 

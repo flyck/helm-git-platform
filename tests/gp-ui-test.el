@@ -1003,7 +1003,7 @@ a visible stall once per interval in any open detail buffer."
          (opened nil))
     (cl-letf (((symbol-function 'require) (lambda (feature &optional _filename _noerror) (eq feature 'magit)))
               ((symbol-function 'gp-local-find-checkout) (lambda (_full-name) "/tmp/repo"))
-              ((symbol-function 'magit-status) (lambda (dir) (setq opened dir))))
+              ((symbol-function 'magit-status-setup-buffer) (lambda (dir) (setq opened dir))))
       (gp-detail-open-local)
       (should (equal opened "/tmp/repo")))))
 
