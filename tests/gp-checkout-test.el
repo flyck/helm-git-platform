@@ -116,8 +116,11 @@ all invocations are recorded in the dynamically-bound list
     (let ((res (gp-checkout-run "/repo" "feature")))
       (should (plist-get res :ok))
       (should-not (plist-get res :stashed))
-      ;; worktree-list + status + rev-parse + fetch + checkout + pull
-      (should (= (length git-calls) 6))
+      ;; worktree-list + status + rev-parse(current branch) + fetch + checkout
+      ;; + [divergence probe: rev-parse x2 + one merge-base --is-ancestor,
+      ;;    short-circuiting before the second since the first already
+      ;;    disproves divergence] + pull
+      (should (= (length git-calls) 9))
       (should-not (cl-find "stash" git-calls
                            :key (lambda (c) (cadr c)) :test #'equal)))))
 
@@ -147,6 +150,86 @@ all invocations are recorded in the dynamically-bound list
       ;; pull must never have run
       (should-not (cl-find "pull" git-calls
                            :key (lambda (c) (cadr c)) :test #'equal)))))
+
+(defun gp-test--diverged-fake-git (_dir args)
+  "Fake git for a BRANCH that has diverged from origin/BRANCH.
+`rev-parse --verify' succeeds for both refs (both exist); every
+`merge-base --is-ancestor' fails (neither is an ancestor of the
+other, i.e. genuinely diverged, not just behind/ahead)."
+  (cond ((equal (car args) "status") '(0 . ""))
+        ((equal args '("rev-parse" "--abbrev-ref" "HEAD")) '(0 . "feature"))
+        ((equal (car args) "worktree") '(0 . ""))
+        ((and (equal (car args) "rev-parse") (equal (nth 1 args) "--verify"))
+         '(0 . "deadbeef"))
+        ((equal (car args) "merge-base") '(1 . ""))
+        (t '(0 . "ok"))))
+
+(ert-deftest gp-test-branch-diverged-p-true-when-neither-is-ancestor ()
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (lambda (dir &rest args) (gp-test--diverged-fake-git dir args))))
+    (should (gp-checkout-branch-diverged-p "/repo" "feature" "origin"))))
+
+(ert-deftest gp-test-branch-diverged-p-false-when-remote-ref-missing ()
+  "Not diverged (just not yet fetched) when the remote ref doesn't exist."
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (lambda (_dir &rest args)
+               (cond ((equal (nth 1 args) "--verify")
+                      (if (equal (nth 2 args) "feature") '(0 . "x") '(1 . "")))
+                     (t '(0 . "ok"))))))
+    (should-not (gp-checkout-branch-diverged-p "/repo" "feature" "origin"))))
+
+(ert-deftest gp-test-branch-diverged-p-false-when-just-behind ()
+  "Not diverged when the local branch IS an ancestor of the remote one
+(the ordinary \"just behind\" case `pull --ff-only' handles fine)."
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (lambda (_dir &rest args)
+               (cond ((equal (nth 1 args) "--verify") '(0 . "x"))
+                     ((equal (car args) "merge-base")
+                      ;; local is-ancestor-of remote: succeeds (0)
+                      (if (equal (nth 3 args) "feature") '(0 . "") '(1 . "")))
+                     (t '(0 . "ok"))))))
+    (should-not (gp-checkout-branch-diverged-p "/repo" "feature" "origin"))))
+
+(ert-deftest gp-test-run-recovers-diverged-branch-on-confirmation ()
+  "Confirming the prompt backs up the local branch and recreates it
+fresh from origin, then still finishes with :ok."
+  (gp-test-with-fake-git #'gp-test--diverged-fake-git
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+              ((symbol-function 'format-time-string) (lambda (&rest _) "20260101000000")))
+      (let ((res (gp-checkout-run "/repo" "feature")))
+        (should (plist-get res :ok))
+        (should (cl-find '("branch" "gp-auto-backup/feature/20260101000000" "feature")
+                         git-calls :key #'cdr :test #'equal))
+        (should (cl-find '("checkout" "-B" "feature" "origin/feature")
+                         git-calls :key #'cdr :test #'equal))
+        ;; the plain ff-only pull must never run once recovery took over
+        (should-not (cl-find '("pull" "--ff-only" "origin" "feature")
+                             git-calls :key #'cdr :test #'equal))))))
+
+(ert-deftest gp-test-run-declines-diverged-branch-recovery ()
+  "Declining the prompt fails cleanly instead of running the doomed pull."
+  (gp-test-with-fake-git #'gp-test--diverged-fake-git
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+      (let ((res (gp-checkout-run "/repo" "feature")))
+        (should-not (plist-get res :ok))
+        (should (string-match-p "diverged" (plist-get res :log)))
+        (should-not (cl-find "branch" git-calls :key #'cadr :test #'equal))
+        (should-not (cl-find '("pull" "--ff-only" "origin" "feature")
+                             git-calls :key #'cdr :test #'equal))))))
+
+(ert-deftest gp-test-run-skips-divergence-check-when-disabled ()
+  "With the customvar off, a diverged branch hits the plain (failing)
+`pull --ff-only' the same way it always did."
+  (let ((gp-checkout-recover-diverged-branch nil))
+    (gp-test-with-fake-git
+        (lambda (_dir args)
+          (cond ((equal (car args) "pull") '(1 . "fatal: not possible to fast-forward"))
+                (t (gp-test--diverged-fake-git nil args))))
+      (let ((res (gp-checkout-run "/repo" "feature")))
+        (should-not (plist-get res :ok))
+        (should (string-match-p "fast-forward" (plist-get res :log)))
+        (should (cl-find '("pull" "--ff-only" "origin" "feature")
+                         git-calls :key #'cdr :test #'equal))))))
 
 (ert-deftest gp-test-pop-stash-guards-foreign-stash ()
   "Popping refuses when the top stash is not one of ours."

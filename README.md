@@ -157,6 +157,7 @@ setup (the write actions simply 403).
 | **Comment reactions** — 👍 and the rest on PR comments (`+` / `!`) | GitHub only, on by default | nothing to turn off; hidden entirely on Bitbucket, whose API has none |
 | **Shell-rc env import** (macOS convenience) | `(require 'bitbucket-env)` + `(bitbucket-env-load)` | omit it (default) |
 | **Send a PR comment to an AI terminal session** (iTerm2 or Ghostty) | `(setq gp-helm-terminal-backend 'iterm2)` or `'ghostty` | omit it (default) |
+| **Recover a checkout whose branch name was reused** — offers to back up and recreate a local branch that has diverged from a same-named remote branch (typically: the old one merged, a colleague pushed a new one under the same name) instead of a raw `pull --ff-only` failure | on by default | `(setq gp-checkout-recover-diverged-branch nil)` |
 
 The core browsing (`gp-helm`, `gp-list`, checkout) works with none of these on.
 

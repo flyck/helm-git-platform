@@ -46,6 +46,19 @@ is an error."
   :type 'string
   :group 'gp-checkout)
 
+(defcustom gp-checkout-recover-diverged-branch t
+  "When non-nil, offer to recover a branch that has diverged from origin.
+This happens when a branch is merged and deleted, then its name is
+reused for an unrelated new branch: the local copy and the new
+remote one share no common history, so `pull --ff-only' can never
+reconcile them.  With this on, `gp-checkout-run' detects that case
+and prompts to back the local branch up under a timestamped name
+\(see `gp-checkout--backup-branch-name') and recreate it fresh from
+the remote.  With this off, that case surfaces as today's plain
+`pull --ff-only' failure instead."
+  :type 'boolean
+  :group 'gp-checkout)
+
 ;;;; Git helpers (impure, but tiny) ------------------------------------------
 
 (defun gp-checkout--git (dir &rest args)
@@ -78,6 +91,22 @@ would see in `magit-status'."
   "Return the current branch name in DIR, or nil."
   (let ((res (gp-checkout--git dir "rev-parse" "--abbrev-ref" "HEAD")))
     (when (= (car res) 0) (cdr res))))
+
+(defun gp-checkout-branch-diverged-p (dir branch &optional remote)
+  "Return non-nil if local BRANCH in DIR has diverged from REMOTE/BRANCH.
+Diverged means neither is an ancestor of the other -- the case a
+`pull --ff-only' can never resolve, typically because BRANCH was
+merged and its name reused for an unrelated new branch on the
+remote.  Nil (not diverged) when either ref is missing, so a genuinely
+new local branch or a not-yet-fetched remote ref never false-positives
+here; the ordinary `pull --ff-only' failure path still catches those."
+  (let* ((remote (or remote gp-checkout-remote))
+         (remote-ref (format "%s/%s" remote branch))
+         (local-ok (= (car (gp-checkout--git dir "rev-parse" "--verify" branch)) 0))
+         (remote-ok (= (car (gp-checkout--git dir "rev-parse" "--verify" remote-ref)) 0)))
+    (and local-ok remote-ok
+         (/= 0 (car (gp-checkout--git dir "merge-base" "--is-ancestor" branch remote-ref)))
+         (/= 0 (car (gp-checkout--git dir "merge-base" "--is-ancestor" remote-ref branch))))))
 
 (defun gp-checkout-branch-on-remote-p (dir branch &optional remote)
   "Return non-nil if BRANCH exists on REMOTE (default origin) for DIR."
@@ -168,6 +197,40 @@ Signals if `gp-checkout-clone-base' is nil."
 
 ;;;; Execution ---------------------------------------------------------------
 
+(defun gp-checkout--backup-branch-name (branch)
+  "Return the backup-branch name used before deleting a diverged BRANCH.
+Timestamped so recreating the same diverged branch twice never
+collides with (or silently overwrites) an earlier backup."
+  (format "%s-backup/%s/%s" gp-checkout-stash-prefix branch
+          (format-time-string "%Y%m%d%H%M%S")))
+
+(defun gp-checkout--recover-diverged-branch (dir branch remote log)
+  "Handle BRANCH in DIR having diverged from REMOTE/BRANCH, appending to LOG.
+Prompts to back up the local branch under a timestamped name, delete
+it, and check out REMOTE/BRANCH fresh under BRANCH's name again.
+Returns (OK . NEW-LOG); OK nil (declining, or any step failing) means
+the caller should stop and report LOG as a normal failure -- the
+`pull --ff-only' this replaces would have failed anyway, so declining
+here is no worse than today's behaviour, just clearer about why."
+  (if (not (yes-or-no-p
+            (format "Local branch %s has diverged from %s/%s (likely reused after the old branch was merged). Back it up and check out %s/%s fresh? "
+                    branch remote branch remote branch)))
+      (cons nil (cons (format "$ (declined) local %s has diverged from %s/%s"
+                              branch remote branch)
+                      log))
+    (let* ((backup (gp-checkout--backup-branch-name branch))
+           (steps (list (list "branch" backup branch)
+                        (list "checkout" "-B" branch (format "%s/%s" remote branch))))
+           (ok t))
+      (cl-block recover
+        (dolist (args steps)
+          (let ((res (apply #'gp-checkout--git dir args)))
+            (push (format "$ git %s\n%s" (string-join args " ") (cdr res)) log)
+            (unless (= (car res) 0)
+              (setq ok nil)
+              (cl-return-from recover)))))
+      (cons ok log))))
+
 (defun gp-checkout-run (dir branch &optional base)
   "Switch DIR to BRANCH, auto-stashing dirty work first.
 When BASE (the PR's destination branch) is given, its remote ref
@@ -180,7 +243,19 @@ repo, that worktree is returned as :dir and no branch switch is
 attempted: git refuses to check out one branch in two worktrees, so
 the switch could only ever fail -- and failing AFTER the auto-stash
 step would strand the user's work in a stash nobody pops.  The
-worktree already holds the branch, which is what the caller wanted."
+worktree already holds the branch, which is what the caller wanted.
+
+When `gp-checkout-recover-diverged-branch' is non-nil (the default),
+checks just before the final `pull --ff-only' whether BRANCH has
+diverged from the remote's own BRANCH (see
+`gp-checkout-branch-diverged-p') -- typically because the name was
+reused for an unrelated branch after the old one merged, which
+`pull --ff-only' can never resolve.  When it has, prompts to back the
+local branch up under a timestamped name and recreate it fresh from
+the remote (`gp-checkout--recover-diverged-branch') instead of
+letting `pull' fail with a raw, confusing git error.  With the
+customvar off, that case surfaces as the plain `pull --ff-only'
+failure it always used to."
   (let ((wt (gp-checkout-worktree-for-branch dir branch)))
     (if wt
         (list :ok t :stashed nil :dir wt
@@ -189,15 +264,26 @@ worktree already holds the branch, which is what the caller wanted."
       (let* ((dirty (gp-checkout-dirty-p dir))
              (current (gp-checkout-current-branch dir))
              (plan (gp-checkout--plan branch dirty current base))
+             (remote gp-checkout-remote)
+             (pull-step (list "pull" "--ff-only" remote branch))
              (log '())
              (ok t))
         (cl-block run
           (dolist (args plan)
-            (let ((res (apply #'gp-checkout--git dir args)))
-              (push (format "$ git %s\n%s" (string-join args " ") (cdr res)) log)
-              (unless (= (car res) 0)
-                (setq ok nil)
-                (cl-return-from run)))))
+            (if (and (equal args pull-step)
+                     gp-checkout-recover-diverged-branch
+                     (gp-checkout-branch-diverged-p dir branch remote))
+                (pcase-let ((`(,rok . ,rlog)
+                             (gp-checkout--recover-diverged-branch dir branch remote log)))
+                  (setq log rlog)
+                  (unless rok
+                    (setq ok nil)
+                    (cl-return-from run)))
+              (let ((res (apply #'gp-checkout--git dir args)))
+                (push (format "$ git %s\n%s" (string-join args " ") (cdr res)) log)
+                (unless (= (car res) 0)
+                  (setq ok nil)
+                  (cl-return-from run))))))
         (list :ok ok :stashed dirty :dir dir
               :log (string-join (nreverse log) "\n"))))))
 
