@@ -21,6 +21,7 @@
 (require 'gp-local)
 (require 'gp-log)
 (require 'gp-pipeline)
+(require 'gp-pr-actions)
 
 (declare-function gp-deploy-watch-list-show "gp-deploy-watch")
 (declare-function gp-checkout--git "gp-checkout")
@@ -30,7 +31,6 @@
 (declare-function gp-helm-terminal-send-comment "gp-helm-terminal")
 (declare-function gp-helm-terminal-send-comments "gp-helm-terminal")
 (declare-function gp-helm-terminal-send-conflict "gp-helm-terminal")
-(declare-function gp-helm-terminal-open-shell "gp-helm-terminal")
 (declare-function gp-compose "gp-compose")
 (declare-function gp-reviewers-edit "gp-reviewers")
 (declare-function gp-overlay-pr "gp-overlay")
@@ -1350,11 +1350,13 @@ that is when you need a way to add the first one."
        "🔍 Show diff in Magit [d]" "Checkout the branch and show its diff in Magit"
        (lambda () (gp-ui-show-diff-in-magit pr)))
       (insert "   ")
-      (gp--insert-action-button
-       "🐚 Open in terminal [$]"
-       "Check out the PR branch and open a plain shell there in the configured terminal (gp-helm-terminal-backend)"
-       (lambda () (gp-ui-open-in-terminal pr)))
-      (insert "   ")
+      ;; User-pluggable actions (`gp-pr-actions'), one button each.
+      (dolist (action gp-pr-actions)
+        (gp--insert-action-button
+         (gp-pr-action-button-label action)
+         (or (plist-get action :help) (plist-get action :label))
+         (lambda () (gp-pr-action-run action pr)))
+        (insert "   "))
       (gp--insert-link (gp-pr-web-url pr) "🔗 View in browser [w]")
       (when gp--detail-marked-comment-ids
         (insert "   ")
@@ -1484,7 +1486,7 @@ that is when you need a way to add the first one."
   "b"   #'gp-ui-back-to-list
   "o"   #'gp-detail-open-local
   "O"   #'gp-detail-open-in-ide
-  "$"   #'gp-detail-open-in-terminal ;; checkout + plain shell in the terminal
+  "x"   #'gp-detail-pr-action        ;; menu of `gp-pr-actions' (keys bound below)
   ;; Comment actions that write to the PR are capitalised, so a stray
   ;; lowercase keypress while reading can't mutate anything.
   "R"   #'gp-detail-reply
@@ -1518,6 +1520,9 @@ that is when you need a way to add the first one."
   "l"   #'gp-detail-pipeline-step-log
   "S"     #'gp-detail-submit-review-batch  ;; submit pending review-batch comments
   "C-c C-k" #'gp-detail-discard-review-batch) ;; discard the review batch
+
+;; `gp-pr-actions' keys, rebound whenever that option changes.
+(gp-pr-actions-install-keys gp-detail-mode-map)
 
 (defun gp-detail-edit-reviewers ()
   "Add or remove reviewers on the PR shown in this buffer."
@@ -1656,6 +1661,9 @@ bare position, since marking them is the explicit act."
 
 (define-derived-mode gp-detail-mode magit-section-mode "PR"
   "Major mode for a single Bitbucket pull request."
+  ;; Re-sync `gp-pr-actions' keys: a plain `setq'/`add-to-list' of that
+  ;; option bypasses its :set, so the map is brought up to date here.
+  (gp-pr-actions-install-keys gp-detail-mode-map)
   ;; We apply all faces ourselves (links, markdown, etc.).  Any font-lock
   ;; activation clears those manual `face' text properties on redisplay, and
   ;; magit's current-section highlight overrides them -- disable both.
@@ -1686,11 +1694,6 @@ bare position, since marking them is the explicit act."
   "Open the current detail buffer's PR in the IDE."
   (interactive)
   (gp-ui-open-in-ide gp--pr))
-
-(defun gp-detail-open-in-terminal ()
-  "Check out the current detail buffer's PR and open a shell there."
-  (interactive)
-  (gp-ui-open-in-terminal gp--pr))
 
 (defun gp-detail-open-local ()
   "Open the current detail buffer's repo in Magit without switching branches."
@@ -1753,12 +1756,6 @@ the PR's diff (see `gp-github-check-inline-target')."
              (when (buffer-live-p (get-buffer buf))
                (with-current-buffer buf (gp-detail-refresh)))
              (message "Comment posted on PR #%s" (alist-get 'id pr)))))))
-
-(defun gp-ui-open-in-terminal (pr)
-  "Check out PR's branch and open a plain shell there in the terminal.
-The terminal is `gp-helm-terminal-backend' (iTerm2 or Ghostty)."
-  (require 'gp-helm-terminal)
-  (gp-helm-terminal-open-shell pr))
 
 (defun gp-ui-send-conflict-to-terminal (pr)
   "Ask PR's terminal session to resolve its merge conflicts."

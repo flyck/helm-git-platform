@@ -163,7 +163,9 @@ actions uppercase; buttons are clickable):
 | `b` | Back to the PR list |
 | `o` | Autostash & checkout the PR branch, then open the repo |
 | `d` | Show the branch diff in Magit (no checkout) |
-| `$` | Autostash & checkout the PR branch, then open a plain shell there in the terminal (`gp-helm-terminal-backend`) |
+| `x` | Menu of PR actions (`gp-pr-actions`, user-extensible; each also gets a button and its own key) |
+| `$` | PR action: autostash & checkout the PR branch, then open a plain shell there in the terminal (`gp-helm-terminal-backend`) |
+| `z` | PR action: autostash & checkout the PR branch, then start a Stealth session there with the PR's repo, number, branch and folder drafted, unsent (`gp-stealth`) |
 | `v` | Show just the commit at point in Magit (single-commit revision buffer) |
 | `w` | View the PR in the browser |
 | `i` | Overlay this PR's inline comments onto its local files |
