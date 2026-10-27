@@ -49,6 +49,18 @@ reload() {
             (load f nil t t)))
         (load (expand-file-name \"helm-git-platform.el\" \"$DIR\") nil t t)
         (require 'helm-git-platform)
+        ;; Buffers that were already open still hold the *old* keymap object
+        ;; unbound above, so newly added keys would be undefined there.  Point
+        ;; each package-mode buffer at its mode's freshly built map.
+        (dolist (b (buffer-list))
+          (with-current-buffer b
+            (let* ((n (symbol-name major-mode))
+                   (m (intern-soft (concat n \"-map\"))))
+              (when (and m (boundp m) (keymapp (symbol-value m))
+                         (or (string-prefix-p \"gp-\" n)
+                             (string-prefix-p \"bitbucket-\" n)
+                             (string-prefix-p \"git-platform\" n)))
+                (use-local-map (symbol-value m))))))
         (when (fboundp 'bitbucket-env-load) (bitbucket-env-load))
         \"helm-git-platform reloaded\")"
 }
