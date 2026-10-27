@@ -214,5 +214,70 @@ prompt embedded inline (so it stays short and newline-free)."
       (should (member "write text (ASCII character 13) newline NO" captured-lines))
       (should (member "end tell" captured-lines)))))
 
+;;; Plain shell ("open in terminal")
+
+(defconst gp-test-terminal--shell-pr
+  '((id . 42)
+    (title . "Implement thing")
+    (source (branch (name . "feat/demo")))
+    (destination (branch (name . "main"))
+                 (repository (full_name . "acme/repo")))))
+
+(ert-deftest gp-test-terminal-open-shell-checks-out-and-opens-without-prompt ()
+  "Opening a shell checks out the PR branch, always opens a new window
+\(never reuses a session) and sends no command and no prompt."
+  (let (opened listed)
+    (cl-letf (((symbol-function 'gp-local-ensure-checkout) (lambda (_pr) "/tmp/repo"))
+              ((symbol-function 'gp-helm-terminal--list-sessions)
+               (lambda () (setq listed t) nil))
+              ((symbol-function 'gp-helm-terminal-ghostty-open-session)
+               (lambda (&rest args) (setq opened args))))
+      (let ((gp-helm-terminal-backend 'ghostty))
+        (gp-helm-terminal-open-shell gp-test-terminal--shell-pr)
+        (should-not listed)
+        (should (equal (nth 0 opened) "/tmp/repo"))
+        (should (equal (nth 1 opened) ""))
+        (should (equal (nth 2 opened) ""))))))
+
+(ert-deftest gp-test-terminal-open-shell-falls-back-to-clone-when-checkout-fails ()
+  "A failed checkout still opens the shell in the local clone, and says so."
+  (let (opened msg)
+    (cl-letf (((symbol-function 'gp-local-ensure-checkout)
+               (lambda (_pr) (user-error "Could not prepare acme/repo: conflict")))
+              ((symbol-function 'gp-local-find-checkout) (lambda (_n) "/tmp/clone"))
+              ((symbol-function 'gp-helm-terminal-iterm2-open-session)
+               (lambda (&rest args) (setq opened args)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq msg (apply #'format fmt args)))))
+      (let ((gp-helm-terminal-backend 'iterm2))
+        (gp-helm-terminal-open-shell gp-test-terminal--shell-pr)
+        (should (equal (car opened) "/tmp/clone"))
+        (should (string-match-p "checkout failed: Could not prepare" msg))))))
+
+(ert-deftest gp-test-terminal-open-shell-errors-without-any-clone ()
+  (let (opened)
+    (cl-letf (((symbol-function 'gp-local-ensure-checkout)
+               (lambda (_pr) (user-error "No local checkout")))
+              ((symbol-function 'gp-local-find-checkout) (lambda (_n) nil))
+              ((symbol-function 'gp-helm-terminal-ghostty-open-session)
+               (lambda (&rest args) (setq opened args))))
+      (let ((gp-helm-terminal-backend 'ghostty))
+        (should-error (gp-helm-terminal-open-shell gp-test-terminal--shell-pr)
+                      :type 'user-error)
+        (should-not opened)))))
+
+(ert-deftest gp-test-terminal-iterm2-open-session-skips-paste-for-empty-text ()
+  "An empty prompt passes the has-text flag as \"false\" so no paste and
+no submit are sent into the plain shell."
+  (let (captured-lines captured-args)
+    (cl-letf (((symbol-function 'gp-helm-terminal-iterm2--run-script)
+               (lambda (lines &rest args)
+                 (setq captured-lines lines captured-args args) "ok")))
+      (gp-helm-terminal-iterm2-open-session "/tmp/repo" "" "" 0 t)
+      (should (equal (nth 4 captured-args) "false"))
+      (should (member "if (item 5 of argv) is \"true\" then" captured-lines))
+      (gp-helm-terminal-iterm2-open-session "/tmp/repo" "prompt" "claude" 1 t)
+      (should (equal (nth 4 captured-args) "true")))))
+
 (provide 'gp-helm-terminal-test)
 ;;; gp-helm-terminal-test.el ends here

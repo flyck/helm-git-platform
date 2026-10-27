@@ -30,6 +30,7 @@
 (declare-function gp-helm-terminal-send-comment "gp-helm-terminal")
 (declare-function gp-helm-terminal-send-comments "gp-helm-terminal")
 (declare-function gp-helm-terminal-send-conflict "gp-helm-terminal")
+(declare-function gp-helm-terminal-open-shell "gp-helm-terminal")
 (declare-function gp-compose "gp-compose")
 (declare-function gp-reviewers-edit "gp-reviewers")
 (declare-function gp-overlay-pr "gp-overlay")
@@ -1349,6 +1350,11 @@ that is when you need a way to add the first one."
        "🔍 Show diff in Magit [d]" "Checkout the branch and show its diff in Magit"
        (lambda () (gp-ui-show-diff-in-magit pr)))
       (insert "   ")
+      (gp--insert-action-button
+       "🐚 Open in terminal [$]"
+       "Check out the PR branch and open a plain shell there in the configured terminal (gp-helm-terminal-backend)"
+       (lambda () (gp-ui-open-in-terminal pr)))
+      (insert "   ")
       (gp--insert-link (gp-pr-web-url pr) "🔗 View in browser [w]")
       (when gp--detail-marked-comment-ids
         (insert "   ")
@@ -1478,6 +1484,7 @@ that is when you need a way to add the first one."
   "b"   #'gp-ui-back-to-list
   "o"   #'gp-detail-open-local
   "O"   #'gp-detail-open-in-ide
+  "$"   #'gp-detail-open-in-terminal ;; checkout + plain shell in the terminal
   ;; Comment actions that write to the PR are capitalised, so a stray
   ;; lowercase keypress while reading can't mutate anything.
   "R"   #'gp-detail-reply
@@ -1680,6 +1687,11 @@ bare position, since marking them is the explicit act."
   (interactive)
   (gp-ui-open-in-ide gp--pr))
 
+(defun gp-detail-open-in-terminal ()
+  "Check out the current detail buffer's PR and open a shell there."
+  (interactive)
+  (gp-ui-open-in-terminal gp--pr))
+
 (defun gp-detail-open-local ()
   "Open the current detail buffer's repo in Magit without switching branches."
   (interactive)
@@ -1741,6 +1753,12 @@ the PR's diff (see `gp-github-check-inline-target')."
              (when (buffer-live-p (get-buffer buf))
                (with-current-buffer buf (gp-detail-refresh)))
              (message "Comment posted on PR #%s" (alist-get 'id pr)))))))
+
+(defun gp-ui-open-in-terminal (pr)
+  "Check out PR's branch and open a plain shell there in the terminal.
+The terminal is `gp-helm-terminal-backend' (iTerm2 or Ghostty)."
+  (require 'gp-helm-terminal)
+  (gp-helm-terminal-open-shell pr))
 
 (defun gp-ui-send-conflict-to-terminal (pr)
   "Ask PR's terminal session to resolve its merge conflicts."

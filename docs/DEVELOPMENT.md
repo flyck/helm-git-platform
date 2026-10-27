@@ -163,6 +163,7 @@ actions uppercase; buttons are clickable):
 | `b` | Back to the PR list |
 | `o` | Autostash & checkout the PR branch, then open the repo |
 | `d` | Show the branch diff in Magit (no checkout) |
+| `$` | Autostash & checkout the PR branch, then open a plain shell there in the terminal (`gp-helm-terminal-backend`) |
 | `v` | Show just the commit at point in Magit (single-commit revision buffer) |
 | `w` | View the PR in the browser |
 | `i` | Overlay this PR's inline comments onto its local files |

@@ -110,5 +110,19 @@ Ghostty backend functions when `gp-helm-terminal-backend' is `ghostty'."
         (should (string-match-p "Please rename this helper\\." (cadr sent)))
         (should (caddr sent))))))
 
+(ert-deftest gp-test-terminal-ghostty-open-session-guards-empty-text ()
+  "An empty prompt (a plain shell) must send neither input nor submit, and
+the new window is brought to the front."
+  (let (captured-lines)
+    (cl-letf (((symbol-function 'gp-helm-terminal-ghostty--run-script)
+               (lambda (lines &rest _) (setq captured-lines lines) "id")))
+      (gp-helm-terminal-ghostty-open-session "/tmp/repo" "" "" 0 t)
+      (should (member "activate" captured-lines))
+      (let ((guard (cl-position "if theText is not \"\" then" captured-lines :test #'equal))
+            (input (cl-position "input text theText to terminal id targetId"
+                                captured-lines :test #'equal)))
+        (should guard)
+        (should (< guard input))))))
+
 (provide 'gp-helm-terminal-ghostty-test)
 ;;; gp-helm-terminal-ghostty-test.el ends here

@@ -295,5 +295,36 @@ same way the comment handoffs do so the session has its bearings."
      (gp-log-error "terminal handoff failed: %s" (error-message-string err))
      (signal (car err) (cdr err)))))
 
+(defun gp-helm-terminal--shell-dir (pr)
+  "Return (DIR . FAILURE) for opening a plain shell on PR.
+Tries `gp-local-ensure-checkout' so the shell lands on the PR's source
+branch.  When that fails but a local clone exists, falls back to the
+clone as it is, with FAILURE the checkout error message; with no clone
+at all the error is re-signalled."
+  (condition-case err
+      (cons (gp-local-ensure-checkout pr) nil)
+    (error
+     (if-let* ((dir (ignore-errors (gp-local-find-checkout (gp-pr-full-name pr)))))
+         (cons dir (error-message-string err))
+       (signal (car err) (cdr err))))))
+
+(defun gp-helm-terminal-open-shell (pr)
+  "Open a new terminal window with a plain shell in PR's checkout.
+Checks out the PR's source branch first (autostashing, like the other
+checkout actions); if that fails, the shell still opens in the local
+clone on whatever branch it is on, and the failure is reported.  Never
+reuses an existing session and sends no command or prompt -- unlike the
+comment handoffs, this is just a shell."
+  (pcase-let ((`(,dir . ,failure) (gp-helm-terminal--shell-dir pr)))
+    (gp-log 'info "terminal shell: repo=%s pr=%s dir=%s checkout-failed=%s"
+            (gp-pr-full-name pr) (alist-get 'id pr) dir (and failure t))
+    (gp-helm-terminal--execute
+     (list :action 'open :directory dir :command "" :delay 0) "")
+    (if failure
+        (progn
+          (gp-log 'warn "terminal shell: checkout failed: %s" failure)
+          (message "Opened shell in %s, but checkout failed: %s" dir failure))
+      (message "Opened shell in %s on %s" dir (gp-pr-source-branch pr)))))
+
 (provide 'gp-helm-terminal)
 ;;; gp-helm-terminal.el ends here

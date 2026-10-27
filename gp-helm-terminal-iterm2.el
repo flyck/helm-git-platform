@@ -278,17 +278,21 @@ receives -- and acts on -- the prompt."
          ;; Enter the repo and launch the interactive command first.
          "write text cdLaunch"
          ;; Give the command time to come up before pasting the prompt into it.
+         ;; No prompt (a plain shell) means no paste and no submit.
+         "if (item 5 of argv) is \"true\" then"
          "delay launchDelay"
          "write contents of file payloadFile"
          "if submitFlag is \"true\" then"
          "delay 0.1"
          "write text (ASCII character 13) newline NO"
          "end if"
+         "end if"
          "end tell"
          "end tell"
          "return \"ok\""
          "end run")
-        cd-launch file (if submit "true" "false") directory)))))
+        cd-launch file (if submit "true" "false") directory
+        (if (string-empty-p (or text "")) "false" "true"))))))
 
 (provide 'gp-helm-terminal-iterm2)
 ;;; gp-helm-terminal-iterm2.el ends here

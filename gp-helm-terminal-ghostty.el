@@ -130,7 +130,8 @@ and the surface would exit before the prompt could be sent). Instead
 COMMAND, when given, is typed into that shell as ordinary input, exactly
 as if the user had typed it. After DELAY seconds (to let COMMAND finish
 starting), the prompt TEXT is delivered via `input text', followed by a
-submit when SUBMIT is non-nil."
+submit when SUBMIT is non-nil.  An empty TEXT sends nothing at all -- no
+input and no submit -- which is how a plain shell is opened."
   (gp-log 'info "Ghostty open: dir=%s command=%s delay=%s" directory command delay)
   (gp-helm-terminal-ghostty--run-script
    (list
@@ -141,6 +142,7 @@ submit when SUBMIT is non-nil."
     "set theText to item 4 of argv"
     "set submitFlag to item 5 of argv"
     (format "tell application %S" gp-helm-terminal-ghostty-application)
+    "activate"
     "set cfg to new surface configuration"
     "set initial working directory of cfg to theDir"
     "set w to new window with configuration cfg"
@@ -151,10 +153,12 @@ submit when SUBMIT is non-nil."
     "input text theCommand to terminal id targetId"
     "send key \"enter\" to terminal id targetId"
     "end if"
+    "if theText is not \"\" then"
     "delay launchDelay"
     "input text theText to terminal id targetId"
     "if submitFlag is \"true\" then"
     "send key \"enter\" to terminal id targetId"
+    "end if"
     "end if"
     "end tell"
     "return targetId"
