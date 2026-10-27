@@ -303,7 +303,8 @@ authenticated."
          (author (let-alist comment (or .user.display_name "?")))
          (raw (string-trim (gp-resolve-mentions
                             (gp-resolve-emojis
-                             (let-alist comment (or .content.raw ""))))))
+                             (gp-clean-markup
+                              (let-alist comment (or .content.raw "")))))))
          (first-line (car (split-string raw "\n")))
          (avatar (gp-overlay--avatar-image
                   (let-alist comment .user.links.avatar.href)))

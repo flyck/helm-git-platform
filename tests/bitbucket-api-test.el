@@ -266,6 +266,41 @@ saw no cache key to fetch and skipped every merged PR outright."
     (should (string-match-p "`:thinking:`"
                             (gp-resolve-emojis "see `:thinking:` literally")))))
 
+(ert-deftest bitbucket-test-clean-markup-emoji ()
+  ;; the attribute list names the emoji; shortcode + attributes -> emoji
+  (should (equal (gp-clean-markup
+                  "nichts :slight_smile:{: data-emoji-id='1f642' data-emoji-text='🙂' } ok")
+                 "nichts 🙂 ok"))
+  ;; a custom emoji without data-emoji-text keeps its shortcode
+  (should (equal (gp-clean-markup ":party_parrot:{: data-emoji-id='abc' }")
+                 ":party_parrot:")))
+
+(ert-deftest bitbucket-test-clean-markup-image ()
+  (let ((url "https://bitbucket.org/%7B%7D/%7Bu%7D/images/1-image.png"))
+    ;; pasted image -> clickable placeholder link, attributes dropped
+    (should (equal (gp-clean-markup (format "![](%s){: data-layout='center' }" url))
+                   (format "[🖼 Image](%s)" url)))
+    ;; alt text becomes the label; works without attributes too
+    (should (equal (gp-clean-markup (format "| ![Vorher](%s) |" url))
+                   (format "| [🖼 Vorher](%s) |" url)))))
+
+(ert-deftest bitbucket-test-clean-markup-other ()
+  ;; link-card attributes are dropped, the link stays
+  (should (equal (gp-clean-markup "[a](https://x.org/1){: data-inline-card='' }")
+                 "[a](https://x.org/1)"))
+  ;; inline code and plain braces are left alone; nil -> ""
+  (should (equal (gp-clean-markup "`![](u){: x }` and { echo }")
+                 "`![](u){: x }` and { echo }"))
+  (should (equal (gp-clean-markup nil) "")))
+
+(ert-deftest bitbucket-test-render-markdown-image-placeholder ()
+  ;; the placeholder renders as a link label, never as raw markup
+  (cl-letf (((symbol-function 'bitbucket-resolve-mentions) #'identity))
+    (let ((out (gp--render-markdown
+                "![](https://bitbucket.org/x/images/1.png){: data-layout='center' }")))
+      (should (string-match-p "🖼 Image" out))
+      (should-not (string-match-p "{:\\|data-layout\\|!\\[" out)))))
+
 (ert-deftest bitbucket-test-set-draft ()
   "Toggling draft PUTs title + draft flag."
   (bitbucket-mock-with-service

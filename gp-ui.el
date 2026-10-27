@@ -368,7 +368,8 @@ ticket keys like \"WP-1231\" (see `gp-ticket-key-pattern')."
 (defun gp--render-markdown (text)
   "Return TEXT fontified as GitHub-flavoured Markdown, with colored links.
 Bitbucket :shortcode: emojis and @{account_id} mentions are resolved first."
-  (setq text (bitbucket-resolve-mentions (gp-resolve-emojis text)))
+  (setq text (bitbucket-resolve-mentions
+              (gp-resolve-emojis (gp-clean-markup text))))
   (if (and text (require 'markdown-mode nil t))
       (with-temp-buffer
         (insert text)

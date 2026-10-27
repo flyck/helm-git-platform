@@ -937,6 +937,46 @@ small built-in fallback covers the common ones."
             (and e (ht-get e "unicode")))))
       (cdr (assoc shortcode gp--emoji-fallback))))
 
+(defconst gp--markup-regexp
+  (concat
+   ;; 1: inline code, left untouched
+   "\\(`[^`\n]*`\\)"
+   ;; 2 alt, 3 url: a Markdown image, with optional {: ...} attributes
+   "\\|!\\[\\([^]\n]*\\)\\](\\([^)\n]+\\))\\(?:{:[^}\n]*}\\)?"
+   ;; 4 shortcode, 5 attributes: Bitbucket's {: ...} attribute list
+   "\\|\\(:[a-z0-9_+-]+:\\)?{:\\([^}\n]*\\)}")
+  "Regexp for `gp-clean-markup'.")
+
+(defun gp-clean-markup (text)
+  "Rewrite markup in TEXT that Emacs cannot show into readable text.
+Bitbucket appends kramdown attribute lists, \"{: ... }\", to emojis,
+pasted images and link cards; they show up as raw text.  An emoji
+becomes the character named in its data-emoji-text attribute (or its
+:shortcode: when there is none); any other attribute list is dropped.
+An image becomes a link labelled \"🖼 ALT\" (\"🖼 Image\" without alt
+text), because its file is only served to a browser session.
+Inline code is left untouched."
+  (if (null text)
+      ""
+    (replace-regexp-in-string
+     gp--markup-regexp
+     (lambda (m)
+       (cond
+        ((match-string 1 m) m)
+        ((match-string 3 m)
+         (let ((alt (string-trim (match-string 2 m))))
+           (format "[🖼 %s](%s)" (if (string-empty-p alt) "Image" alt)
+                   (match-string 3 m))))
+        (t
+         (let ((shortcode (match-string 4 m))
+               (attrs (match-string 5 m)))
+           ;; `replace-regexp-in-string' still needs its own match data
+           (save-match-data
+             (if (string-match "data-emoji-text=['\"]\\([^'\"]+\\)['\"]" attrs)
+                 (match-string 1 attrs)
+               (or shortcode "")))))))
+     text t t)))
+
 (defun gp-resolve-emojis (text)
   "Replace :shortcode: tokens in TEXT with their emoji, when enabled.
 Tokens inside inline/fenced code are left untouched."
