@@ -462,7 +462,7 @@ and nothing there was actionable."
                     (gp-pipeline-section (cons pipeline steps) collapsed)
                   (magit-insert-heading
                     (concat "  " (gp-pipeline--label pipeline steps)
-                            (propertize "   s:stop  T:trigger"
+                            (propertize "   s:stop  T:trigger  w:web"
                                         'face 'shadow)))
                   (if steps
                       (dolist (s steps) (gp-pipeline--insert-step s))

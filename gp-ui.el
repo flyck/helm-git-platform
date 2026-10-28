@@ -1689,16 +1689,33 @@ bare position, since marking them is the explicit act."
       (user-error "You can only edit your own comments"))
     (gp-ui-edit-comment gp--pr c)))
 
+(defun gp-detail--pipeline-url-at-point ()
+  "Return the web URL of the pipeline or pipeline step at point, or nil.
+On a step line the URL points at that step; anywhere else inside a
+pipeline section it points at the pipeline."
+  (let* ((sec (magit-current-section))
+         (step (and sec (object-of-class-p sec 'gp-pipeline-step-section)
+                    (oref sec value))))
+    (while (and sec (not (object-of-class-p sec 'gp-pipeline-section)))
+      (setq sec (and (slot-boundp sec 'parent) (oref sec parent))))
+    (when sec
+      (ignore-errors
+        (gp-pipeline-web-url (gp-pr-full-name gp--pr)
+                             (car (oref sec value)) step)))))
+
 (defun gp-detail-browse ()
-  "Browse the comment at point, or the PR when point is elsewhere."
+  "Browse the comment or pipeline (step) at point, else the PR."
   (interactive)
-  (let ((sec (magit-current-section)))
-    (if (and sec (object-of-class-p sec 'gp-comment-section))
-        (let ((url (gp-pr-web-url (oref sec value))))
-          (if url
-              (browse-url url)
-            (user-error "No URL for this comment")))
-      (gp-browse-pr))))
+  (let ((sec (magit-current-section))
+        (pipeline-url (gp-detail--pipeline-url-at-point)))
+    (cond
+     ((and sec (object-of-class-p sec 'gp-comment-section))
+      (let ((url (gp-pr-web-url (oref sec value))))
+        (if url
+            (browse-url url)
+          (user-error "No URL for this comment"))))
+     (pipeline-url (browse-url pipeline-url))
+     (t (gp-browse-pr)))))
 
 (defun gp-detail-ret ()
   "Context action: open a changed file or commit, jump to a comment, else fold."
