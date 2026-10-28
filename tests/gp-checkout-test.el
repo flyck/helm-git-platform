@@ -39,6 +39,43 @@
                        "-m" "gp-auto: WIP on main")))
       (should (= (length plan) 4)))))
 
+(ert-deftest gp-test-plan-unmarks-intent-to-add-before-stash ()
+  "`git add -N' paths make `git stash' abort, so they are reset first."
+  (let ((gp-checkout-remote "origin"))
+    (let ((plan (gp-checkout--plan "feature" t "main" nil '("a.tf" "b.tf"))))
+      (should (equal (car plan) '("reset" "-q" "--" "a.tf" "b.tf")))
+      (should (equal (car (cadr plan)) "stash")))
+    ;; nothing marked: no reset step
+    (should (equal (car (car (gp-checkout--plan "feature" t "main" nil nil)))
+                   "stash"))))
+
+(ert-deftest gp-test-intent-to-add-stash-in-a-real-repo ()
+  "Against real git: a tree with an intent-to-add file can be stashed
+once the plan's reset step has run, and the file comes back on pop."
+  (skip-unless (executable-find "git"))
+  (let ((dir (make-temp-file "gp-ita" t))
+        (process-environment (append '("GIT_AUTHOR_NAME=t" "GIT_AUTHOR_EMAIL=t@t"
+                                       "GIT_COMMITTER_NAME=t" "GIT_COMMITTER_EMAIL=t@t")
+                                     process-environment)))
+    (unwind-protect
+        (progn
+          (gp-checkout--git dir "init" "-q")
+          (gp-checkout--git dir "commit" "-q" "--allow-empty" "-m" "init")
+          (with-temp-file (expand-file-name "new.tf" dir) (insert "x\n"))
+          (gp-checkout--git dir "add" "-N" "new.tf")
+          (should (equal (gp-checkout-intent-to-add-files dir) '("new.tf")))
+          ;; this is what used to abort the checkout
+          (should-not (= 0 (car (gp-checkout--git dir "stash" "create"))))
+          (dolist (args (seq-take (gp-checkout--plan
+                                   "x" t "main" nil
+                                   (gp-checkout-intent-to-add-files dir))
+                                  2))
+            (should (= 0 (car (apply #'gp-checkout--git dir args)))))
+          (should-not (gp-checkout-dirty-p dir))
+          (should (= 0 (car (gp-checkout--git dir "stash" "pop"))))
+          (should (file-exists-p (expand-file-name "new.tf" dir))))
+      (delete-directory dir t))))
+
 (ert-deftest gp-test-dirty-count-counts-porcelain-lines ()
   "One line per path, whatever the status codes on it -- a staged AND
 modified file is still one file to the user."

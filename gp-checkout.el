@@ -87,6 +87,13 @@ would see in `magit-status'."
         (length (split-string (cdr res) "\n" t))
       0)))
 
+(defun gp-checkout-intent-to-add-files (dir)
+  "Return the paths in DIR staged with `git add -N' (intent to add).
+`git stash' cannot save these and aborts with \"not uptodate\"."
+  (let ((res (gp-checkout--git dir "diff" "--name-only" "--diff-filter=A")))
+    (when (= (car res) 0)
+      (split-string (cdr res) "\n" t))))
+
 (defun gp-checkout-current-branch (dir)
   "Return the current branch name in DIR, or nil."
   (let ((res (gp-checkout--git dir "rev-parse" "--abbrev-ref" "HEAD")))
@@ -166,15 +173,21 @@ plist (:ok BOOL :log STRING)."
   "Return the auto-stash message used when leaving BRANCH."
   (format "%s: WIP on %s" gp-checkout-stash-prefix (or branch "?")))
 
-(defun gp-checkout--plan (branch &optional dirty current-branch base)
+(defun gp-checkout--plan (branch &optional dirty current-branch base
+                                 intent-to-add)
   "Return an ordered list of git argument-lists to switch to BRANCH.
 When DIRTY is non-nil a stash step is prepended, labelled with
-CURRENT-BRANCH.  When BASE (the PR's destination branch) is given,
+CURRENT-BRANCH.  INTENT-TO-ADD lists paths marked with `git add -N';
+they are unmarked first, which leaves them as untracked files the
+stash then saves, because `git stash' cannot save them otherwise.
+When BASE (the PR's destination branch) is given,
 its remote ref is fetched too so a diff against `origin/BASE'
 matches what the server computed even if local BASE is stale.
 Pure: only builds the commands; the caller runs them."
   (let ((remote gp-checkout-remote)
         (steps '()))
+    (when (and dirty intent-to-add)
+      (push (append (list "reset" "-q" "--") intent-to-add) steps))
     (when dirty
       (push (list "stash" "push" "--include-untracked"
                   "-m" (gp-checkout--stash-name current-branch))
@@ -263,7 +276,8 @@ failure it always used to."
                            branch wt))
       (let* ((dirty (gp-checkout-dirty-p dir))
              (current (gp-checkout-current-branch dir))
-             (plan (gp-checkout--plan branch dirty current base))
+             (ita (and dirty (gp-checkout-intent-to-add-files dir)))
+             (plan (gp-checkout--plan branch dirty current base ita))
              (remote gp-checkout-remote)
              (pull-step (list "pull" "--ff-only" remote branch))
              (log '())
