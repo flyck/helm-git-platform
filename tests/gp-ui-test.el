@@ -2705,26 +2705,27 @@ This is the refresh case: the comment comes back from the API with a new
   "A resolved thread the user expanded stays expanded on refresh.
 Resolved threads start collapsed, but after the first render the user's
 own state wins -- `gp--collapse-resolved-sections' must not re-hide it."
-  (let ((resolved '((id . 7) (updated_on . "T1")
-                    (resolution . ((type . "resolved"))))))
-    (with-temp-buffer
-      (gp-detail-mode)
-      (should (gp-comment-resolved-p resolved))
-      ;; first render: forced collapsed
-      (gp--render-detail-into (current-buffer) '((id . 1) (title . "t"))
-                              (list resolved) nil)
-      (let ((sec (gp--test-find-comment-section 7)))
-        (should sec)
-        (should (oref sec hidden))
-        ;; user expands it deliberately
-        (magit-section-show sec)
-        (should-not (oref sec hidden)))
-      ;; refresh must not force it shut again
-      (gp--render-detail-into (current-buffer) '((id . 1) (title . "t"))
-                              (list resolved) nil)
-      (let ((sec (gp--test-find-comment-section 7)))
-        (should sec)
-        (should-not (oref sec hidden))))))
+  (bitbucket-mock-with-service
+    (let ((resolved '((id . 7) (updated_on . "T1")
+                      (resolution . ((type . "resolved"))))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (should (gp-comment-resolved-p resolved))
+        ;; first render: forced collapsed
+        (gp--render-detail-into (current-buffer) '((id . 1) (title . "t"))
+                                (list resolved) nil)
+        (let ((sec (gp--test-find-comment-section 7)))
+          (should sec)
+          (should (oref sec hidden))
+          ;; user expands it deliberately
+          (magit-section-show sec)
+          (should-not (oref sec hidden)))
+        ;; refresh must not force it shut again
+        (gp--render-detail-into (current-buffer) '((id . 1) (title . "t"))
+                                (list resolved) nil)
+        (let ((sec (gp--test-find-comment-section 7)))
+          (should sec)
+          (should-not (oref sec hidden)))))))
 
 (defun gp--test-body-invisible-p (section)
   "Return non-nil if SECTION's body is actually hidden in the buffer.
@@ -2741,28 +2742,29 @@ re-expanded."
 `erase-buffer' in `gp--render-detail-into' destroys it.  The rebuilt
 section keeps its `hidden' slot but used to lose the overlay, so the
 body rendered in full while the model said collapsed."
-  ;; a description makes `gp--insert-description' emit a real section
-  (let ((pr '((id . 1) (title . "t")
-              (description . "a multi-line\nPR description")))
-        (comments nil))
-    (with-temp-buffer
-      (gp-detail-mode)
-      (gp--render-detail-into (current-buffer) pr comments nil)
-      (let ((sec (cl-find 'gp-description (oref magit-root-section children)
-                          :key (lambda (s) (oref s type)))))
-        (should sec)
-        ;; user collapses it -- slot and overlay agree
-        (magit-section-hide sec)
-        (should (oref sec hidden))
-        (should (gp--test-body-invisible-p sec)))
-      ;; refresh
-      (gp--render-detail-into (current-buffer) pr comments nil)
-      (let ((sec (cl-find 'gp-description (oref magit-root-section children)
-                          :key (lambda (s) (oref s type)))))
-        (should sec)
-        (should (oref sec hidden))
-        ;; the regression: slot said hidden but the text was visible
-        (should (gp--test-body-invisible-p sec))))))
+  (bitbucket-mock-with-service
+    ;; a description makes `gp--insert-description' emit a real section
+    (let ((pr '((id . 1) (title . "t")
+                (description . "a multi-line\nPR description")))
+          (comments nil))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (gp--render-detail-into (current-buffer) pr comments nil)
+        (let ((sec (cl-find 'gp-description (oref magit-root-section children)
+                            :key (lambda (s) (oref s type)))))
+          (should sec)
+          ;; user collapses it -- slot and overlay agree
+          (magit-section-hide sec)
+          (should (oref sec hidden))
+          (should (gp--test-body-invisible-p sec)))
+        ;; refresh
+        (gp--render-detail-into (current-buffer) pr comments nil)
+        (let ((sec (cl-find 'gp-description (oref magit-root-section children)
+                            :key (lambda (s) (oref s type)))))
+          (should sec)
+          (should (oref sec hidden))
+          ;; the regression: slot said hidden but the text was visible
+          (should (gp--test-body-invisible-p sec)))))))
 
 (ert-deftest gp-test-apply-section-visibility-rebuilds-overlays ()
   "`gp--apply-section-visibility' re-hides every section whose slot says so."
