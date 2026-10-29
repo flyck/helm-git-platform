@@ -51,10 +51,13 @@
 
 (defface gp-pipeline-running-face '((t :inherit warning))
   "Face for a running pipeline/step." :group 'bitbucket-faces)
-(defface gp-pipeline-spinner-face '((t :inherit font-lock-keyword-face))
-  "Face for the animated in-progress spinner glyph.
-Inherits a theme-provided face rather than naming a colour, so the
-spinner picks up whatever blue/accent hue the active theme uses."
+(defface gp-pipeline-spinner-face
+  '((((class color) (background dark)) :foreground "#61afef")
+    (((class color) (background light)) :foreground "#1f6feb")
+    (t :inherit font-lock-keyword-face))
+  "Face for the animated spinner of a running or queued pipeline/step.
+Blue in both light and dark themes: a theme's keyword face, used
+before, is red or teal in many themes, which reads as an error."
   :group 'bitbucket-faces)
 (defface gp-pipeline-success-face '((t :inherit success))
   "Face for a successful pipeline/step." :group 'bitbucket-faces)
@@ -284,6 +287,15 @@ resets the grace window rather than inheriting a nearly-expired one."
 
 ;;;; Status formatting (pure) --------------------------------------------------
 
+(defun gp-pipeline--queued-p (state &optional step)
+  "Non-nil when STATE means waiting for a runner rather than not started.
+Bitbucket reports a queued step as READY, and a pipeline that has not
+started yet as PENDING; GitHub's queued runs and jobs map to QUEUED.
+A PENDING step, by contrast, is one whose turn has not come (a later
+or manual step), so it is only queued when STEP is nil."
+  (or (member state '("READY" "QUEUED"))
+      (and (not step) (equal state "PENDING"))))
+
 (defun gp-pipeline--status-glyph (state result &optional step)
   "Return (GLYPH . FACE) for a pipeline/step STATE and RESULT string.
 A pipeline paused at an open manual gate (stage PAUSED) gets its own
@@ -291,11 +303,11 @@ A pipeline paused at an open manual gate (stage PAUSED) gets its own
 animated spinner glyph (see `gp-pipeline--spinner-glyph'), which
 already carries its own face -- FACE is `gp-pipeline-spinner-face' in
 that case.  STEP is accepted for backward compatibility and no longer
-changes the glyph."
-  (ignore step)
+changes the glyph.  A queued entry (see `gp-pipeline--queued-p')
+spins too: it is waiting for a runner, not idle."
   (cond
    ((equal result "PAUSED") (cons "⏸" 'gp-pipeline-paused-face))
-   ((equal state "IN_PROGRESS")
+   ((or (equal state "IN_PROGRESS") (gp-pipeline--queued-p state step))
     (gp-pipeline--spinner-ensure)
     (cons (gp-pipeline--spinner-glyph) 'gp-pipeline-spinner-face))
    ((member state '("PENDING" "READY" "BUILDING" nil))
@@ -366,8 +378,10 @@ the indistinguishable running state."
          (num (gp-pipeline-number pipeline)))
     (concat (propertize (car g) 'face (cdr g))
             (format " Pipeline #%s" (or num "?"))
-            (propertize (format "  %s" (if gated "manual gate open"
-                                         (or result state "")))
+            (propertize (format "  %s" (cond (gated "manual gate open")
+                                             ((and (not result) (gp-pipeline--queued-p state))
+                                              "queued")
+                                             (t (or result state ""))))
                         'face 'shadow))))
 
 ;;;; Rendering -----------------------------------------------------------------
@@ -401,7 +415,9 @@ the indistinguishable running state."
                   (deploy-started (propertize "  [deploying…]" 'face 'gp-pipeline-running-face))
                   (runnable (propertize "  [manual ▸ T]" 'face 'gp-pipeline-running-face))
                   (redeployable (propertize "  [redeploy ▸ T]" 'face 'gp-pipeline-running-face))
-                  (manual (propertize "  [manual]" 'face 'shadow)))
+                  (manual (propertize "  [manual]" 'face 'shadow))
+                  ((gp-pipeline--queued-p state 'step)
+                   (propertize "  queued" 'face 'shadow)))
                 (when rerunnable
                   (propertize "  [rerun ▸ P]" 'face 'gp-pipeline-running-face))
                 ;; an armed deploy watcher, so a waiting gate is visible from

@@ -2223,13 +2223,13 @@ each shell line, and that already renders as its own log section."
   (alist-get 'head_sha pipeline))
 
 (defun github-pipeline-state (pipeline)
-  "Return PIPELINE's coarse state: PENDING/IN_PROGRESS/COMPLETED.
+  "Return PIPELINE's coarse state: QUEUED/PENDING/IN_PROGRESS/COMPLETED.
 Translated from GitHub's `status' (queued/in_progress/completed) to
 the vocabulary the UI already expects from Bitbucket."
   (pcase (alist-get 'status pipeline)
     ("completed" "COMPLETED")
     ("in_progress" "IN_PROGRESS")
-    ("queued" "PENDING")
+    ("queued" "QUEUED")
     (_ "PENDING")))
 
 (defun github-pipeline-result (pipeline)
@@ -2263,11 +2263,11 @@ Translated from GitHub's `conclusion'."
      pipelines)))
 
 (defun github-pipeline-step-state (step)
-  "Return STEP (job)'s coarse state string (PENDING/IN_PROGRESS/COMPLETED/…)."
+  "Return STEP (job)'s coarse state (QUEUED/PENDING/IN_PROGRESS/COMPLETED/…)."
   (pcase (alist-get 'status step)
     ("completed" "COMPLETED")
     ("in_progress" "IN_PROGRESS")
-    ("queued" "PENDING")
+    ("queued" "QUEUED")
     (_ "PENDING")))
 
 (defun github-pipeline-step-result (step)

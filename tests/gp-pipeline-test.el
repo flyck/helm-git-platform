@@ -176,6 +176,68 @@ the steps."
     (should (string-match-p "SUCCESSFUL"
                             (substring-no-properties (gp-pipeline--label p))))))
 
+;;;; Queued and spinner colour -----------------------------------------------
+
+(ert-deftest gp-test-pipeline-queued-p ()
+  "READY/QUEUED are queued everywhere; PENDING only for a whole pipeline,
+since a PENDING step is merely one whose turn has not come."
+  (should (gp-pipeline--queued-p "READY" 'step))
+  (should (gp-pipeline--queued-p "QUEUED" 'step))
+  (should (gp-pipeline--queued-p "QUEUED"))
+  (should (gp-pipeline--queued-p "PENDING"))
+  (should-not (gp-pipeline--queued-p "PENDING" 'step))
+  (should-not (gp-pipeline--queued-p "IN_PROGRESS"))
+  (should-not (gp-pipeline--queued-p "COMPLETED")))
+
+(ert-deftest gp-test-pipeline-queued-spins ()
+  "A queued pipeline or step gets the spinner, not the idle ellipsis."
+  (unwind-protect
+      (let ((frames (append gp-pipeline-spinner-frames nil)))
+        (dolist (args '(("READY" nil step) ("QUEUED" nil step) ("PENDING" nil nil)))
+          (let ((g (apply #'gp-pipeline--status-glyph args)))
+            (should (member (substring-no-properties (car g)) frames))
+            (should (eq (cdr g) 'gp-pipeline-spinner-face))))
+        ;; a step waiting its turn stays idle
+        (should (equal (car (gp-pipeline--status-glyph "PENDING" nil 'step)) "…")))
+    (gp-pipeline--spinner-stop)))
+
+(ert-deftest gp-test-pipeline-queued-label-and-step-line ()
+  "Queued reads as \"queued\" on the pipeline label and the step line."
+  (unwind-protect
+      (progn
+        (should (string-match-p
+                 "#7  queued"
+                 (substring-no-properties
+                  (gp-pipeline--label '((build_number . 7) (state (name . "PENDING")))))))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (magit-insert-section (gp-root)
+              (gp-pipeline--insert-step '((name . "Build") (state (name . "READY"))))
+              (gp-pipeline--insert-step '((name . "Later") (state (name . "PENDING"))))))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "Build  queued" text))
+            (should-not (string-match-p "Later  queued" text)))))
+    (gp-pipeline--spinner-stop)))
+
+(ert-deftest gp-test-pipeline-github-queued-maps-to-queued ()
+  (should (equal (github-pipeline-state '((status . "queued"))) "QUEUED"))
+  (should (equal (github-pipeline-step-state '((status . "queued"))) "QUEUED"))
+  (should (equal (github-pipeline-step-state '((status . "waiting"))) "PENDING")))
+
+(ert-deftest gp-test-pipeline-spinner-face-is-blue-in-either-mode ()
+  "The spinner names its own blue for light and dark backgrounds,
+rather than borrowing a theme face that may be red."
+  (let ((spec (face-default-spec 'gp-pipeline-spinner-face)))
+    (dolist (bg '(light dark))
+      (let* ((entry (seq-find (lambda (e) (member `(background ,bg) (car e))) spec))
+             (hex (plist-get (cdr entry) :foreground))
+             (rgb (mapcar (lambda (i) (string-to-number (substring hex i (+ i 2)) 16))
+                          '(1 3 5))))
+        ;; blue dominates red and green
+        (should (> (nth 2 rgb) (nth 0 rgb)))
+        (should (> (nth 2 rgb) (nth 1 rgb)))))))
+
 ;;;; Fetch (sorted, with steps) ------------------------------------------------
 
 (ert-deftest gp-test-pipeline-fetch-current-vs-recent ()
