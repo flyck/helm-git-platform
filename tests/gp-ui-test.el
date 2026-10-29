@@ -398,6 +398,46 @@ would break RET on a commit."
     (:path "docs/graphql.md" :added 40 :removed 0 :status "added"))
   "Two changed-file plists, as `gp--detail-stats' carries them.")
 
+;;;; Uncounted (generated) files ---------------------------------------------
+
+(ert-deftest gp-test-uncounted-file-p-matches-base-names ()
+  (should (gp--uncounted-file-p "Pipfile.lock"))
+  (should (gp--uncounted-file-p "services/api/package-lock.json"))
+  (should-not (gp--uncounted-file-p "src/lock.py"))
+  (should-not (gp--uncounted-file-p nil))
+  (let ((gp-uncounted-files '("*.min.js")))
+    (should (gp--uncounted-file-p "web/app.min.js"))
+    (should-not (gp--uncounted-file-p "Pipfile.lock"))))
+
+(ert-deftest gp-test-counted-lines-subtracts-lockfiles ()
+  "Lockfile lines come off the totals; a cut-short file list still subtracts."
+  (should (equal (gp--counted-lines
+                  '(:added 4012 :removed 7
+                    :file-list ((:path "app.py" :added 1 :removed 1)
+                                (:path "Pipfile.lock" :added 4011 :removed 6))))
+                 '(1 1 1)))
+  ;; no file list (or nothing generated): totals as reported
+  (should (equal (gp--counted-lines '(:added 5 :removed 2)) '(5 2 0))))
+
+(ert-deftest gp-test-stats-line-leaves-lockfiles-out ()
+  (should (equal (substring-no-properties
+                  (gp--stats-line
+                   '(:commits 1 :files 2 :added 4012 :removed 7
+                     :file-list ((:path "app.py" :added 1 :removed 1)
+                                 (:path "Pipfile.lock" :added 4011 :removed 6)))))
+                 "📊 1 commit  2 files  +1 -1  (1 file not counted)\n"))
+  (should (equal (substring-no-properties
+                  (gp--stats-line '(:commits 3 :files 1 :added 9 :removed 2)))
+                 "📊 3 commits  1 file  +9 -2\n")))
+
+(ert-deftest gp-test-changed-files-marks-lockfile-not-counted ()
+  (gp-test--with-changed-files
+      '((:path "app.py" :added 1 :removed 1 :status "modified")
+        (:path "Pipfile.lock" :added 4011 :removed 6 :status "modified"))
+    (let ((text (substring-no-properties (buffer-string))))
+      (should (string-match-p "Pipfile.lock  \\+4011 -6  (not counted)" text))
+      (should-not (string-match-p "app.py.*not counted" text)))))
+
 (defun gp-test--goto-file-line (name)
   "Move point to the start of the line rendering file NAME."
   (goto-char (point-min))

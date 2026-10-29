@@ -36,19 +36,6 @@ the rest of the Emacs session (persist it in a `defvar', pass it back via
 `:input' on the next `gp-helm--list' call), gated by a `defcustom'
 defaulting to enabled.
 
-## Coloring
-
-would be nice if the progress animation were blue and not red.
-
-## Add a queued status for pipeline steps
-
-we should have a loading indecator icon here for spinning
-
-Confirmed gap: a queued job currently gets no distinct icon and doesn't
-read as "running" anywhere in the UI (bubble, step glyph) -- it's
-indistinguishable from idle/not-started, so a PR that's actually waiting
-in a queue looks the same as one with nothing happening at all.
-
 ## Notice when the PR's branch has uncommitted local work
 
 Show `⚠ branch has uncommitted local work` in the detail view, but only when
@@ -100,15 +87,6 @@ returning `"modified"' on files that did have conflicts). Test against
 an actual open, conflicted Bitbucket PR the next time one exists, and
 tighten the STATE string (currently hardcoded `"unverified"') once
 confirmed either way.
-
-## Exclude generated files from the changed-lines counter
-
-Lockfiles swamp the `+N -M' counts and the changed-files list -- a
-one-line change reads as +4000 when `Pipfile.lock' moved.  Add a pattern
-list of paths to leave out of the counter (still listed, just not counted,
-or hidden entirely -- decide which reads better), defaulting to
-`Pipfile.lock' and the obvious siblings (`poetry.lock',
-`package-lock.json', `yarn.lock', `go.sum', `Cargo.lock').
 
 ## Pipeline steps are not properly integrated with GitHub
 

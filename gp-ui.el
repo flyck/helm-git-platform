@@ -840,6 +840,61 @@ or `gp-invalidate-pr-caches' + a manual rerender\), same as today."
       (with-current-buffer buf
         (setq gp--detail-pending-action nil)))))
 
+(defcustom gp-uncounted-files
+  '("Pipfile.lock" "poetry.lock" "uv.lock" "package-lock.json" "yarn.lock"
+    "pnpm-lock.yaml" "go.sum" "Cargo.lock" "Gemfile.lock" "composer.lock")
+  "File names whose lines are left out of a PR's +N -M count.
+Generated files such as lockfiles swamp the count: a one-line change
+reads as +4000 when a lockfile moved.  Each entry is a shell glob
+matched against the file's base name; matching files stay in the
+changed-files list, marked as not counted."
+  :type '(repeat string) :group 'bitbucket)
+
+(defun gp--uncounted-file-p (path)
+  "Non-nil when PATH's base name matches `gp-uncounted-files'."
+  (let ((name (file-name-nondirectory (or path ""))))
+    (seq-some (lambda (glob) (string-match-p (wildcard-to-regexp glob) name))
+              gp-uncounted-files)))
+
+(defun gp--counted-lines (stats)
+  "Return (ADDED REMOVED UNCOUNTED) for STATS minus `gp-uncounted-files'.
+UNCOUNTED is how many listed files were left out.  The excluded lines
+are subtracted from the totals rather than the rest summed up, so a
+file list cut short by the forge still yields the right count."
+  (let ((added (or (plist-get stats :added) 0))
+        (removed (or (plist-get stats :removed) 0))
+        (uncounted 0))
+    (dolist (f (plist-get stats :file-list))
+      (when (gp--uncounted-file-p (plist-get f :path))
+        (setq added (- added (or (plist-get f :added) 0))
+              removed (- removed (or (plist-get f :removed) 0))
+              uncounted (1+ uncounted))))
+    (list (max added 0) (max removed 0) uncounted)))
+
+(defun gp--stats-line (s)
+  "Return the detail header's \"📊 N commits  N files  +A -R\" line for stats S.
+Lines in `gp-uncounted-files' are left out of +A -R, and the line
+says how many files that skipped."
+  (let ((counted (gp--counted-lines s)))
+    (concat "📊 "
+            (propertize (format "%d commit%s" (plist-get s :commits)
+                                (if (= 1 (plist-get s :commits)) "" "s"))
+                        'face 'shadow)
+            "  "
+            (propertize (format "%d file%s" (plist-get s :files)
+                                (if (= 1 (plist-get s :files)) "" "s"))
+                        'face 'shadow)
+            "  "
+            (propertize (format "+%d" (nth 0 counted)) 'face 'diff-added)
+            " "
+            (propertize (format "-%d" (nth 1 counted)) 'face 'diff-removed)
+            (if (> (nth 2 counted) 0)
+                (propertize (format "  (%d file%s not counted)" (nth 2 counted)
+                                    (if (= 1 (nth 2 counted)) "" "s"))
+                            'face 'shadow)
+              "")
+            "\n")))
+
 (defcustom gp-detail-files-collapsed nil
   "When non-nil, the changed-files section starts collapsed."
   :type 'boolean :group 'bitbucket)
@@ -1036,6 +1091,8 @@ block at once.  The file name remains clickable and opens the checkout."
             (let ((st (plist-get f :status)))
               (when (member st '("added" "removed" "renamed"))
                 (insert (propertize (format "  (%s)" st) 'face 'shadow))))
+            (when (gp--uncounted-file-p path)
+              (insert (propertize "  (not counted)" 'face 'shadow)))
             (insert "\n")))
         (insert "\n")))))
 
@@ -1370,20 +1427,7 @@ that is when you need a way to add the first one."
                  'face 'shadow)
                 "\n"))
       (when gp--detail-stats
-        (let ((s gp--detail-stats))
-          (insert "📊 "
-                  (propertize (format "%d commit%s" (plist-get s :commits)
-                                      (if (= 1 (plist-get s :commits)) "" "s"))
-                              'face 'shadow)
-                  "  "
-                  (propertize (format "%d file%s" (plist-get s :files)
-                                      (if (= 1 (plist-get s :files)) "" "s"))
-                              'face 'shadow)
-                  "  "
-                  (propertize (format "+%d" (plist-get s :added)) 'face 'diff-added)
-                  " "
-                  (propertize (format "-%d" (plist-get s :removed)) 'face 'diff-removed)
-                  "\n")))
+        (insert (gp--stats-line gp--detail-stats)))
       (gp--insert-reviewers-line gp--detail-reviewers pr)
       (gp--insert-labels-line pr)
       (insert "\n")
