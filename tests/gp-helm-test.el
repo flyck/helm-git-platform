@@ -15,6 +15,32 @@
 (require 'git-platform-github)
 (require 'git-platform-bitbucket)
 
+(ert-deftest gp-test-helm-kills-own-buffer-after-session ()
+  "An ended gp Helm session leaves no stale buffer; others are untouched."
+  (let* ((gp-helm-kill-buffer-on-exit t)
+         (mine (gp-helm--buffer "test-kill"))
+         (other "*helm other-test-kill*")
+         (timers nil))
+    (get-buffer-create mine)
+    (get-buffer-create other)
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_ _ fn &rest _) (push fn timers))))
+          (let ((helm-buffer other)) (gp-helm--kill-dead-buffer))
+          (should-not timers)
+          (let ((helm-buffer mine)) (gp-helm--kill-dead-buffer))
+          (let ((helm-alive-p t) (helm-buffer mine))
+            (funcall (car timers)))
+          (should (get-buffer mine))   ; reused by a live session: kept
+          (let ((helm-alive-p nil)) (funcall (car timers)))
+          (should-not (get-buffer mine))
+          (should (get-buffer other))
+          (should (memq #'gp-helm--kill-dead-buffer helm-cleanup-hook))
+          (should (gp-helm--own-buffer-p (gp--buffer-name "helm")))
+          (should-not (gp-helm--own-buffer-p (gp--buffer-name "helmet"))))
+      (when (get-buffer mine) (kill-buffer mine))
+      (kill-buffer other))))
+
 (ert-deftest gp-test-helm-pr-candidates ()
   (let* ((prs (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json")))
          (cands (gp-helm--pr-candidates prs)))

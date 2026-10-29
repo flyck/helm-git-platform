@@ -80,6 +80,43 @@ PR you came from.")
   "Return the tagged Helm buffer name for SUFFIX, e.g. \"files\"."
   (gp--buffer-name (format "helm %s" suffix)))
 
+(defcustom gp-helm-kill-buffer-on-exit t
+  "Non-nil kills a gp Helm buffer once its session has ended.
+Helm only buries its buffer on exit.  The leftover buffer still shows
+the candidates, but every key and click in it fails with \"Running
+helm command outside of context\" or \"No buffer named *helm*\",
+because the session it belonged to is gone.  Killing it keeps that
+dead buffer out of buffer lists and tab lines.  The cost is that
+`helm-resume' cannot reopen an ended gp session."
+  :type 'boolean :group 'bitbucket)
+
+(defun gp-helm--own-buffer-p (name)
+  "Non-nil if NAME is a Helm buffer created by `gp-helm--buffer'."
+  (and (stringp name)
+       (string-match-p
+        (concat "\\`" (regexp-quote (concat "*" gp-buffer-name-prefix "helm"))
+                "[ *]")
+        name)))
+
+(defun gp-helm--kill-dead-buffer ()
+  "Kill the gp Helm buffer whose session is ending.
+Runs from `helm-cleanup-hook'.  The kill is deferred until the
+current command has finished, so the session's actions can still use
+the buffer.  A buffer that a live (nested or resumed) session is
+using again by then is left alone."
+  (let ((name helm-buffer))
+    (when (and gp-helm-kill-buffer-on-exit (gp-helm--own-buffer-p name))
+      (run-at-time
+       0 nil
+       (lambda ()
+         (let ((buf (get-buffer name)))
+           (when (and buf
+                      (not (and (bound-and-true-p helm-alive-p)
+                                (equal helm-buffer name))))
+             (kill-buffer buf))))))))
+
+(add-hook 'helm-cleanup-hook #'gp-helm--kill-dead-buffer)
+
 ;;;; Pure candidate builders -------------------------------------------------
 
 (defcustom gp-helm-title-width 52
