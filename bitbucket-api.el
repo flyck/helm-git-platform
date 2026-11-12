@@ -1481,14 +1481,17 @@ with Pipelines:Write."
 (defun bitbucket-pipeline-run-manual-step (full-name branch pipeline step)
   "Run a waiting manual STEP of PIPELINE in FULL-NAME on BRANCH.
 There is no public per-step run endpoint, so this re-triggers the
-pipeline with its custom selector, which starts a NEW pipeline run.
-Errors unless STEP is a manual step.  Requires Pipelines:Write."
+pipeline with its own selector (branches, custom, ...), which starts a
+NEW pipeline run.  Errors unless STEP is a manual step.  Requires
+Pipelines:Write."
   (unless (bitbucket-pipeline-step-manual-p step)
     (user-error "Step %S is not a manual step"
                 (or (alist-get 'name step) "?")))
-  (let* ((pattern (let-alist pipeline .target.selector.pattern))
-         (selector (when pattern (cons "custom" pattern))))
-    (bitbucket-pipeline-trigger full-name branch selector)))
+  (let-alist pipeline
+    (bitbucket-pipeline-trigger
+     full-name branch
+     (and .target.selector.pattern
+          (cons .target.selector.type .target.selector.pattern)))))
 
 (defun bitbucket-pipeline-step-log (full-name pipeline-uuid step-uuid)
   "Return the captured log text for STEP-UUID of PIPELINE-UUID in FULL-NAME.

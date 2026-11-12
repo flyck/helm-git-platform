@@ -112,22 +112,33 @@
     "acme/x" "main" '((target)) '((state (name . "PENDING")) (trigger (type . "automatic"))))
    :type 'user-error))
 
-(ert-deftest bitbucket-test-pipeline-run-manual-triggers-with-selector ()
-  "Bitbucket has no per-step run endpoint, so a waiting manual step is
-advanced by re-triggering its pipeline with the custom selector."
+(defun bitbucket-test--run-manual-selector (selector-type)
+  "Re-trigger the fixture pipeline whose selector is SELECTOR-TYPE.
+Return the selector the trigger POST carried."
   (bitbucket-mock-with-service
-    (bitbucket-pipeline-run-manual-step
-     "acme/x" "main"
-     '((uuid . "{pipe}") (target (selector (pattern . "deploy"))))
-     '((uuid . "{step-3}")
-       (state (name . "PENDING") (stage (name . "PAUSED")))
-       (trigger (type . "pipeline_step_trigger_manual"))))
-    (let* ((call (cl-find "POST" bitbucket-mock-calls :key #'car :test #'equal))
-           (data (nth 3 call)))
-      (should call)
-      (should (string-suffix-p "/pipelines" (nth 1 call)))
-      (should (equal (let-alist data .target.selector.type) "custom"))
-      (should (equal (let-alist data .target.selector.pattern) "deploy")))))
+    (let ((pipeline (cl-find selector-type
+                             (alist-get 'values (bitbucket-mock--fixture "pipelines.json"))
+                             :key (lambda (p) (let-alist p .target.selector.type))
+                             :test #'equal)))
+      (should pipeline)
+      (bitbucket-pipeline-run-manual-step
+       "acme/x" "feature/widget-toggle" pipeline
+       '((uuid . "{step-3}")
+         (state (name . "PENDING") (stage (name . "PAUSED")))
+         (trigger (type . "pipeline_step_trigger_manual"))))
+      (let ((call (cl-find "POST" bitbucket-mock-calls :key #'car :test #'equal)))
+        (should (string-suffix-p "/pipelines" (nth 1 call)))
+        (let-alist (nth 3 call) .target.selector)))))
+
+(ert-deftest bitbucket-test-pipeline-run-manual-keeps-a-branch-pipelines-selector ()
+  "A branch pipeline is re-triggered as a branch pipeline, not as a
+custom pipeline named after the branch (which would not exist)."
+  (should (equal (bitbucket-test--run-manual-selector "branches")
+                 '((type . "branches") (pattern . "feature/widget-toggle")))))
+
+(ert-deftest bitbucket-test-pipeline-run-manual-keeps-a-custom-pipelines-selector ()
+  (should (equal (bitbucket-test--run-manual-selector "custom")
+                 '((type . "custom") (pattern . "deploy-staging")))))
 
 (ert-deftest bitbucket-test-pipelines-for-branch-and-steps ()
   (bitbucket-mock-with-service
