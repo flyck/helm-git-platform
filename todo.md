@@ -1,5 +1,45 @@
 # TODO
 
+## Known bugs (found during the test audit, not fixed yet)
+
+Each fix should ship with a test that fails on the current code.
+
+- **GitHub: replying to a general comment fails.**  `R` on a general
+  (issue) comment posts to `/pulls/N/comments/ID/replies`, the endpoint
+  for inline review comments only, so GitHub answers 404.  The `reply [R]`
+  button is offered on general comments anyway.  A reply there should be
+  a new issue comment (`POST /issues/N/comments`).
+- **GitHub: a failed file-list fetch blanks "Changed files".**
+  `github-pull-request-stats-async` ignores the fetch's `ok` flag, so a
+  failed `/pulls/N/files` becomes an empty list and a refresh wipes the
+  section instead of keeping what was shown.
+- **Merged/declined PRs never listed.**  `C-u gp-helm` and `C-c m` should
+  show them, but `gp-helm--fetch-mine-async` passes state nil and both
+  backends read nil as open (`bitbucket--workspace-pull-requests-params`
+  sends `state=OPEN`, `github--workspace-pr-query` searches `is:open`).
+- **PR-title prefix cuts mid-word.**  `gp-create--common-prefix` turns
+  "fix: tests" and "fix: typo" into "fix: t"; it should stop at a word
+  boundary.
+- **Compose preview shows `**` markup.**  `gp-compose-render-markdown`
+  marks the markup invisible but never adds `markdown-markup` to the
+  buffer's invisibility spec (`add-to-invisibility-spec`).
+- **Overlay refresh errors when the refetch fails.**
+  `gp-overlay-refresh` has no fallback: an HTTP error during the refetch
+  signals instead of keeping the current overlays.
+- **`gp-detail-refresh` has a dead branch.**  Its else-branch calls
+  `(gp-show-pr gp--pr)` where `gp--pr` is always nil, so it cannot work.
+- **Ghostty launch delay may break in decimal-comma locales.**
+  `gp-helm-terminal-ghostty-open-session` converts the delay with
+  `(item 3 of argv) as real`; the iTerm2 backend avoids this for that
+  reason by putting the number straight into the script.  Likely the same
+  problem; unverified.
+- **Pipeline log polling never stops.**  `gp-pipeline-log--poll` checks a
+  `:step` snapshot taken when the log was opened and never refetched, so
+  it never sees the step finish (see the NOTE there).
+- **Dead code: `inline.outdated` in `gp-comment-outdated-p`.**  No backend
+  sets that flag (Bitbucket's list endpoint omits it), so only the
+  diff-membership fallback ever decides.  Remove it or populate it.
+
 ## Idea: one perspective.el workspace per project for PR buffers (unproven)
 
 Users running `perspective.el' + `projectile' + `persp-projectile' have a
