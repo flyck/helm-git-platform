@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'gp-watch)
 (require 'bitbucket-mock)
+(require 'github-mock)
 
 (defmacro gp-watch-test--with-clock (&rest body)
   "Run BODY with a controllable clock bound to `clock' (a settable var)."
@@ -110,6 +111,15 @@ changes within a session -- so it must not be pinned for a whole day."
         (should (= (alist-get 'id (gp-watch--pr-for "ws/slug" "feat")) 5))
         (gp-watch--pr-for "ws/slug" "feat")
         (should (= calls 1))))))
+
+(ert-deftest gp-test-watch-mode-line-counts-github-comments ()
+  "GitHub has no `comment_count'; the counter sums general and inline
+comments of the full PR, which the list endpoint does not carry."
+  (github-mock-with-service
+    (let ((pr (gp-open-pr-for-branch "acme/web" "feature/widget")))
+      (should (string-match-p
+               "💬3" (substring-no-properties
+                      (gp-watch--format-mode-line nil pr)))))))
 
 (ert-deftest gp-test-watch-mode-line-format ()
   (should (equal (gp-watch--format-mode-line nil nil) ""))

@@ -865,14 +865,16 @@ REST cannot toggle draft state; both directions are GraphQL mutations."
     (github-pull-request full-name number)))
 
 (defun github-open-pr-for-branch (full-name branch)
-  "Return the open PR in FULL-NAME whose head branch is BRANCH, or nil."
-  (github--reshape-pr
-   (car (github-api-paged
-         (format "/repos/%s/pulls" full-name)
-         `(("state" . "open") ("head" . ,(format "%s:%s"
-                                                 (car (split-string full-name "/"))
-                                                 branch)))
-         1))))
+  "Return the open PR in FULL-NAME whose head branch is BRANCH, or nil.
+The full PR is fetched, since the list endpoint omits comment counts."
+  (when-let* ((hit (car (github-api-paged
+                         (format "/repos/%s/pulls" full-name)
+                         `(("state" . "open")
+                           ("head" . ,(format "%s:%s"
+                                              (car (split-string full-name "/"))
+                                              branch)))
+                         1))))
+    (github-pull-request full-name (alist-get 'number hit))))
 
 (defun github-repo-default-branch (full-name)
   "Return repo FULL-NAME's default branch name, or nil."

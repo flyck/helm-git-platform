@@ -204,7 +204,7 @@ PR for the current branch -- shown as a clickable comment counter."
                            'mouse-face 'mode-line-highlight
                            'local-map gp-watch--modeline-count-map)))
      (when pr
-       (let ((n (or (alist-get 'comment_count pr) 0)))
+       (let ((n (or (gp-pr-comment-count pr) 0)))
          (concat
           " "
           (propertize

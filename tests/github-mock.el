@@ -52,6 +52,7 @@ params data) returning one.  Consulted before the built-in routes.")
     (labels . [((id . 1) (name . "bug") (color . "d73a4a"))
                ((id . 2) (name . "ui") (color . "a2eeef"))])
     (additions . 12) (deletions . 3) (changed_files . 2) (commits . 1)
+    (comments . 1) (review_comments . 2)
     (html_url . "https://github.com/acme/web/pull/42")))
 
 (defconst github-mock--pr-2
@@ -63,6 +64,16 @@ params data) returning one.  Consulted before the built-in routes.")
     (requested_reviewers . [])
     (additions . 4) (deletions . 1) (changed_files . 1) (commits . 1)
     (html_url . "https://github.com/acme/web/pull/43")))
+
+(defconst github-mock--full-only-keys
+  '(additions changed_files comments commits deletions maintainer_can_modify
+    mergeable mergeable_state merged merged_by rebaseable review_comments)
+  "PR keys only GET /pulls/N returns; the list endpoint omits them.
+Per .reference/github-rest-api-slim.json (pull-request vs -simple).")
+
+(defun github-mock--simple-pr (pr)
+  "Return PR as the list endpoint shapes it (no counts, no mergeability)."
+  (cl-remove-if (lambda (cell) (memq (car cell) github-mock--full-only-keys)) pr))
 
 (defconst github-mock--repo-labels
   '[((id . 1) (name . "bug") (color . "d73a4a"))
@@ -166,7 +177,8 @@ Stateful so an add/remove round-trip can be driven through the real
    ((string-match-p "/pulls/[0-9]+/reviews\\'" path) nil)
    ((string-match-p "/issues/[0-9]+/comments\\'" path) (list github-mock--issue-comment))
    ((string-match-p "/pulls/[0-9]+/comments\\'" path) (list github-mock--review-comment))
-   ((string-match-p "/pulls\\'" path) (list github-mock--pr-1 github-mock--pr-2))
+   ((string-match-p "/pulls\\'" path)
+    (mapcar #'github-mock--simple-pr (list github-mock--pr-1 github-mock--pr-2)))
    ((string-match-p "/actions/runs\\'" path) nil)
    ((string-match-p "/labels\\'" path) (append github-mock--repo-labels nil))
    ((string-match-p "/collaborators\\'" path)
