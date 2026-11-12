@@ -9,7 +9,7 @@ With a running Emacs server (`(server-start)` in your init), changes can be
 tried live without a restart:
 
 ```sh
-./scripts/run-tests.sh   # full ERT suite, fully offline (mocked Bitbucket)
+./scripts/run-tests.sh   # full ERT suite, fully offline (both backends mocked)
 ./scripts/reload.sh      # hot-reload all *.el into the live Emacs
 ./scripts/install.sh     # promote pushed HEAD into ~/.emacs.d (survives restart)
 ```
@@ -54,18 +54,66 @@ Keep new network/IO paths logging through `gp-log` so this stays true.
 
 ## Testing approach
 
-- **Every new behaviour ships with an ERT test in the same change.**
-- **The centralized mock makes this cheap.** All network goes through
-  `bitbucket-api-request`, which `tests/bitbucket-mock.el` replaces with
-  fixtures from `tests/fixtures/` (captured from the real API, then scrubbed of
-  any private data). End-to-end-ish flows run offline and deterministically.
-- **Test the pure core directly.** Parsing, formatting, partitioning,
-  threading, emoji/markdown resolution, cache TTLs, command-plan builders — all
-  pure functions with focused tests.
-- **Byte-compile clean.** Resolve warnings (use `declare-function` / `defvar`
-  for genuine forward references) before declaring done.
+Every new behaviour ships with an ERT test in the same change. The suite is
+fully offline, takes a few seconds, and never touches the desktop.
 
-The suite is fast (~1s of real work) and fully offline.
+### Layers
+
+| Layer | What | Where |
+|---|---|---|
+| Unit | Pure functions: parsing, formatting, partitioning, threading, emoji/markdown, cache TTLs, command plans. No stubs. | `tests/<module>-test.el` |
+| Integration | A backend function or a module boundary, real code end to end with only the network faked by the mock service. | `tests/bitbucket-api-test.el`, `tests/github-api-test.el`, … |
+| End-to-end | A user entry point (`gp-show-pr`, `gp-list`, `gp-helm`, a key in the detail buffer) through to the mock; asserts the recorded requests and the rendered buffer, on both backends where the feature exists. | `tests/gp-e2e-detail-test.el`, `tests/gp-e2e-list-test.el` |
+
+Prefer the cheapest layer that can fail when the behaviour breaks; add an
+end-to-end flow for every user-visible action that writes to the forge.
+
+### The mock services
+
+`tests/bitbucket-mock.el` and `tests/github-mock.el` replace each backend's
+choke points — sync, async, paged, GraphQL and raw-diff — with routes that
+record every call (`bitbucket-mock-calls`, `github-mock-calls`). Wrap a test
+in `bitbucket-mock-with-service` / `github-mock-with-service`: it pins the
+backend, seeds credentials and gives the test fresh caches, so no state
+leaks between tests. Override a route for one test with
+`bitbucket-mock-overrides` / `github-mock-overrides`; make a route signal to
+simulate an HTTP failure. Async callbacks run immediately; code that defers
+work through timers runs under `gp-test-with-queued-timers`, then
+`gp-test-drain-timers`.
+
+`tests/gp-test-helper.el` (loaded first) routes `gp-notify` into
+`gp-test-notifications` and makes any `osascript`/`terminal-notifier` call
+fail, so a missing stub shows up as a failure rather than a popup.
+
+### Rules
+
+- **Stub only the edges:** the network (via the mocks), the clock, user
+  prompts (`yes-or-no-p`, `read-string`, `completing-read`, …), `browse-url`,
+  timers and external processes. Don't `cl-letf` the package's own `gp-*` /
+  `bitbucket-*` / `github-*` functions; if a test seems to need that, drive it
+  through the mock instead. Keep the exceptions (race and stale-callback
+  cases no flow can reach) rare, and say why in the docstring.
+- **Only realistic data.** Fixtures in `tests/fixtures/` are captured from
+  the live API and scrubbed. Hand-built inputs must have shapes the parsers
+  can produce: lists and nil, never vectors, `:null` or `:json-false`
+  (those only appear in payloads we *encode*). GitHub shapes follow
+  `.reference/github-rest-api-slim.json` — e.g. the `/pulls` list omits
+  comment counts and mergeability that `/pulls/N` carries.
+- **A test must fail when its behaviour breaks.** No assertions that only
+  echo a stub's return value, a constant or a default; no duplicates. When
+  fixing a bug, check the new test fails on the old code.
+- **Assert outcomes, not internals:** requests in the mock's call log,
+  buffer text, return values — not which private helper was called.
+  Independent requests are compared as a set.
+- **Byte-compile clean**, including test files, and keep each test file
+  loadable on its own (`require` what it uses): Eldev loads them separately.
+
+### Running
+
+`./scripts/run-tests.sh` loads every source and test file (add new test
+files to it). It disables native-comp subr trampolines, so stubbing a
+primitive works without a working libgccjit. CI runs the same suite through
+Eldev on Emacs 28–30.
 
 ## Conventions
 
@@ -140,7 +188,11 @@ requires, so using the helper there would create a load cycle.
 
 ## API spec drift check
 
-`tests/gp-api-drift-test.el` is the one test that needs the network (it
+`tests/gp-api-drift-test.el` checks both backends' endpoints against their
+specs. The GitHub half is offline: every path `github-api.el` builds must
+appear in `.reference/github-rest-api-slim.json` or in the explicit
+`gp-api-drift-github-not-in-spec` list (a second test keeps that list
+current). The Bitbucket half is the one test that needs the network (it
 **skips** when offline). It fetches Bitbucket's OpenAPI spec
 (`https://api.bitbucket.org/swagger.json`, cached in `/tmp` for a day) and
 asserts that every endpoint + method the package calls still exists. Run it
