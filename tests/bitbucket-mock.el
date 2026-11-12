@@ -20,6 +20,7 @@
 
 ;;; Code:
 
+(require 'gp-test-helper)
 (require 'json)
 (require 'cl-lib)
 (require 'bitbucket-api)

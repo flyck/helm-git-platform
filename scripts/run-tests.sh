@@ -11,6 +11,7 @@ cd "$(dirname "$0")/.."
 emacs --batch -Q \
   --eval "(progn (require 'package) (package-initialize) (setq native-comp-enable-subr-trampolines nil))" \
   -L . -L tests \
+  -l tests/gp-test-helper.el \
   -l bitbucket-env.el \
   -l gp-log.el \
   -l git-platform.el \
