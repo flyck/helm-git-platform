@@ -23,6 +23,7 @@
 (require 'json)
 (require 'cl-lib)
 (require 'bitbucket-api)
+(require 'git-platform-bitbucket)
 
 (defconst bitbucket-mock-dir
   (file-name-directory (or load-file-name buffer-file-name))
@@ -138,7 +139,8 @@ Serves one fixture page and reports (OK VALUES), honouring MAX-ITEMS."
 
 (defmacro bitbucket-mock-with-service (&rest body)
   "Run BODY with the Bitbucket API replaced by the mock service.
-Seeds credentials and workspace, clears caches and the call log.
+Seeds credentials and workspace, selects the Bitbucket backend, and
+clears caches and the call log.
 Both the synchronous choke-point (`bitbucket-api-request') and the
 async ones are mocked, so async callers hit fixtures too."
   (declare (indent 0) (debug t))
@@ -146,7 +148,9 @@ async ones are mocked, so async callers hit fixtures too."
          (bitbucket-api-token "mock-token")
          (bitbucket-workspace "acme")
          (bitbucket--uuid-cache nil)
-         (bitbucket-mock-calls nil))
+         (bitbucket-mock-calls nil)
+         (git-platform-current-backend (git-platform-bitbucket))
+         (gp--result-cache (make-hash-table :test 'equal)))
      (clrhash bitbucket--mention-cache)
      (cl-letf (((symbol-function 'bitbucket-api-request) #'bitbucket-mock-request)
                ((symbol-function 'bitbucket-api-get-async) #'bitbucket-mock-get-async)

@@ -21,7 +21,9 @@
 
 (require 'json)
 (require 'cl-lib)
+(require 'seq)
 (require 'github-api)
+(require 'git-platform-github)
 
 (defvar github-mock-calls nil
   "List of (METHOD PATH PARAMS DATA) recorded during a mocked session.
@@ -181,11 +183,29 @@ Stateful so an add/remove round-trip can be driven through the real
     '((repository (pullRequest (reviewThreads (nodes . [])))) ))
    (t '((ok . t)))))
 
+(defun github-mock-get-async (path params callback)
+  "Mock `github-api-get-async': CALLBACK gets the routed value, nil on error."
+  (funcall callback (ignore-errors (github-mock-request "GET" path params))))
+
+(defun github-mock-paged-async (path &optional params callback max-items)
+  "Mock `github-api-paged-async': CALLBACK gets (OK VALUES)."
+  (condition-case nil
+      (let ((values (github-mock-paged path params max-items)))
+        (funcall callback t (if max-items (seq-take values max-items) values)))
+    (error (funcall callback nil nil))))
+
+(defun github-mock-graphql-async (query variables callback)
+  "Mock `github-graphql-request-async': CALLBACK gets (OK DATA)."
+  (funcall callback t (github-mock-graphql query variables)))
+
 (defmacro github-mock-with-service (&rest body)
   "Run BODY with the GitHub API replaced by the mock service.
-Seeds a token, clears caches and the call log."
+Seeds a token, selects the GitHub backend, clears caches and the
+call log.  The sync and async choke points are both mocked; async
+callbacks run immediately."
   (declare (indent 0) (debug t))
   `(let ((github-api-token "mock-token")
+         (git-platform-current-backend (git-platform-github))
          (github--login-cache nil)
          (github-mock-calls nil)
          (github-mock-graphql-calls nil)
@@ -200,7 +220,11 @@ Seeds a token, clears caches and the call log."
          (gp--result-cache (make-hash-table :test 'equal)))
      (cl-letf (((symbol-function 'github-api-request) #'github-mock-request)
                ((symbol-function 'github-api-paged) #'github-mock-paged)
-               ((symbol-function 'github-graphql-request) #'github-mock-graphql))
+               ((symbol-function 'github-graphql-request) #'github-mock-graphql)
+               ((symbol-function 'github-api-get-async) #'github-mock-get-async)
+               ((symbol-function 'github-api-paged-async) #'github-mock-paged-async)
+               ((symbol-function 'github-graphql-request-async)
+                #'github-mock-graphql-async))
        ,@body)))
 
 (provide 'github-mock)

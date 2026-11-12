@@ -2,11 +2,14 @@
 # Run the helm-git-platform ERT suite against the centralized mock service.
 # Uses the user's installed packages (magit-section, transient) via
 # package-initialize, but loads no user config (-Q-ish, isolated).
+# Subr trampolines are off: stubbing a primitive (cl-letf on `yes-or-no-p')
+# would otherwise native-compile one, which fails without a working
+# libgccjit.  The code under test is loaded as source, so stubs still bite.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 emacs --batch -Q \
-  --eval "(progn (require 'package) (package-initialize))" \
+  --eval "(progn (require 'package) (package-initialize) (setq native-comp-enable-subr-trampolines nil))" \
   -L . -L tests \
   -l bitbucket-env.el \
   -l gp-log.el \
@@ -32,6 +35,7 @@ emacs --batch -Q \
   -l gp-ui.el \
   -l gp-magit.el \
   -l gp-helm.el \
+  -l gp-deploy-watch.el \
   -l tests/bitbucket-mock.el \
   -l tests/github-mock.el \
   -l tests/bitbucket-env-test.el \
@@ -57,4 +61,5 @@ emacs --batch -Q \
   -l tests/gp-watch-test.el \
   -l tests/gp-magit-test.el \
   -l tests/gp-helm-test.el \
+  -l tests/gp-deploy-watch-test.el \
   -f ert-run-tests-batch-and-exit
