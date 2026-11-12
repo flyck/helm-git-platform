@@ -644,9 +644,9 @@ passed-in PR's own (possibly stale) `participants'."
   (bitbucket-mock-with-service
     (let* ((stale-pr '((id . 180)
                        (destination (repository (full_name . "acme/web-frontend")))
-                       (participants . [((role . "REVIEWER")
-                                         (approved . t)
-                                         (state . "approved"))])))
+                       (participants ((role . "REVIEWER")
+                                       (approved . t)
+                                       (state . "approved")))))
            tally)
       ;; the mock's single-PR fixture has no participants at all, so a
       ;; correct refetch reports zero approvals despite the stale PR
@@ -659,10 +659,10 @@ passed-in PR's own (possibly stale) `participants'."
   (bitbucket-mock-with-service
     (let* ((stale-pr '((id . 180)
                        (destination (repository (full_name . "acme/web-frontend")))
-                       (participants . [((role . "REVIEWER")
-                                         (approved . t)
-                                         (state . "approved")
-                                         (user (uuid . "{stale}")))])))
+                       (participants ((role . "REVIEWER")
+                                       (approved . t)
+                                       (state . "approved")
+                                       (user (uuid . "{stale}"))))))
            reviewers)
       (bitbucket-pr-reviewers-async stale-pr (lambda (v) (setq reviewers v)))
       (should (null reviewers)))))

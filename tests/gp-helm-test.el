@@ -914,7 +914,7 @@ twice is a no-op so the key is idempotent."
   (let ((helm-pattern "")
         (inserted nil))
     (cl-letf (((symbol-function 'helm-get-selection)
-               (lambda (&rest _) '((id . 42) (labels . [((name . "bug") (color . "d73a4a"))]))))
+               (lambda (&rest _) '((id . 42) (labels ((name . "bug") (color . "d73a4a"))))))
               ((symbol-function 'gp-pr-labels)
                (lambda (_pr) '((:name "bug" :color "d73a4a"))))
               ((symbol-function 'helm-set-pattern)

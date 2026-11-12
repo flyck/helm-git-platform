@@ -36,9 +36,9 @@ and is not resolvable -- GitHub has no \"resolve\" concept for it."
 
 (defun github-test--pending-review (comment-nodes)
   "A `reviews(states:PENDING...)' GraphQL response holding COMMENT-NODES."
-  (let* ((comments `((nodes . ,(vconcat comment-nodes))))
+  (let* ((comments `((nodes . ,comment-nodes)))
          (review `((id . "REVIEW_1") (databaseId . 900) (comments . ,comments)))
-         (reviews `((nodes . ,(vector review))))
+         (reviews `((nodes ,review)))
          (pr `((reviews . ,reviews)))
          (repo `((pullRequest . ,pr))))
     `((repository . ,repo))))
@@ -274,24 +274,21 @@ detail view would show stale labels after an edit."
       (should-not (cl-find-if (lambda (c) (string-match-p "labels" (nth 1 c)))
                               github-mock-calls)))))
 
-(ert-deftest github-test-pr-labels-absent-and-null ()
-  "A PR with no `labels' key, or a JSON null, yields nil -- not an error.
-GitHub sends `:null' rather than nil for an empty field, which would
-break a bare `append'."
+(ert-deftest github-test-pr-labels-absent ()
+  "A PR with no `labels' key, or an empty array, yields nil."
   (should-not (github-pr-labels '((id . 43) (title . "no labels here"))))
-  (should-not (github-pr-labels '((id . 43) (labels . :null))))
-  (should-not (github-pr-labels '((id . 43) (labels . [])))))
+  (should-not (github-pr-labels (github--parse-json "{\"id\": 43, \"labels\": []}"))))
 
 (ert-deftest github-test-label-drops-nameless-entries ()
   "A malformed label (no name) is dropped rather than rendered blank."
-  (should (equal (github-pr-labels '((labels . [((color . "ff0000"))
-                                                ((name . "ok") (color . "00ff00"))])))
+  (should (equal (github-pr-labels '((labels ((color . "ff0000"))
+                                              ((name . "ok") (color . "00ff00")))))
                  '((:name "ok" :color "00ff00")))))
 
 (ert-deftest github-test-label-missing-color-is-nil ()
   "A label with no colour keeps its name and reports colour nil,
 so the renderer can fall back to a plain face."
-  (should (equal (github-pr-labels '((labels . [((name . "plain"))])))
+  (should (equal (github-pr-labels '((labels ((name . "plain")))))
                  '((:name "plain" :color nil)))))
 
 (ert-deftest github-test-repo-labels-returns-the-pool-and-caches ()
@@ -519,7 +516,7 @@ anything here would be a silently ignored field at best."
   (github-mock-with-service
     (let ((github-mock-overrides
            '(("/repos/acme/web\\'" . ((allow_merge_commit . t)
-                                     (allow_squash_merge . :json-false)
+                                     (allow_squash_merge)
                                      (allow_rebase_merge . t))))))
       (let ((info (github-pull-request-merge-strategies "acme/web" 42)))
         (should (equal (car info) '("merge" "rebase")))
@@ -986,9 +983,6 @@ REST API echoes the body back verbatim."
   ;; already-LF text (what Bitbucket sends) is untouched
   (should (equal (github--normalize-newlines "a\nb") "a\nb"))
   (should (equal (github--normalize-newlines "") ""))
-  ;; JSON null arrives as :null, not nil -- must survive for the
-  ;; caller's own type check
-  (should (eq (github--normalize-newlines :null) :null))
   (should (eq (github--normalize-newlines nil) nil)))
 
 (ert-deftest github-test-reshape-pr-normalizes-body-crlf ()

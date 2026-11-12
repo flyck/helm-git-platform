@@ -230,8 +230,6 @@
 (cl-defmethod gp--pr-comment-count ((_ git-platform-github) pr)
   (+ (or (alist-get 'comments pr) 0) (or (alist-get 'review_comments pr) 0)))
 (cl-defmethod gp--pr-description ((_ git-platform-github) pr)
-  ;; GitHub sends JSON null for an empty body, which the parser gives us as
-  ;; :null rather than nil.
   (let ((b (alist-get 'body pr)))
     (when (stringp b)
       (unless (string-empty-p (string-trim b)) b))))

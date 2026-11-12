@@ -206,9 +206,7 @@ BODY is the UTF-8 decoded response body."
 
 (defun github--normalize-newlines (text)
   "Return TEXT with CRLF and lone CR turned into plain LF.
-Non-strings (including the `:null' the JSON parser yields for an
-empty body) are returned unchanged, so callers can normalise first
-and type-check afterwards.
+Non-strings (nil for a JSON null) are returned unchanged.
 
 Text typed into github.com's web forms (PR bodies, comments, web-editor
 commit messages) comes back from the API with CRLF, per the HTML
@@ -991,10 +989,8 @@ Returns nil for anything without a name."
             :color (and (stringp color) (not (string-empty-p color)) color)))))
 
 (defun github--label-list (labels)
-  "Return LABELS (a GitHub `labels' value) as a list of `github--label' plists.
-LABELS may be a vector, a list, or a non-list such as `:null'."
-  (when (or (listp labels) (vectorp labels))
-    (delq nil (mapcar #'github--label (append labels nil)))))
+  "Return LABELS (a GitHub `labels' list) as `github--label' plists."
+  (delq nil (mapcar #'github--label labels)))
 
 (defun github-pr-labels (pr)
   "Return PR's labels as (:name :color) plists, read off the PR payload."

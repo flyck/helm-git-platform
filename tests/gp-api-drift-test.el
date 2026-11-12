@@ -106,5 +106,68 @@ Skipped when the spec cannot be fetched (offline)."
                           (string-join (nreverse missing) "\n  "))))
       (should (null missing)))))
 
+;;;; GitHub: offline check against the checked-in reference spec ---------------
+
+(defconst gp-api-drift-github-spec-file
+  (expand-file-name "../.reference/github-rest-api-slim.json"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "The trimmed GitHub REST spec checked into the repo.")
+
+(defconst gp-api-drift-github-not-in-spec
+  '("/repos/{}/{}/{}/comments/{}/reactions"
+    "/repos/{}/{}/actions/jobs/{}/rerun"
+    "/repos/{}/{}/branches"
+    "/repos/{}/{}/collaborators"
+    "/repos/{}/{}/commits/{}"
+    "/repos/{}/{}/compare/{}...{}"
+    "/repos/{}/{}/issues/{}/labels"
+    "/repos/{}/{}/labels"
+    "/repos/{}/{}/pulls/{}/merge")
+  "Real GitHub endpoints github-api.el calls that the slim spec omits.
+Listing one here is a deliberate claim that it exists upstream.")
+
+(defun gp-api-drift--github-template (path)
+  "Turn a github-api.el `format' PATH into a spec-comparable template.
+The first %s after /repos/ is a FULL-NAME, i.e. two segments."
+  (replace-regexp-in-string
+   "%s" "{}" (replace-regexp-in-string "\\`/repos/%s" "/repos/{}/{}" path)
+   t t))
+
+(defun gp-api-drift--github-code-paths ()
+  "Return the API path templates github-api.el builds."
+  (with-temp-buffer
+    (insert-file-contents
+     (expand-file-name "../github-api.el" (file-name-directory gp-api-drift-github-spec-file)))
+    (let (paths)
+      (goto-char (point-min))
+      (while (re-search-forward "\"\\(/\\(?:repos/\\|user\\|search/\\)[%./A-Za-z_-]*\\)\"" nil t)
+        (push (gp-api-drift--github-template (match-string 1)) paths))
+      (delete-dups paths))))
+
+(defun gp-api-drift--github-spec-paths ()
+  "Return the reference spec's paths with every {param} as {}."
+  (let ((json-object-type 'alist) (json-key-type 'string))
+    (mapcar (lambda (entry)
+              (replace-regexp-in-string
+               "{[^}]+}" "{}" (cadr (split-string (car entry) " "))))
+            (json-read-file gp-api-drift-github-spec-file))))
+
+(ert-deftest gp-api-drift-github-paths-in-reference-spec ()
+  "Every GitHub API path github-api.el builds is in the reference spec,
+or explicitly listed in `gp-api-drift-github-not-in-spec'."
+  (let* ((spec (gp-api-drift--github-spec-paths))
+         (unknown (cl-remove-if
+                   (lambda (p) (or (member p spec)
+                                   (member p gp-api-drift-github-not-in-spec)))
+                   (gp-api-drift--github-code-paths))))
+    (should (null unknown))))
+
+(ert-deftest gp-api-drift-github-not-in-spec-list-is-current ()
+  "The exemption list holds no path the spec covers or the code dropped."
+  (let ((spec (gp-api-drift--github-spec-paths))
+        (code (gp-api-drift--github-code-paths)))
+    (should (null (cl-remove-if (lambda (p) (and (member p code) (not (member p spec))))
+                                gp-api-drift-github-not-in-spec)))))
+
 (provide 'gp-api-drift-test)
 ;;; gp-api-drift-test.el ends here

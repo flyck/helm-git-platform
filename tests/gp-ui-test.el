@@ -569,14 +569,13 @@ naive `eq' implementation would hit across two separate renders."
     (should-not (gp-pr-description '((id . 1))))))
 
 (ert-deftest gp-test-pr-description-reads-github-body ()
-  "GitHub keeps the body in `body', and sends :null when empty."
+  "GitHub keeps the body in `body'; an empty or null body reads as none."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github)))
       (should (equal (gp-pr-description github-mock--pr-1)
                      "Adds the toggle.\n\n- [x] tests\n- [ ] docs"))
       (should-not (gp-pr-description '((id . 42) (body . ""))))
-      ;; a JSON null arrives as a non-string, not as nil
-      (should-not (gp-pr-description '((id . 42) (body . :null))))
+      (should-not (gp-pr-description (github--parse-json "{\"id\": 42, \"body\": null}")))
       (should-not (gp-pr-description '((id . 42)))))))
 
 (ert-deftest gp-test-linkify-buffer-links-ticket-keys ()
@@ -664,6 +663,25 @@ precisely where it is most useful."
           (should (string-match-p "\\.ts:[0-9]+" text))
           (should (string-match-p "send to terminal \\\[t\\\]" text))
           (should (string-match-p "view in browser \\\[w\\\]" text)))))))
+
+(ert-deftest gp-test-render-detail-offers-edit-and-delete-on-your-own-comment ()
+  "The signed-in user (user.json) wrote one fixture comment: only that
+one offers edit and delete."
+  (bitbucket-mock-with-service
+    (let ((pr (car (gp-test--mock-prs)))
+          (comments (bitbucket-pull-request-comments "acme/web-frontend" 180))
+          (gp-comment-delete-others nil))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr comments))
+        (let ((text (substring-no-properties (buffer-string)))
+              (case-fold-search nil))
+          (should (= 1 (how-many "edit \\[e\\]" 1 (point-max))))
+          (should (= 1 (how-many "delete \\[K\\]" 1 (point-max))))
+          (should (string-match-p
+                   "Thanks, addressed the constant\\(?:.\\|\n\\)*?edit \\[e\\]"
+                   text)))))))
 
 (ert-deftest gp-test-render-detail-hides-delete-on-others-comments-by-default ()
   "With `gp-comment-delete-others' nil, only your own comments offer delete."

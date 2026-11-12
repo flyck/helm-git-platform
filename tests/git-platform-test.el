@@ -173,9 +173,9 @@ place (see `bitbucket-submit-review-batch'), then applies EVENT."
 
 (defun git-platform-test--gh-pending-review (comment-nodes)
   "A `reviews(states:PENDING...)' GraphQL response holding COMMENT-NODES."
-  (let* ((comments `((nodes . ,(vconcat comment-nodes))))
+  (let* ((comments `((nodes . ,comment-nodes)))
          (review `((id . "REVIEW_1") (databaseId . 900) (comments . ,comments)))
-         (reviews `((nodes . ,(vector review))))
+         (reviews `((nodes ,review)))
          (pr `((reviews . ,reviews)))
          (repo `((pullRequest . ,pr))))
     `((repository . ,repo))))
