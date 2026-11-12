@@ -2,10 +2,9 @@
 
 ;;; Commentary:
 
-;; A small service layer for handing a PR comment off to a local AI terminal
-;; session. It reuses a matching session in the repo when it finds one running
-;; Claude/OpenCode, otherwise it opens a new window in that checkout and sends
-;; the prompt there. Two backends are supported: iTerm2 (tty/job-name based
+;; Hands a PR comment off to a local AI terminal session: reuses a session
+;; in the repo running Claude/OpenCode, else opens a new window in that
+;; checkout and sends the prompt there.  Backends: iTerm2 (tty/job-name
 ;; session discovery) and Ghostty (native AppleScript `terminal' ids).
 
 ;;; Code:
@@ -16,12 +15,6 @@
 (require 'gp-local)
 (require 'gp-log)
 
-(declare-function gp-helm-terminal-iterm2-list-sessions "gp-helm-terminal-iterm2")
-(declare-function gp-helm-terminal-iterm2-open-session "gp-helm-terminal-iterm2")
-(declare-function gp-helm-terminal-iterm2-send-text "gp-helm-terminal-iterm2")
-(declare-function gp-helm-terminal-ghostty-list-sessions "gp-helm-terminal-ghostty")
-(declare-function gp-helm-terminal-ghostty-open-session "gp-helm-terminal-ghostty")
-(declare-function gp-helm-terminal-ghostty-send-text "gp-helm-terminal-ghostty")
 (declare-function gp-pr-action-context "gp-pr-actions")
 
 (cl-defstruct gp-helm-terminal-session
@@ -175,16 +168,43 @@ only matching sessions are reused; otherwise a fresh session is opened."
           :command (gp-helm-terminal--launch-command)
           :delay gp-helm-terminal-launch-delay)))
 
+(defun gp-helm-terminal--run-applescript (label lines &rest args)
+  "Run AppleScript LINES with `osascript', passing ARGS via argv.
+ARGS are never interpolated into the script text, so arbitrary text is
+safe.  LABEL names the backend in logs and errors.  Return stdout
+trimmed, or signal `user-error' with stderr details."
+  (gp-log 'info "%s AppleScript: %d lines, %d args" label (length lines) (length args))
+  (with-temp-buffer
+    (let ((status (apply #'call-process
+                         "osascript" nil (current-buffer) nil
+                         "-l" "AppleScript"
+                         (append (cl-mapcan (lambda (line) (list "-e" line)) lines)
+                                 (cons "--" args)))))
+      (let ((output (string-trim (buffer-string))))
+        (if (and (integerp status) (zerop status))
+            (progn
+              (unless (string-empty-p output)
+                (gp-log 'info "%s AppleScript output: %s" label output))
+              output)
+          (gp-log-error "%s AppleScript failed (status=%s): %s"
+                        label status (if (string-empty-p output) "unknown error" output))
+          (user-error "%s AppleScript failed: %s"
+                      label (if (string-empty-p output) "unknown error" output)))))))
+
+(defun gp-helm-terminal--backend-fn (op)
+  "Load the configured backend and return its function for OP.
+OP is a string such as \"send-text\"; the result is the symbol
+`gp-helm-terminal-BACKEND-OP'."
+  (pcase gp-helm-terminal-backend
+    ((and (or 'iterm2 'ghostty) backend)
+     (let ((feature (intern (format "gp-helm-terminal-%s" backend))))
+       (require feature)
+       (intern (format "%s-%s" feature op))))
+    (_ (user-error "Unsupported terminal backend: %S" gp-helm-terminal-backend))))
+
 (defun gp-helm-terminal--list-sessions ()
   "Return backend session descriptors."
-  (pcase gp-helm-terminal-backend
-    ('iterm2
-     (require 'gp-helm-terminal-iterm2)
-     (gp-helm-terminal-iterm2-list-sessions))
-    ('ghostty
-     (require 'gp-helm-terminal-ghostty)
-     (gp-helm-terminal-ghostty-list-sessions))
-    (_ (user-error "Unsupported terminal backend: %S" gp-helm-terminal-backend))))
+  (funcall (gp-helm-terminal--backend-fn "list-sessions")))
 
 (defun gp-helm-terminal--safe-list-sessions ()
   "Return backend session descriptors, or nil when discovery fails.
@@ -201,38 +221,17 @@ terminal session instead of aborting the handoff."
   "Execute PLAN by sending TEXT through the configured backend."
   (gp-log 'info "terminal dispatch: backend=%s action=%s"
           gp-helm-terminal-backend (plist-get plan :action))
-  (pcase gp-helm-terminal-backend
-    ('iterm2
-     (require 'gp-helm-terminal-iterm2)
-     (pcase (plist-get plan :action)
-       ('reuse
-        (gp-helm-terminal-iterm2-send-text
-         (gp-helm-terminal-session-id (plist-get plan :session))
-         text gp-helm-terminal-submit-immediately))
-       ('open
-        (gp-helm-terminal-iterm2-open-session
-         (plist-get plan :directory)
-         text
-         (plist-get plan :command)
-         (plist-get plan :delay)
-         gp-helm-terminal-submit-immediately))
-       (_ (user-error "Unknown terminal action: %S" (plist-get plan :action)))))
-    ('ghostty
-     (require 'gp-helm-terminal-ghostty)
-     (pcase (plist-get plan :action)
-       ('reuse
-        (gp-helm-terminal-ghostty-send-text
-         (gp-helm-terminal-session-id (plist-get plan :session))
-         text gp-helm-terminal-submit-immediately))
-       ('open
-        (gp-helm-terminal-ghostty-open-session
-         (plist-get plan :directory)
-         text
-         (plist-get plan :command)
-         (plist-get plan :delay)
-         gp-helm-terminal-submit-immediately))
-       (_ (user-error "Unknown terminal action: %S" (plist-get plan :action)))))
-    (_ (user-error "Unsupported terminal backend: %S" gp-helm-terminal-backend))))
+  (let ((send (gp-helm-terminal--backend-fn "send-text"))
+        (open (gp-helm-terminal--backend-fn "open-session")))
+    (pcase (plist-get plan :action)
+      ('reuse
+       (funcall send (gp-helm-terminal-session-id (plist-get plan :session))
+                text gp-helm-terminal-submit-immediately))
+      ('open
+       (funcall open (plist-get plan :directory) text
+                (plist-get plan :command) (plist-get plan :delay)
+                gp-helm-terminal-submit-immediately))
+      (_ (user-error "Unknown terminal action: %S" (plist-get plan :action))))))
 
 (defcustom gp-helm-terminal-conflict-prompt
   "please resolve the merge conflicts with %s by rebasing this branch onto it, keeping both sides' intent where they overlap"
@@ -241,27 +240,29 @@ A single %s, if present, is replaced by the destination branch name.
 Sent with the same repo/PR context every terminal handoff carries."
   :type 'string :group 'bitbucket)
 
+(defun gp-helm-terminal--dispatch (pr text label)
+  "Send TEXT to PR's terminal session, logging the handoff as LABEL."
+  (let* ((dir (gp-local-ensure-checkout pr))
+         (plan (gp-helm-terminal--plan (gp-helm-terminal--safe-list-sessions) dir)))
+    (gp-log 'info "%s: repo=%s pr=%s dir=%s action=%s"
+            label (gp-pr-full-name pr) (alist-get 'id pr) dir (plist-get plan :action))
+    (gp-helm-terminal--execute plan text)
+    (message "%s terminal session for %s"
+             (if (eq (plist-get plan :action) 'reuse) "Updated" "Opened")
+             (gp-pr-full-name pr))))
+
 (defun gp-helm-terminal-send-text (pr text)
   "Send TEXT to PR's terminal session, opening or reusing it as needed.
-The comment handoffs build their own prompt and then come through here;
-this is the entry point for anything that is not a comment."
+The entry point for anything that is not a comment."
   (condition-case err
-      (let* ((dir (gp-local-ensure-checkout pr))
-             (plan (gp-helm-terminal--plan (gp-helm-terminal--safe-list-sessions) dir)))
-        (gp-log 'info "terminal handoff (text): repo=%s pr=%s dir=%s action=%s"
-                (gp-pr-full-name pr) (alist-get 'id pr) dir (plist-get plan :action))
-        (gp-helm-terminal--execute plan text)
-        (message "%s terminal session for %s"
-                 (if (eq (plist-get plan :action) 'reuse) "Updated" "Opened")
-                 (gp-pr-full-name pr)))
+      (gp-helm-terminal--dispatch pr text "terminal handoff (text)")
     (error
      (gp-log-error "terminal handoff failed: %s" (error-message-string err))
      (user-error "Terminal handoff failed: %s" (error-message-string err)))))
 
 (defun gp-helm-terminal-send-conflict (pr)
   "Ask PR's terminal session to resolve its merge conflicts.
-Uses `gp-helm-terminal-conflict-prompt', with the repo and PR named the
-same way the comment handoffs do so the session has its bearings."
+Uses `gp-helm-terminal-conflict-prompt', followed by the repo and PR."
   (let* ((dest (or (ignore-errors (gp-pr-destination-branch pr)) "the target branch"))
          (ask (if (string-match-p "%s" gp-helm-terminal-conflict-prompt)
                   (format gp-helm-terminal-conflict-prompt dest)
@@ -283,15 +284,8 @@ same way the comment handoffs do so the session has its bearings."
 (defun gp-helm-terminal-send-comments (pr comments)
   "Send COMMENTS from PR to the configured terminal backend."
   (condition-case err
-      (let* ((dir (gp-local-ensure-checkout pr))
-             (text (gp-helm-terminal--build-multi-prompt pr comments))
-             (plan (gp-helm-terminal--plan (gp-helm-terminal--safe-list-sessions) dir)))
-        (gp-log 'info "terminal handoff: repo=%s pr=%s dir=%s action=%s"
-                (gp-pr-full-name pr) (alist-get 'id pr) dir (plist-get plan :action))
-        (gp-helm-terminal--execute plan text)
-        (message "%s terminal session for %s"
-                 (if (eq (plist-get plan :action) 'reuse) "Updated" "Opened")
-                 (gp-pr-full-name pr)))
+      (gp-helm-terminal--dispatch
+       pr (gp-helm-terminal--build-multi-prompt pr comments) "terminal handoff")
     (error
      (gp-log-error "terminal handoff failed: %s" (error-message-string err))
      (signal (car err) (cdr err)))))
@@ -300,8 +294,7 @@ same way the comment handoffs do so the session has its bearings."
   "Open a new terminal window with a plain shell in CTX's checkout.
 CTX is a PR action context (see `gp-pr-actions'): :dir is the checkout,
 already on the PR's source branch unless :checkout-error says why not.
-Never reuses an existing session and sends no command or prompt --
-unlike the comment handoffs, this is just a shell."
+Never reuses an existing session and sends no command or prompt."
   (let ((dir (or (plist-get ctx :dir)
                  (user-error "Open in terminal needs a checkout (:checkout t)")))
         (failure (plist-get ctx :checkout-error)))

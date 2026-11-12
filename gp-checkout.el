@@ -29,10 +29,10 @@
   :group 'bitbucket)
 
 (defcustom gp-checkout-clone-base nil
-  "Base SSH/HTTPS URL used to clone a missing repo, e.g.
-\"git@bitbucket.org:\".  The repo \"workspace/slug\" plus \".git\"
-is appended.  When nil, cloning is disabled and a missing checkout
-is an error."
+  "Base SSH/HTTPS URL used to clone a missing repo.
+E.g. \"git@bitbucket.org:\" or \"git@github.com:\"; the repo
+\"owner/slug\" plus \".git\" is appended.  When nil, cloning is
+disabled and a missing checkout is an error."
   :type '(choice (const :tag "Disabled" nil) string)
   :group 'gp-checkout)
 
@@ -49,13 +49,10 @@ is an error."
 (defcustom gp-checkout-recover-diverged-branch t
   "When non-nil, offer to recover a branch that has diverged from origin.
 This happens when a branch is merged and deleted, then its name is
-reused for an unrelated new branch: the local copy and the new
-remote one share no common history, so `pull --ff-only' can never
-reconcile them.  With this on, `gp-checkout-run' detects that case
-and prompts to back the local branch up under a timestamped name
-\(see `gp-checkout--backup-branch-name') and recreate it fresh from
-the remote.  With this off, that case surfaces as today's plain
-`pull --ff-only' failure instead."
+reused for an unrelated new branch, so `pull --ff-only' can never
+reconcile them.  With this on, `gp-checkout-run' prompts to back the
+local branch up under a timestamped name and recreate it from the
+remote; with it off, the plain `pull --ff-only' failure surfaces."
   :type 'boolean
   :group 'gp-checkout)
 
@@ -76,12 +73,8 @@ the remote.  With this off, that case surfaces as today's plain
 
 (defun gp-checkout-dirty-count (dir)
   "Return how many paths in DIR's working tree have uncommitted changes.
-Zero when the tree is clean AND when git could not answer at all -- a
-caller showing a warning wants \"nothing to say\" in both cases, and a
-repo git refuses to read is not evidence of unsaved work.  Counts
-`git status --porcelain' lines, so an untracked path counts once and a
-staged-plus-modified path also counts once, matching what the user
-would see in `magit-status'."
+Counts `git status --porcelain' lines.  Zero when clean AND when git
+could not answer: an unreadable repo is not evidence of unsaved work."
   (let ((res (gp-checkout--git dir "status" "--porcelain")))
     (if (and (= (car res) 0) (not (string-empty-p (cdr res))))
         (length (split-string (cdr res) "\n" t))
@@ -101,12 +94,9 @@ would see in `magit-status'."
 
 (defun gp-checkout-branch-diverged-p (dir branch &optional remote)
   "Return non-nil if local BRANCH in DIR has diverged from REMOTE/BRANCH.
-Diverged means neither is an ancestor of the other -- the case a
-`pull --ff-only' can never resolve, typically because BRANCH was
-merged and its name reused for an unrelated new branch on the
-remote.  Nil (not diverged) when either ref is missing, so a genuinely
-new local branch or a not-yet-fetched remote ref never false-positives
-here; the ordinary `pull --ff-only' failure path still catches those."
+Diverged means neither is an ancestor of the other, which
+`pull --ff-only' can never resolve.  Nil when either ref is missing,
+so a new local branch or an unfetched remote ref never false-positives."
   (let* ((remote (or remote gp-checkout-remote))
          (remote-ref (format "%s/%s" remote branch))
          (local-ok (= (car (gp-checkout--git dir "rev-parse" "--verify" branch)) 0))
@@ -123,12 +113,8 @@ here; the ordinary `pull --ff-only' failure path still catches those."
 
 (defun gp-checkout-worktree-for-branch (dir branch)
   "Return the worktree directory in DIR's repo that has BRANCH checked out.
-Nil when no worktree holds BRANCH, or when it is held by DIR itself
--- callers only care about a DIFFERENT worktree, since that is the
-case git refuses to check out again.  Parses `git worktree list
---porcelain', whose records are blank-line separated with a
-`worktree PATH' line and, for an attached head, a
-`branch refs/heads/NAME' line."
+Nil when no worktree holds BRANCH, or when DIR itself does: only a
+DIFFERENT worktree matters, since git refuses to check out there."
   (let ((res (gp-checkout--git dir "worktree" "list" "--porcelain")))
     (when (= (car res) 0)
       (let ((self (file-truename (file-name-as-directory dir)))
@@ -178,12 +164,10 @@ plist (:ok BOOL :log STRING)."
   "Return an ordered list of git argument-lists to switch to BRANCH.
 When DIRTY is non-nil a stash step is prepended, labelled with
 CURRENT-BRANCH.  INTENT-TO-ADD lists paths marked with `git add -N';
-they are unmarked first, which leaves them as untracked files the
-stash then saves, because `git stash' cannot save them otherwise.
-When BASE (the PR's destination branch) is given,
-its remote ref is fetched too so a diff against `origin/BASE'
-matches what the server computed even if local BASE is stale.
-Pure: only builds the commands; the caller runs them."
+they are unmarked first so the stash saves them as untracked files.
+When BASE (the PR's destination branch) is given, its remote ref is
+fetched too so a diff against `origin/BASE' matches the server's
+even if local BASE is stale.  Pure: the caller runs the commands."
   (let ((remote gp-checkout-remote)
         (steps '()))
     (when (and dirty intent-to-add)
@@ -212,8 +196,7 @@ Signals if `gp-checkout-clone-base' is nil."
 
 (defun gp-checkout--backup-branch-name (branch)
   "Return the backup-branch name used before deleting a diverged BRANCH.
-Timestamped so recreating the same diverged branch twice never
-collides with (or silently overwrites) an earlier backup."
+Timestamped so a second recovery never overwrites an earlier backup."
   (format "%s-backup/%s/%s" gp-checkout-stash-prefix branch
           (format-time-string "%Y%m%d%H%M%S")))
 
@@ -221,10 +204,8 @@ collides with (or silently overwrites) an earlier backup."
   "Handle BRANCH in DIR having diverged from REMOTE/BRANCH, appending to LOG.
 Prompts to back up the local branch under a timestamped name, delete
 it, and check out REMOTE/BRANCH fresh under BRANCH's name again.
-Returns (OK . NEW-LOG); OK nil (declining, or any step failing) means
-the caller should stop and report LOG as a normal failure -- the
-`pull --ff-only' this replaces would have failed anyway, so declining
-here is no worse than today's behaviour, just clearer about why."
+Returns (OK . NEW-LOG); OK nil (declined, or a step failed) means the
+caller should stop and report LOG as a normal failure."
   (if (not (yes-or-no-p
             (format "Local branch %s has diverged from %s/%s (likely reused after the old branch was merged). Back it up and check out %s/%s fresh? "
                     branch remote branch remote branch)))
@@ -251,24 +232,13 @@ is fetched too so diffs against `origin/BASE' are accurate.
 Returns a plist (:ok BOOL :stashed BOOL :log STRING :dir DIR).
 Stops at the first failing git step and reports it.
 
-When BRANCH is already checked out in ANOTHER worktree of the same
-repo, that worktree is returned as :dir and no branch switch is
-attempted: git refuses to check out one branch in two worktrees, so
-the switch could only ever fail -- and failing AFTER the auto-stash
-step would strand the user's work in a stash nobody pops.  The
-worktree already holds the branch, which is what the caller wanted.
+When BRANCH is checked out in ANOTHER worktree, that worktree is
+returned as :dir with no switch: git would refuse, and failing after
+the auto-stash would strand the user's work in a stash nobody pops.
 
-When `gp-checkout-recover-diverged-branch' is non-nil (the default),
-checks just before the final `pull --ff-only' whether BRANCH has
-diverged from the remote's own BRANCH (see
-`gp-checkout-branch-diverged-p') -- typically because the name was
-reused for an unrelated branch after the old one merged, which
-`pull --ff-only' can never resolve.  When it has, prompts to back the
-local branch up under a timestamped name and recreate it fresh from
-the remote (`gp-checkout--recover-diverged-branch') instead of
-letting `pull' fail with a raw, confusing git error.  With the
-customvar off, that case surfaces as the plain `pull --ff-only'
-failure it always used to."
+With `gp-checkout-recover-diverged-branch', a BRANCH diverged from
+its remote is offered recovery instead of the final `pull --ff-only'
+\(see `gp-checkout--recover-diverged-branch')."
   (let ((wt (gp-checkout-worktree-for-branch dir branch)))
     (if wt
         (list :ok t :stashed nil :dir wt
@@ -323,7 +293,6 @@ created by this service."
                dir "stash" "list" "--max-count=1" "--format=%gs")))
     (unless (and (= (car top) 0)
                  (string-prefix-p gp-checkout-stash-prefix
-                                  ;; drop the "On <branch>: " git prefix
                                   (replace-regexp-in-string
                                    "\\`On [^:]*: " "" (cdr top))))
       (user-error "Top stash is not a %s stash; pop it manually"

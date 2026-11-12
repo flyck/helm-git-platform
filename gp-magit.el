@@ -63,8 +63,7 @@ branch.  Reads `magit-buffer-diff-range' (magit >= 4.6) or the older
 The branch is the diff range's tip when it names one (the PR diff
 compares remote-tracking refs, not HEAD), else the checked-out
 branch.  Only when `gp-watch-mode' is on and we are in a
-`magit-diff-mode' buffer; reuses the watch-mode resolvers (and
-their caches)."
+`magit-diff-mode' buffer; reuses the watch-mode resolvers and caches."
   (when (and (bound-and-true-p gp-watch-mode)
              (derived-mode-p 'magit-diff-mode)
              default-directory)
@@ -89,11 +88,9 @@ their caches)."
 
 (defun gp-magit--comment-line-positions (path)
   "Return an alist (NEW-LINE . BUFFER-POS) for PATH's added lines in the diff.
-Walks the buffer's magit section tree, so it works on the washed
-diff magit actually displays (which has no `+++ b/PATH' header --
-that text is kept in the file section's `header' slot instead).
-Falls back to scanning raw diff text when there is no section
-tree, which is what the unit tests exercise."
+Walks the magit section tree, since the washed diff magit displays has
+no `+++ b/PATH' header.  Falls back to scanning raw diff text when there
+is no section tree (as in the unit tests)."
   (if (gp-magit--section-tree-p)
       (gp-magit--section-line-positions path)
     (gp-magit--raw-line-positions path)))
@@ -115,12 +112,9 @@ tree, which is what the unit tests exercise."
 
 (defconst gp-magit--to-range-slot 'to-range
   "The `magit-hunk-section' slot holding a hunk's new-side line range.
-Held in a variable so the slot is resolved at RUNTIME.  A literal
-`oref'/`eieio-oref' resolves it at compile time, which requires
-`magit-hunk-section' to be defined then -- and the magit requires in
-this file are noerror, so a checkout where magit fails to load (a
-transient version conflict in CI is enough) breaks the build with
-\"Unknown slot\" rather than degrading gracefully.")
+Held in a variable so the slot is resolved at RUNTIME: a literal slot
+in `oref' is resolved at compile time and fails the build with
+\"Unknown slot\" when magit (required noerror) did not load.")
 
 (defun gp-magit--section-line-positions (path)
   "Return (NEW-LINE . BUFFER-POS) for PATH using magit's section tree.
@@ -131,14 +125,7 @@ the same position -- the numbers PR comments are anchored to."
     (dolist (file (gp-magit--file-sections path))
       (dolist (hunk (oref file children))
         (when (eq (oref hunk type) 'hunk)
-          ;; `eieio-oref', not `oref': the latter resolves the slot at
-          ;; COMPILE time, which needs `magit-hunk-section' to be defined
-          ;; then.  The requires below are noerror, and in a clean CI
-          ;; checkout magit can fail to load outright (a transient version
-          ;; conflict is enough), leaving the class undefined and failing
-          ;; the build with "Unknown slot `to-range'".  Reading the slot at
-          ;; runtime behaves identically where it matters -- by the time
-          ;; this runs we are inside a live magit-diff buffer.
+          ;; `eieio-oref' with a runtime slot: see `gp-magit--to-range-slot'.
           (let ((line (car (eieio-oref hunk gp-magit--to-range-slot)))
                 (end (oref hunk end)))
             (when line
@@ -155,8 +142,7 @@ the same position -- the numbers PR comments are anchored to."
 
 (defun gp-magit--raw-line-positions (path)
   "Return (NEW-LINE . BUFFER-POS) for PATH by scanning raw diff text.
-Used when there is no magit section tree (plain diff text in a
-buffer).  Recognises the `+++ b/PATH' header form."
+Used when there is no magit section tree; matches `+++ b/PATH' headers."
   (let (result)
     (save-excursion
       (goto-char (point-min))
@@ -251,7 +237,7 @@ this is a brand-new comment, unlike a reply to an existing one."
     (gp-compose
      (list :full-name (gp-pr-full-name pr)
            :id (alist-get 'id pr)
-           :inline (cons (car loc) (cdr loc))
+           :inline loc
            :batchable t
            :on-success (lambda (_c)
                          (when (derived-mode-p 'magit-diff-mode)
@@ -288,11 +274,10 @@ branch has an open PR (and `gp-watch-mode' is on)."
       (progn
         (add-hook 'magit-diff-mode-hook #'gp-magit--activate-keys)
         (add-hook 'magit-refresh-buffer-hook #'gp-magit--maybe-activate)
-        ;; catch diff buffers that were already open when the mode came on
+        ;; Catch diff buffers that were already open.
         (dolist (buf (buffer-list))
           (with-current-buffer buf
-            (when (derived-mode-p 'magit-diff-mode)
-              (gp-magit--activate-keys)))))
+            (gp-magit--activate-keys))))
     (remove-hook 'magit-diff-mode-hook #'gp-magit--activate-keys)
     (remove-hook 'magit-refresh-buffer-hook #'gp-magit--maybe-activate)))
 

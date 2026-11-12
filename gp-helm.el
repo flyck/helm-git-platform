@@ -49,9 +49,7 @@
 
 (defvar gp-helm--last-visited-pr-id nil
   "Id of the last PR opened via `gp-show-pr', so the list can preselect it.
-Set from `gp-ui.el' (which has no Helm dependency) so leaving a
-detail buffer back to the overview lands the cursor back on the
-PR you came from.")
+Set from `gp-ui.el', which has no Helm dependency.")
 
 ;;;; Faces --------------------------------------------------------------------
 
@@ -69,9 +67,7 @@ PR you came from.")
 ;;;; Helm buffer names --------------------------------------------------------
 
 ;; All tagged via `gp--buffer-name' so every buffer this package opens shares
-;; one searchable prefix.  `gp-helm-buffer' is looked up by name in
-;; `gp-helm--title-width', so it lives in a constant rather than being
-;; spelled out at each call site.
+;; one searchable prefix.
 
 (defconst gp-helm-buffer (gp--buffer-name "helm")
   "Name of the main Helm PR-list buffer.")
@@ -82,12 +78,9 @@ PR you came from.")
 
 (defcustom gp-helm-kill-buffer-on-exit t
   "Non-nil kills a gp Helm buffer once its session has ended.
-Helm only buries its buffer on exit.  The leftover buffer still shows
-the candidates, but every key and click in it fails with \"Running
-helm command outside of context\" or \"No buffer named *helm*\",
-because the session it belonged to is gone.  Killing it keeps that
-dead buffer out of buffer lists and tab lines.  The cost is that
-`helm-resume' cannot reopen an ended gp session."
+Helm only buries its buffer on exit, leaving a dead buffer whose keys
+all fail with \"Running helm command outside of context\".  The cost
+is that `helm-resume' cannot reopen an ended gp session."
   :type 'boolean :group 'bitbucket)
 
 (defun gp-helm--own-buffer-p (name)
@@ -131,19 +124,9 @@ Normally the title column auto-grows to fill the available width
 
 (defcustom gp-helm-repo-width 38
   "Column width for the repository slug in the Helm list.
-
-Wide enough for the descriptive, prefixed names real workspaces use
-\(`lambda-datasource-batch-jobs-mutations\' is 38) rather than for a
-short one-word slug.  The title is the column that auto-grows
-\(`gp-helm--title-width\'), so on a wide window every spare column used
-to land there -- leaving the title far longer than any real title while
-the repo beside it was cut mid-word.  This spends some of that surplus
-on the column that was actually short.
-
-The cost is paid by the title, which shrinks by the same amount and
-stops at `gp-helm-title-min-width\'; on a narrow window that floor is
-reached sooner than before.  Lower it if you would rather have the
-title back."
+Sized for long prefixed slugs.  The auto-growing title column
+\(`gp-helm--title-width') shrinks by the same amount, down to
+`gp-helm-title-min-width'; lower this to give the title more room."
   :type 'integer :group 'bitbucket)
 
 (defcustom gp-helm-labels-width 18
@@ -151,9 +134,8 @@ title back."
 Labels are variable-length while this list is column-aligned, so they
 get a fixed column truncated with an ellipsis like the title and repo
 ones; the full names stay matchable through the invisible search tail
-\(see `gp-helm--pr-search-tail').  The column is omitted entirely --
-costing no width at all -- on a platform without labels, so Bitbucket
-rows are exactly as wide as before.  Set to 0 to hide it on GitHub too."
+\(see `gp-helm--pr-search-tail').  The column is omitted on a platform
+without labels; set to 0 to hide it everywhere."
   :type 'integer :group 'bitbucket)
 
 (defcustom gp-helm-title-reserve 28
@@ -168,8 +150,8 @@ rows still overflow on the right."
 The title takes the window width minus the fixed columns (bubble,
 avatar, id, repo, author, separators) and `gp-helm-title-reserve'
 for the trailing badges, never below `gp-helm-title-min-width'."
-  (let ((win (and (window-live-p (get-buffer-window (get-buffer gp-helm-buffer)))
-                  (window-body-width (get-buffer-window (get-buffer gp-helm-buffer))))))
+  (let* ((window (get-buffer-window (get-buffer gp-helm-buffer)))
+         (win (and (window-live-p window) (window-body-width window))))
     (if (not win)
         gp-helm-title-width
       ;; bubble 3 + avatar 3 + id 6 + labels + repo + author 16 + separators 8
@@ -179,29 +161,22 @@ for the trailing badges, never below `gp-helm-title-min-width'."
 
 (defun gp-helm--labels-column-width ()
   "Return the columns the label column occupies, 0 when it is not shown.
-Nil on a backend without labels, so `gp-helm--title-width' hands the
-space back to the title rather than reserving a column that stays blank."
+It is not shown on a backend without labels."
   (if (and (> gp-helm-labels-width 0) (gp-labels-supported-p))
       gp-helm-labels-width
     0))
 
 (defun gp-helm--labels-cell (pr)
   "Return PR's labels as one fixed-width, colour-faced cell.
-Empty string when the column is not shown at all.  Each label keeps its
-platform colour (`gp--label-face'), and the cell is padded to
-`gp-helm-labels-width' so every following column still lines up --
-`gp-helm--pad' cannot do that here because it would apply one face to
-the whole cell."
+Empty string when the column is not shown.  Each label keeps its own
+face, which is why this does not use `gp-helm--pad' (one face for all)."
   (let ((width (gp-helm--labels-column-width)))
     (if (zerop width)
         ""
       (let* ((labels (gp-pr-labels pr))
              (cell (if labels
                        (gp--format-labels labels)
-                     ;; a visible placeholder, so an unlabelled row reads as
-                     ;; "none" rather than as a rendering gap
                      (propertize "···" 'face 'shadow)))
-             ;; truncate on display width, keeping each label's own face
              (cell (truncate-string-to-width cell width nil nil "…")))
         (concat cell
                 (make-string (max 0 (- width (string-width cell))) ?\s))))))
@@ -219,11 +194,8 @@ possible title column."
 
 (defcustom gp-helm-show-avatars nil
   "When non-nil and on a graphical display, show author avatars in the list.
-
-Off by default: avatars are fetched over HTTP and, with many PRs,
-that can make the list slow to first paint.  The avatar cache is
-shared with the inline-comment overlays, so once those are warm
-turning this on is cheap."
+Off by default: fetching avatars over HTTP can slow the first paint.
+The avatar cache is shared with the inline-comment overlays."
   :type 'boolean :group 'bitbucket)
 
 (defun gp-helm--avatar (pr)
@@ -234,32 +206,24 @@ turning this on is cheap."
 
 (defcustom gp-helm-pipeline-settling-ttl 60
   "Seconds to cache a build state that has not settled yet.
-A build reported as running (or as having no result at all) is a
-snapshot of a moving target: it will finish, and the bubble must
-notice.  Terminal states -- failed, successful, stopped -- describe
-an immutable commit and are cached indefinitely.
-
-Lower this for a snappier bubble at the cost of more API calls; 0
+Terminal states -- failed, successful, stopped -- are cached
+indefinitely; running or no-result states expire after this.  0
 re-fetches non-terminal states on every scan."
   :type 'integer :group 'bitbucket)
 
 (defvar gp-helm--pipeline-cache (make-hash-table :test 'equal)
   "commit-hash -> (EXPIRY . STATE) for the pipeline bubble.
 STATE is a symbol from `gp-build-states-summary'.  EXPIRY is nil for
-a terminal state (cached forever, since a finished build on a given
-commit never changes) or a `float-time' deadline for one that is
+a terminal state (cached forever) or a `float-time' deadline for one
 still settling -- see `gp-helm-pipeline-settling-ttl'.")
 
 (defun gp-helm--pipeline-terminal-p (state)
   "Return non-nil when STATE is a final verdict for a commit.
-`running' is obviously not final; nil (\"no build reported\") is not
-either, because CI may simply not have registered yet."
+nil (\"no build reported\") is not final: CI may not have registered yet."
   (memq state '(failed successful stopped)))
 
 (defun gp-helm--pipeline-cache-put (hash state)
-  "Cache STATE for commit HASH, expiring it unless it is terminal.
-Mirrors the optional-TTL contract of `gp-cache-put': the caller
-scopes the entry's lifetime to how long the value stays true."
+  "Cache STATE for commit HASH, expiring it unless it is terminal."
   (puthash hash
            (cons (unless (gp-helm--pipeline-terminal-p state)
                    (+ (float-time) gp-helm-pipeline-settling-ttl))
@@ -278,11 +242,9 @@ scopes the entry's lifetime to how long the value stays true."
 (defun gp-helm--pipeline-bubble (pr)
   "Return a colored pipeline-status bubble for PR's latest commit.
 Reads the async `gp-helm--pipeline-cache'; a neutral bubble
-shows until the status arrives.  The commit hash goes through
-`gp-pr-source-commit' -- the same accessor that keys the cache in
-`gp-helm--scan-pipelines-async' -- because the raw alist path
-differs per backend (Bitbucket .source.commit.hash vs GitHub
-.head.sha)."
+shows until the status arrives.  Must key on `gp-pr-source-commit',
+like `gp-helm--scan-pipelines-async', since the raw path differs
+per backend."
   (let* ((hash (ignore-errors (gp-pr-source-commit pr)))
          (hit (and hash (gp-helm--pipeline-cache-get hash)))
          (state (if (car hit) (cdr hit) 'unknown)))
@@ -295,39 +257,23 @@ differs per backend (Bitbucket .source.commit.hash vs GitHub
       (_           (propertize "⚫" 'help-echo "Pipeline status loading…")))))
 
 (defvar gp-helm--deploy-cache (make-hash-table :test 'equal)
-  "(FULL-NAME . commit-hash) -> t/nil: whether any step named \"deploy\"
-succeeded on that commit's current pipeline(s).  Absent means not yet
-scanned.  Keyed by repo as well as hash (rather than bare hash) so a
-deploy can be busted per-repo -- see `gp-helm--deploy-cache-bust-repo'.
+  "(FULL-NAME . commit-hash) -> t/nil: whether a deploy step succeeded.
+Covers that commit's current pipeline(s); absent means not yet scanned.
+Keyed by repo too so a deploy can be busted per-repo.
 
-Unlike `gp-helm--pipeline-cache', a resolved entry here is kept
-forever rather than expiring a non-terminal answer: walking every
-current pipeline's steps (one fetch per pipeline, not the single
-lightweight commit-statuses call the bubble uses) is too expensive to
-repeat on each list refresh.  A PR whose pipeline is still running
-when scanned stays cached nil until something explicitly busts it.
-Two things bust entries:
- - `gp-helm--deploy-cache-bust' on this PR's own commit, called by
-   `gp-detail-refresh' -- the moment a deploy step already known about
-   this commit could newly have succeeded;
- - `gp-helm--deploy-cache-bust-repo' on the whole repo, called when
-   `gp-pipeline-deploy-script' actually finishes a deploy -- a deploy
-   to a shared environment can supersede what an EARLIER pr's deploy
-   left behind, and that earlier pr's own commit never changes, so
-   only a repo-wide bust (not a re-scan of its own commit) can catch it.")
+Resolved entries never expire (walking every pipeline's steps is too
+expensive per refresh), so a still-running pipeline stays cached nil
+until busted: per commit by `gp-helm--deploy-cache-bust' (from
+`gp-detail-refresh'), or per repo by `gp-helm--deploy-cache-bust-repo'
+\(from `gp-pipeline-deploy-script', since a deploy to a shared
+environment can supersede an earlier PR's deploy).")
 
 (defvar gp-helm--live-deploy-cache (make-hash-table :test 'equal)
-  "(FULL-NAME . merge-commit-hash) -> t/nil: whether the DESTINATION
-branch's pipeline for a merged PR's merge commit has a successful step
-matching both `gp-helm-deploy-keywords' and `gp-helm-live-keywords'.
-Absent means not yet scanned.
-
-Unlike `gp-helm--deploy-cache', this is keyed on the MERGE commit on
-the destination branch, not the PR's own (by-then-stale) source
-commit -- that merge commit is what an actual production pipeline
-runs against.  Same cache-forever-once-resolved reasoning as
-`gp-helm--deploy-cache' applies (and the same repo-wide bust via
-`gp-helm--deploy-cache-bust-repo' also clears this table).")
+  "(FULL-NAME . merge-commit-hash) -> t/nil: whether a merged PR went live.
+True when the destination branch's pipeline for the MERGE commit (what
+production runs against) has a successful step matching both
+`gp-helm-deploy-keywords' and `gp-helm-live-keywords'.  Absent means
+not yet scanned.  Cached and busted like `gp-helm--deploy-cache'.")
 
 (defun gp-helm--deploy-cache-key (pr)
   "Return PR's `gp-helm--deploy-cache' key, or nil if its commit is unknown."
@@ -340,19 +286,14 @@ runs against.  Same cache-forever-once-resolved reasoning as
     (when key (remhash key gp-helm--deploy-cache))))
 
 (defun gp-helm--cache-bust-repo-in (table full-name)
-  "Remove every entry in TABLE (a `gp-helm--deploy-cache'-shaped hash
-table, keyed by (FULL-NAME . commit)) whose key belongs to FULL-NAME."
+  "Remove every entry in TABLE whose (FULL-NAME . commit) key is FULL-NAME's."
   (let (stale)
     (maphash (lambda (k _v) (when (equal (car k) full-name) (push k stale))) table)
     (dolist (k stale) (remhash k table))))
 
 (defun gp-helm--deploy-cache-bust-repo (full-name)
-  "Forget every cached deploy verdict for FULL-NAME's repo, in both
-`gp-helm--deploy-cache' and `gp-helm--live-deploy-cache'.
-A deploy to a shared environment can silently supersede what an
-earlier PR's own successful deploy step (or a merged PR's live
-deploy) left behind; that earlier commit never changes, so nothing
-would otherwise re-check it."
+  "Forget every cached deploy verdict for FULL-NAME's repo.
+Clears both `gp-helm--deploy-cache' and `gp-helm--live-deploy-cache'."
   (when full-name
     (gp-helm--cache-bust-repo-in gp-helm--deploy-cache full-name)
     (gp-helm--cache-bust-repo-in gp-helm--live-deploy-cache full-name)))
@@ -379,16 +320,16 @@ matches, \"Deploy to STAGING\" does not."
     (cl-some (lambda (w) (string-match-p (regexp-quote (downcase w)) name)) words)))
 
 (defun gp-helm--pipeline-has-successful-deploy-p (steps)
-  "Return non-nil if STEPS has a successful step matching
-`gp-helm-deploy-keywords'."
+  "Return non-nil if STEPS has a successful `gp-helm-deploy-keywords' step."
   (cl-some (lambda (step)
              (and (gp-helm--step-name-matches-p (alist-get 'name step) gp-helm-deploy-keywords)
                   (equal (gp-pipeline-step-result step) "SUCCESSFUL")))
            steps))
 
 (defun gp-helm--pipeline-has-successful-live-deploy-p (steps)
-  "Return non-nil if STEPS contains a successful step matching BOTH
-`gp-helm-deploy-keywords' and `gp-helm-live-keywords'."
+  "Return non-nil if STEPS has a successful live deploy step.
+The step name must match BOTH `gp-helm-deploy-keywords' and
+`gp-helm-live-keywords'."
   (cl-some (lambda (step)
              (let ((name (alist-get 'name step)))
                (and (gp-helm--step-name-matches-p name gp-helm-deploy-keywords)
@@ -398,12 +339,9 @@ matches, \"Deploy to STAGING\" does not."
 
 (defun gp-helm--scan-deploys-async (prs)
   "Fetch each PR's current-commit pipeline steps, caching a deploy flag.
-Mirrors `gp-helm--scan-pipelines-async', but needs each pipeline's
-steps (not just its coarse build state) to see step names -- so it
-goes through `gp-pipeline-fetch-for-pr-async' instead of the lighter
-commit-statuses call the bubble uses.  Only ever called on a cache
-miss (see `gp-helm--deploy-cache'), so a settled answer is never
-re-fetched just by reopening the list."
+Like `gp-helm--scan-pipelines-async', but needs step names, so it uses
+the heavier `gp-pipeline-fetch-for-pr-async'.  Only fetches on a cache
+miss (see `gp-helm--deploy-cache')."
   (dolist (pr prs)
     (let ((key (gp-helm--deploy-cache-key pr)))
       (when (and key (eq (gethash key gp-helm--deploy-cache 'miss) 'miss))
@@ -416,9 +354,8 @@ re-fetched just by reopening the list."
              (gp-helm--refresh-if-alive))))))))
 
 (defun gp-helm--deploy-badge (pr)
-  "Return a 🚀 badge for PR if its current pipeline ran a deploy step
-successfully, else \"\".  Reads the async `gp-helm--deploy-cache';
-blank until the scan resolves (see `gp-helm--scan-deploys-async')."
+  "Return a 🚀 badge if PR's current pipeline deployed successfully, else \"\".
+Reads the async `gp-helm--deploy-cache'; blank until the scan resolves."
   (let* ((key (gp-helm--deploy-cache-key pr))
          (deployed (and key (gethash key gp-helm--deploy-cache))))
     (if deployed (propertize " 🚀" 'help-echo "A deploy step succeeded") "")))
@@ -430,10 +367,9 @@ Only merged PRs have a merge commit to key on."
     (and hash (cons (gp-pr-full-name pr) hash))))
 
 (defun gp-helm--scan-live-deploys-async (prs)
-  "Fetch each merged PR's destination-branch pipeline steps at its merge
-commit, caching whether a live/prod deploy step succeeded there.
-Non-merged PRs (no cache key, see `gp-helm--live-deploy-cache-key')
-are skipped outright -- this badge only makes sense post-merge."
+  "Cache whether each merged PR in PRS was deployed live at its merge commit.
+Fetches the destination branch's pipeline steps; non-merged PRs are
+skipped."
   (dolist (pr prs)
     (let ((key (gp-helm--live-deploy-cache-key pr)))
       (when (and key (eq (gethash key gp-helm--live-deploy-cache 'miss) 'miss))
@@ -446,10 +382,9 @@ are skipped outright -- this badge only makes sense post-merge."
              (gp-helm--refresh-if-alive))))))))
 
 (defun gp-helm--live-deploy-badge (pr)
-  "Return a 🚢 badge for a merged PR whose destination-branch pipeline
-ran a live/prod deploy step successfully at the merge commit, else
-\"\".  Reads the async `gp-helm--live-deploy-cache'; blank until the
-scan resolves (see `gp-helm--scan-live-deploys-async')."
+  "Return a 🚢 badge if merged PR was deployed live, else \"\".
+Reads the async `gp-helm--live-deploy-cache'; blank until the scan
+resolves."
   (let* ((key (gp-helm--live-deploy-cache-key pr))
          (deployed (and key (gethash key gp-helm--live-deploy-cache))))
     (if deployed (propertize " 🚢" 'help-echo "Deployed live") "")))
@@ -472,16 +407,12 @@ shown on graphical displays."
            (badge (gp-helm--comment-badge pr))
            (reviews (gp-helm--review-badge pr))
            (deploy (concat (gp-helm--deploy-badge pr) (gp-helm--live-deploy-badge pr)))
-           ;; already padded to its column width, and "" when unsupported --
-           ;; so it carries its own trailing separator and the row collapses
-           ;; back to the original layout on a platform without labels
+           ;; "" when unsupported, so it carries its own separator.
            (labels (let ((cell (gp-helm--labels-cell pr)))
                      (if (string-empty-p cell) "" (concat cell "  "))))
            (line (format "%s %s%s  %s  %s%s  %s%s%s%s"
                          bubble avatar id title labels repo author reviews badge deploy)))
-      ;; Drafts are dimmed as a whole row on purpose: one flat grey reads as
-      ;; "not ready yet" at a glance, which is worth more than keeping the
-      ;; label colours (and their exact column alignment) on those rows.
+      ;; Drafts are dimmed as a whole row on purpose, label colours included.
       (if draft (propertize line 'face 'gp-helm-draft-face) line))))
 
 (defcustom gp-helm-review-style 'tally
@@ -495,16 +426,9 @@ reviewer (✅✅⏳); nil hides it."
 
 (defvar gp-helm--review-tally-cache (make-hash-table :test 'eql)
   "PR id -> review tally plist (see `gp-pr-review-tally').
-Both backends do a per-PR fetch here (see `gp-pr-review-tally-async'):
-Bitbucket's tally lives on the PR object, but a PR served from
-`gp-helm--reviewing-cache'/`gp-cache-get' can be up to `gp-cache-ttl'
-stale, and another reviewer's vote does not invalidate that list
-cache -- so Bitbucket's async path refetches the single PR rather
-than re-deriving the tally from the (possibly stale) cached object.
-Either way this would block the list one row at a time if called
-directly from `gp-helm--review-badge' -- so it's populated
-asynchronously here, exactly like `gp-helm--pipeline-cache' already
-does for build status.")
+Populated asynchronously because both backends do a per-PR fetch (see
+`gp-pr-review-tally-async'): a cached PR-list entry's votes can be
+stale, since other reviewers' votes do not invalidate it.")
 
 (defun gp-helm--format-review-tally (tally)
   "Return the reviewer badge string for TALLY, honouring `gp-helm-review-style'."
@@ -537,18 +461,9 @@ until the status arrives (see `gp-helm--scan-review-tallies-async')."
 
 (defun gp-helm--scan-review-tallies-async (prs)
   "Fetch each PR's review tally in parallel, caching by id and refreshing live.
-Mirrors `gp-helm--scan-pipelines-async''s pattern.  Bitbucket's
-`gp-pr-review-tally-async' calls back immediately with its already-free
-result, so this costs nothing extra there; GitHub's does a real
-per-PR fetch.
-
-Always refetches, even when this PR's id is already cached: approvals
-can change out from under a cached PR-list entry (someone else votes
-in the web UI) well before `gp-cache-ttl' would force a relist, and
-titles/PR existence being safe to cache for minutes does not make
-approval state safe to cache that long too.  Every call site here
-already runs on each list open/refresh, so this keeps the badge
-current without a dedicated poll."
+Always refetches, even when the id is cached: approvals can change
+\(someone votes in the web UI) well before `gp-cache-ttl' forces a
+relist.  Runs on each list open/refresh, so no dedicated poll is needed."
   (dolist (pr prs)
     (let ((id (alist-get 'id pr)))
       (gp-pr-review-tally-async
@@ -559,46 +474,33 @@ current without a dedicated poll."
 
 (defvar gp-helm--reviewers-cache (make-hash-table :test 'eql)
   "PR id -> per-reviewer plists (see `gp-pr-reviewers-async').
-The aggregate tally in `gp-helm--review-tally-cache' cannot say WHO
-voted, which is what `gp-helm--covered-by-others-p' needs to exclude
-the user's own vote -- hence a second cache over the same data.  Both
-backends do a real per-PR fetch, exactly as the tally scan does (see
-`gp-helm--review-tally-cache' for why Bitbucket refetches too).")
+Separate from `gp-helm--review-tally-cache' because the tally cannot say
+WHO voted, which `gp-helm--covered-by-others-p' needs.  Holds `none'
+for a fetched empty list.")
 
 (defun gp-helm--scan-reviewers-async (prs)
   "Fetch each PR's per-reviewer breakdown in parallel, caching by id.
-Mirrors `gp-helm--scan-review-tallies-async', including always
-refetching rather than trusting a stale cached entry -- same
-reasoning: feeds `gp-helm--covered-by-others-p'."
+Always refetches, like `gp-helm--scan-review-tallies-async'."
   (dolist (pr prs)
     (let ((id (alist-get 'id pr)))
       (gp-pr-reviewers-async
        pr
        (lambda (reviewers)
-         ;; cache the empty list as an empty list, not nil: nil reads as
-         ;; "not fetched yet" elsewhere that checks this table
+         ;; nil would read as "not fetched yet".
          (puthash id (or reviewers 'none) gp-helm--reviewers-cache)
          (gp-helm--refresh-if-alive))))))
 
 (defvar gp-helm--comment-resolution-cache (make-hash-table :test 'eql)
   "PR id -> (UNRESOLVED . RESOLVED) counts of resolvable comments.
-Unlike the flat `comment_count'/`comments'+`review_comments' totals
-embedded on the PR object (free, no network), resolution status only
-exists on the full comment thread, so this needs a per-PR fetch --
-same tier of cost as the review tally, and populated the same way.
-A comment with no resolve concept at all (GitHub's plain issue
-comments -- see `gp-comment-resolvable-p') counts toward neither: the
-badge tracks \"things to look at\", not every comment ever posted.  A
-reply counts under its thread root's resolution, not its own --
-`gp--comment-thread-resolved-p' -- since Bitbucket/GitHub set
-`resolution' on the root a reply rarely carries it directly.")
+Resolution status only exists on the full comment thread, so this
+needs a per-PR fetch.  Non-resolvable comments (see
+`gp-comment-resolvable-p') count toward neither; a reply counts under
+its thread root's resolution (`gp--comment-thread-resolved-p').")
 
 (defun gp-helm--format-comment-resolution (counts)
   "Return the comment badge string for COUNTS, a (UNRESOLVED . RESOLVED) cons.
-One 💬, then \"unresolved(total)\" (e.g. \"💬1(10)\"), plain text --
-no distinct face on the unresolved count: Helm's selection overlay
-paints its own foreground over any text-property face on the
-highlighted row anyway, so a colour there was never reliable."
+One 💬, then \"unresolved(total)\" (e.g. \"💬1(10)\"), in plain text:
+Helm's selection overlay would paint over a face anyway."
   (let* ((u (car counts)) (r (cdr counts)) (total (+ u r)))
     (if (zerop total)
         ""
@@ -627,9 +529,8 @@ shows until it arrives (see `gp-helm--scan-comment-resolution-async')."
 
 (defun gp-helm--scan-comment-resolution-async (prs)
   "Fetch each PR's comments in parallel and cache resolution counts by id.
-Mirrors `gp-helm--scan-review-tallies-async', including always
-refetching: a comment resolved from the detail view or the web UI
-must show up here well before `gp-cache-ttl' would force a relist."
+Always refetches, like `gp-helm--scan-review-tallies-async', so a
+resolution made elsewhere shows before `gp-cache-ttl' expires."
   (dolist (pr prs)
     (let ((id (alist-get 'id pr))
           (full-name (gp-pr-full-name pr)))
@@ -644,29 +545,19 @@ must show up here well before `gp-cache-ttl' would force a relist."
 (defun gp-helm--search-token (field value)
   "Return \"FIELD:VALUE\" with whitespace in VALUE folded to `-', or nil.
 Nil when VALUE is empty, so callers can `delq' it away.  Spaces are
-folded because Helm splits a pattern on whitespace: a token with a
-space in it would be read as two independent patterns, and
-`label:needs review' would filter on `label:needs' plus a stray
-`review' matching anywhere in the row."
+folded because Helm splits a pattern on whitespace into separate
+patterns."
   (when (and value (not (string-empty-p (format "%s" value))))
     (format "%s:%s" field
             (replace-regexp-in-string "[ \t]+" "-" (format "%s" value)))))
 
 (defun gp-helm--pr-search-tokens (pr)
   "Return PR's field-scoped search tokens as a list of strings.
-Helm has no query language of its own -- it matches the candidate's
-display string -- so scoped search is done by *putting the scope in
-the string*: each field is emitted a second time prefixed with its
-name, and typing `label:bug' then matches natively, no custom
-`:match' needed.  Because Helm ANDs whitespace-separated patterns,
-the tokens compose for free: `label:bug repo:portal' narrows on both.
-
-Matching stays substring-loose (`label:bug' also hits a label named
-`bugfix'), which is the same looseness the rest of the row already
-has and keeps prefix-typing useful."
-  ;; The normalised `gp-pr-*' accessors, not the raw payload: GitHub keys
-  ;; the slug and author differently from Bitbucket, so reading the alist
-  ;; directly would silently emit no `repo:'/`author:' token on one backend.
+Helm matches the display string, so each field is emitted again
+prefixed with its name and `label:bug repo:portal' then matches
+natively (Helm ANDs whitespace-separated patterns).  Matching stays
+substring-loose: `label:bug' also hits `bugfix'."
+  ;; Use the normalised `gp-pr-*' accessors: raw keys differ per backend.
   (delq nil
         (append
          (list (gp-helm--search-token "repo" (gp-pr-repo-slug pr))
@@ -677,15 +568,9 @@ has and keeps prefix-typing useful."
 
 (defun gp-helm--pr-search-tail (pr)
   "Return an invisible, searchable suffix of PR's full untruncated fields.
-The visible row truncates the repo slug, title and author to fixed
-column widths (see `gp-helm--pad'), so Helm -- which matches the
-display string -- cannot match text past the cut.  Appending the
-full fields as an invisible tail makes the whole slug/title/author
-matchable regardless of truncation.
-
-The bare fields come first, so plain typing works as it always did;
-`gp-helm--pr-search-tokens' then repeats them in `field:value' form
-so a search can be scoped to one field."
+Helm matches the display string, whose columns are truncated, so the
+full fields are appended invisibly: bare first, then in `field:value'
+form (`gp-helm--pr-search-tokens')."
   (let-alist pr
     (propertize
      (concat " " (mapconcat #'identity
@@ -694,8 +579,6 @@ so a search can be scoped to one field."
                                              .destination.repository.slug
                                              .title
                                              .author.display_name)
-                                       ;; label names too, so typing one filters
-                                       ;; even when the column truncated it
                                        (mapcar (lambda (l) (plist-get l :name))
                                                (gp-pr-labels pr))
                                        (gp-helm--pr-search-tokens pr)))
@@ -785,8 +668,8 @@ the file, then overlays its inline comments."
 
 (defun gp-helm-comments (pr)
   "Helm session over PR's comments.
-Selecting an inline comment jumps to it in the checkout (with
-overlays); a general comment opens the detail buffer."
+The default action opens the comment in the browser; others reply,
+jump to it in the checkout, or open the detail buffer."
   (let* ((comments (gp-pull-request-comments
                     (gp-pr-full-name pr) (alist-get 'id pr)))
          (cands (gp-helm--comment-candidates comments)))
@@ -829,16 +712,12 @@ overlays); a general comment opens the detail buffer."
   "Keymap for the comments drill-down: reply/goto/back/reload bindings."
   (let ((map (gp-helm--drilldown-keymap
               (lambda () (gp-helm-comments pr)))))
-    (define-key map (kbd "C-c r")
-                (lambda () (interactive)
-                  (let ((c (helm-get-selection)))
-                    (helm-run-after-exit
-                     (lambda () (gp-helm--reply-comment pr c))))))
-    (define-key map (kbd "C-c f")
-                (lambda () (interactive)
-                  (let ((c (helm-get-selection)))
-                    (helm-run-after-exit
-                     (lambda () (gp-helm--goto-comment pr c))))))
+    (pcase-dolist (`(,key . ,fn) `(("C-c r" . ,#'gp-helm--reply-comment)
+                                   ("C-c f" . ,#'gp-helm--goto-comment)))
+      (define-key map (kbd key)
+                  (lambda () (interactive)
+                    (let ((c (helm-get-selection)))
+                      (helm-run-after-exit (lambda () (funcall fn pr c)))))))
     map))
 
 (defun gp-helm--reply-comment (pr comment)
@@ -855,11 +734,8 @@ overlays); a general comment opens the detail buffer."
 (defun gp-helm--drilldown-keymap (&optional refresh)
   "Return a keymap for drill-down Helm sessions.
 Binds C-c C-b to go back to the PR list and, when REFRESH (a
-thunk) is given, C-c g to reload the current drill-down.
-
-We use C-c g rather than a bare `g' because in a Helm session
-ordinary keys are the search pattern -- binding `g' alone would
-stop you from typing it."
+thunk) is given, C-c g to reload the current drill-down (a bare `g'
+would be swallowed by the search pattern)."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map helm-map)
     (define-key map (kbd "C-c C-b")
@@ -885,7 +761,7 @@ stop you from typing it."
 
 (defun gp-helm--pr-actions ()
   "Return the helm action alist for a selected PR."
-  ;; first entry is the default action (RET / mouse click)
+  ;; First entry is the default action.
   (list
    (cons "Open detail buffer"      #'gp-show-pr)
    (cons "Browse files (helm)"     #'gp-helm-files)
@@ -915,9 +791,8 @@ stop you from typing it."
 
 (defvar gp-helm--mine-cache nil
   "Async-filled list of the user's own PRs for the current `gp-helm' run.
-Symbol `loading' while the background fetch runs.  Kept in the same
-shape as `gp-helm--reviewing-cache' so both sections can render a
-⏳ row instead of blocking helm from opening at all.")
+Symbol `loading' while the background fetch runs, so the section can
+render a ⏳ row instead of blocking Helm from opening.")
 
 (defvar gp-helm--mine-uuid nil
   "The uuid the current \"mine\" fetch belongs to.")
@@ -929,8 +804,7 @@ KEYMAP overrides the source keymap.  Returns nil when PRS is empty
 so empty sections are omitted."
   (when prs
     (helm-build-sync-source label
-      ;; volatile + a candidates function so the title column is recomputed
-      ;; once the helm window exists (auto-grow to full width)
+      ;; Volatile so the title width is recomputed once the window exists.
       :candidates (lambda () (gp-helm--pr-candidates prs draft))
       :volatile t
       :action actions
@@ -950,18 +824,14 @@ merged PRs are not otherwise fetched for the open-only list."
 
 (defcustom gp-helm-merged-recent-hours 24
   "How many hours back the \"Merged\" section reaches.
-A rolling window, so work merged late yesterday evening is still there
-the next morning -- which a calendar-day cutoff would drop at midnight.
-The section is omitted entirely when nothing falls inside it, so a wider
-setting costs nothing on a quiet day."
+A rolling window, not a calendar-day cutoff.  The section is omitted
+when nothing falls inside it."
   :type 'integer :group 'bitbucket)
 
 (defun gp-helm--merged-recently (prs &optional hours)
   "Return the PRs from PRS merged within the last HOURS.
-HOURS defaults to `gp-helm-merged-recent-hours'.  The window rolls from
-now rather than snapping to midnight, so something merged last evening
-still counts this morning.  A PR whose merge time cannot be read is left
-out rather than guessed at."
+HOURS defaults to `gp-helm-merged-recent-hours'.  A PR whose merge time
+cannot be read is left out."
   (let* ((hours (or hours gp-helm-merged-recent-hours))
          (cutoff (time-subtract (current-time) (seconds-to-time (* 3600 (max 1 hours))))))
     (cl-remove-if-not
@@ -984,13 +854,11 @@ out rather than guessed at."
 (defvar gp-helm--merged-recent-cache nil
   "Async-filled list of recently-merged PRs for the current `gp-helm' run.
 Symbol `loading' while the background fetch runs; nil once loaded means
-\"none in the window\", not \"not fetched\" -- callers only ever see
-`loading' before the fetch lands, same as `gp-helm--mine-cache'.")
+\"none in the window\".")
 
 (defun gp-helm--merged-recent-candidates ()
   "Helm `:candidates' for the recently-merged section.
-Shows a ⏳ row while the fetch is still in flight, mirroring
-`gp-helm--mine-candidates'."
+Shows a ⏳ row while the fetch is still in flight."
   (cond
    ((eq gp-helm--merged-recent-cache 'loading)
     (list (cons (propertize "  ⏳ fetching recently merged…" 'face 'shadow) nil)))
@@ -999,9 +867,8 @@ Shows a ⏳ row while the fetch is still in flight, mirroring
 
 (defun gp-helm--merged-recent-source (actions keymap)
   "Build the Helm source for recently-merged PRs.
-Always created (never nil-ed out for an empty list), same reasoning as
-`gp-helm--mine-source': the section has to exist up front to carry the
-⏳ row while the fetch is still in flight."
+Always created, even for an empty list, so it can carry the ⏳ row
+while the fetch is in flight."
   (helm-build-sync-source (gp-helm--merged-section-label)
     :candidates #'gp-helm--merged-recent-candidates
     :volatile t
@@ -1016,10 +883,8 @@ Always created (never nil-ed out for an empty list), same reasoning as
 
 (defun gp-helm--fetch-merged-recent-async (uuid)
   "Fetch UUID's recently-merged PRs asynchronously into `gp-helm' live.
-Capped at 20 (only the newest few can be in the window; this must not
-turn the list into a full history fetch) and cached separately from
-the open-PR \"mine\" list, since it needs merged PRs even when the rest
-of the list is open-only."
+Capped at 20 so it never becomes a full history fetch, and cached
+separately from the open-only \"mine\" list."
   (gp-workspace-pull-requests-async
    (lambda (ok prs)
      (setq gp-helm--merged-recent-cache
@@ -1033,10 +898,8 @@ of the list is open-only."
 (defun gp-helm--mine-source (label key draft actions keymap)
   "Build the Helm source named LABEL over the user's own PRs under KEY.
 KEY is `:mine' or `:drafts'; DRAFT styles the rows as drafts.  Unlike
-`gp-helm--source' this is always created, never nil-ed out for an
-empty list: the section has to exist up front to carry the ⏳ row
-while the fetch is still in flight.  Once loaded, an empty section
-renders no candidates and helm hides it by itself."
+`gp-helm--source' this is always created, so it can carry the ⏳ row
+while the fetch is in flight; Helm hides it once it loads empty."
   (helm-build-sync-source label
     :candidates (lambda () (gp-helm--mine-candidates key draft))
     :volatile t
@@ -1051,8 +914,7 @@ renders no candidates and helm hides it by itself."
               "   (C-c g reload · C-c G refresh · C-c m merged)"))))
 
 (defun gp-helm--scan-mine-badges (prs)
-  "Fetch pipeline states, review tallies, comment resolution and deploy
-status for PRS."
+  "Fetch the pipeline, review, comment and deploy badges for PRS."
   (gp-helm--scan-pipelines-async prs)
   (gp-helm--scan-review-tallies-async prs)
   (gp-helm--scan-comment-resolution-async prs)
@@ -1061,14 +923,13 @@ status for PRS."
 (defun gp-helm--fetch-mine-async (uuid include-merged)
   "Fetch UUID's own PRs asynchronously, filling the live helm session.
 INCLUDE-MERGED widens the state filter.  Results are cached under the
-same key the synchronous path used, so a reopen is instant."
+key `gp-helm' checks on open, so a reopen is instant."
   (gp-workspace-pull-requests-async
    (lambda (ok prs)
      (if (not ok)
          (progn
            (gp-log-error "gp-helm: fetching your pull requests failed")
-           ;; a list (empty) rather than `loading', so the ⏳ row is replaced
-           ;; by an empty section instead of spinning forever
+           ;; nil, not `loading', so the ⏳ row does not spin forever.
            (setq gp-helm--mine-cache nil)
            (gp-helm--refresh-if-alive))
        (gp-cache-put (list 'mine uuid include-merged) prs)
@@ -1088,12 +949,8 @@ same key the synchronous path used, so a reopen is instant."
 
 (defun gp-helm--append-to-pattern (token)
   "Append TOKEN to the live Helm pattern, narrowing the current session.
-Appends rather than replaces so scoped tokens stack -- pressing the
-key on a `bug' PR and then on a `portal' one leaves
-`label:bug label:portal' -- and so a pattern you had already typed
-survives.  A token already present is not added twice, which makes
-the key idempotent instead of building up duplicates that match the
-same thing."
+Appends so scoped tokens stack and a typed pattern survives; a token
+already present is not added twice."
   (let* ((pattern (or helm-pattern ""))
          (parts (split-string pattern "[ \t]+" t)))
     (unless (member token parts)
@@ -1102,12 +959,9 @@ same thing."
 
 (defun gp-helm--filter-by-label ()
   "Narrow the list to the label of the PR at point.
-Prompts when the PR carries several labels, since there is no way to
-tell which one was meant.  Inserts the scoped `label:NAME' token
-\(see `gp-helm--pr-search-tokens') into the search rather than
-filtering behind Helm's back, so the narrowing is visible in the
-pattern, composes with whatever else is typed, and is undone by
-plain editing."
+Prompts when the PR carries several labels.  Inserts the scoped
+`label:NAME' token (see `gp-helm--pr-search-tokens') into the visible
+search pattern, so it composes with typing and is undone by editing."
   (interactive)
   (let* ((pr (helm-get-selection))
          (names (and (consp pr)
@@ -1116,33 +970,24 @@ plain editing."
     (cond
      ((null names)
       (message "gp: no labels on this pull request"))
-     ((cdr names)
-      (gp-helm--append-to-pattern
-       (gp-helm--search-token
-        "label" (completing-read "Filter by label: " names nil t))))
      (t (gp-helm--append-to-pattern
-         (gp-helm--search-token "label" (car names)))))))
+         (gp-helm--search-token
+          "label" (if (cdr names)
+                      (completing-read "Filter by label: " names nil t)
+                    (car names))))))))
 
 (defun gp-helm-list-by-label (name)
   "Open the Helm PR list narrowed to label NAME.
-The entry point `gp-filter-by-label' uses from the list and detail
-buffers, which have no Helm dependency of their own."
+Used by `gp-filter-by-label', whose buffers have no Helm dependency."
   (require 'helm)
   (gp-helm--list nil (concat (gp-helm--search-token "label" name) " ")))
 
 (defun gp-helm--list-keymap (include-merged)
   "Keymap for the main PR list.
-C-c g reloads: clears the PR-list cache AND the deploy-status caches
-\(`gp-helm--deploy-cache' and `gp-helm--live-deploy-cache' -- a
-settled verdict there is otherwise kept forever, since another PR's
-deploy to a shared environment can supersede it without this commit
-itself ever changing, see `gp-helm--deploy-cache-bust-repo'), so a
-manual reload always re-checks deploy status rather than trusting a
-stale 🚀/🚢.  C-c G does a full refresh (clearing every cache across
-all layers, see `gp-reset-caches') -- use this when a repo or PR is
-missing because a stale cache (e.g. the 24h repo-list cache) predates
-it.
-C-c m toggles whether MERGED/DECLINED PRs are shown \(currently
+C-c g reloads, clearing the PR-list cache and the otherwise
+never-expiring deploy caches.  C-c G clears every cache (see
+`gp-reset-caches'), e.g. when a repo is missing from the 24h repo
+list.  C-c m toggles whether MERGED/DECLINED PRs are shown (currently
 INCLUDE-MERGED).  C-c l narrows to the label of the PR at point."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map helm-map)
@@ -1165,15 +1010,13 @@ INCLUDE-MERGED).  C-c l narrows to the label of the PR at point."
                    (lambda () (gp-helm--list (not include-merged))))))
     map))
 
-
 (defvar gp-helm--reviewing-cache nil
   "Async-filled list of reviewer PRs for the current `gp-helm' run.
 Symbol `loading' while the background scan runs.")
 
 (defvar gp-helm--reviewing-uuid nil
   "The uuid the current reviewing scan belongs to.
-Needed by the candidate functions to tell the user's own vote apart
-from everyone else's.")
+Lets the candidate functions tell the user's own vote apart.")
 
 (defun gp-helm--reviewing-candidates ()
   "Helm `:candidates' for the reviewing source: reads the async cache.
@@ -1200,10 +1043,8 @@ are served by `gp-helm--voted-candidates'."
 DRAFT styles the rows as drafts.  Shows a ⏳ row while the fetch is
 still in flight, so helm opens instantly instead of waiting on it."
   (if (eq gp-helm--mine-cache 'loading)
-      ;; Every loading section carries its OWN row.  Showing it in `:mine'
-      ;; only left the drafts section as a bare "(…)" header with no
-      ;; candidates, which helm then dropped once the data arrived -- the
-      ;; section appeared to blink out of existence mid-load.
+      ;; Each loading section needs its OWN row, or Helm drops the empty
+      ;; section and it blinks out mid-load.
       (list (cons (propertize (if draft
                                   "  ⏳ fetching your drafts…"
                                 "  ⏳ fetching your pull requests…")
@@ -1226,8 +1067,8 @@ still in flight, so helm opens instantly instead of waiting on it."
                                           gp-helm--reviewing-uuid)))))
 
 (defcustom gp-helm-create-from-magit t
-  "When non-nil, `gp-helm' from a magit buffer on a branch with no
-open PR opens the PR-creation mask instead of the workspace list.
+  "Non-nil makes `gp-helm' offer PR creation from a magit branch without a PR.
+That is, it opens the PR-creation mask instead of the workspace list.
 Set to nil to always get the PR list."
   :type 'boolean :group 'bitbucket)
 
@@ -1235,19 +1076,10 @@ Set to nil to always get the PR list."
   "Return (DIR FULL-NAME BRANCH) to offer PR creation, or nil.
 Non-nil only in a magit buffer whose repo+branch resolve, whose
 branch is not the repo's default branch, AND that has no open PR.
-
-The \"has no open PR\" check uses the SAME source as
-`gp-helm--magit-branch-prs' (the actual repo PR list filtered by
-source branch), not a separate lookup -- so the create-vs-open
-decision can never disagree with itself and drop you into the
-create mask for a branch that already has a PR."
-  (when (and gp-helm-create-from-magit
-             (derived-mode-p 'magit-mode)
-             default-directory)
-    (require 'gp-watch)
-    (let* ((dir (expand-file-name default-directory))
-           (full-name (gp-watch--repo-for-path dir))
-           (branch (and full-name (gp-watch--current-branch dir))))
+The no-PR check must use `gp-helm--magit-branch-prs', the same source
+as the open-PR path, so the two decisions can never disagree."
+  (when gp-helm-create-from-magit
+    (pcase-let ((`(,dir ,full-name ,branch) (gp-helm--magit-context)))
       (when (and full-name branch
                  (not (member branch '("main" "master")))
                  (not (equal branch (gp-repo-default-branch full-name)))
@@ -1268,8 +1100,7 @@ PR-creation mask instead -- see `gp-helm-create-from-magit'.
 
 Your authored PRs and drafts appear immediately; the \"Needs my
 review\" section shows a loading row and fills in once a
-background scan of recent repositories finishes (it has no single
-fast endpoint -- see `bitbucket-reviewing-pull-requests').
+background scan finishes (see `gp-reviewing-pull-requests-async').
 
 Sections are colour-coded with aligned id / title / repo / author
 columns.  RET (or click) opens the PR detail buffer; more actions
@@ -1281,39 +1112,28 @@ By default only OPEN PRs are shown; with a prefix argument, or
   (require 'helm)
   (let (branch-prs ctx)
     (cond
-     ;; magit buffer, branch with exactly one open PR -> open it directly.
      ;; Checked BEFORE create so an existing PR always wins.
      ((and (not include-merged)
            (setq branch-prs (gp-helm--magit-branch-prs))
            (= (length branch-prs) 1))
       (require 'gp-ui)
       (gp-show-pr (car branch-prs)))
-     ;; magit buffer, branch with NO open PR -> offer to create one.
-     ;; (`gp-helm--magit-create-context' re-checks branch-prs is empty.)
      ((and (not include-merged)
            (null branch-prs)
            (setq ctx (gp-helm--magit-create-context)))
       (require 'gp-create)
       (gp-create-pr (nth 0 ctx) (nth 1 ctx) (nth 2 ctx)))
-     ;; several PRs on the branch, default branch, or non-magit -> full list
      (t (gp-helm--magit-report-fallthrough include-merged)
         (gp-helm--list include-merged)))))
 
 (defun gp-helm--magit-report-fallthrough (include-merged)
   "Say why `gp-helm' fell back to the full list from a magit buffer.
 Only speaks up in a magit buffer where the branch-PR shortcut was
-supposed to apply, so the ordinary uses of the list stay quiet.
-Without this, a repo or branch that fails to resolve is
-indistinguishable from a branch that simply has no PR: both quietly
-open the workspace list, which is the same thing `gp-helm' does
-everywhere else."
-  (when (and (not include-merged)
-             (derived-mode-p 'magit-mode)
-             default-directory)
-    (require 'gp-watch)
-    (let* ((dir (expand-file-name default-directory))
-           (full-name (gp-watch--repo-for-path dir))
-           (branch (and full-name (gp-watch--current-branch dir))))
+supposed to apply, so a repo or branch that fails to resolve is not
+mistaken for a branch without a PR."
+  (when-let* (((not include-merged))
+              (ctx (gp-helm--magit-context)))
+    (pcase-let ((`(,dir ,full-name ,branch) ctx))
       (cond
        ((not full-name)
         (message "gp-helm: no forge repo for %s (active backend: %s) -- showing the full list"
@@ -1330,51 +1150,67 @@ everywhere else."
             (message "gp-helm: %d open PRs on %s -- showing the full list"
                      n branch))))))))
 
-(defun gp-helm--magit-branch-prs ()
-  "Return the open PRs for the current magit buffer's repo+branch, or nil.
-Nil outside a magit buffer, or when the repo/branch cannot be
-resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
+(defun gp-helm--magit-context ()
+  "Return (DIR FULL-NAME BRANCH) for the current magit buffer, or nil.
+Nil outside a magit buffer; FULL-NAME and BRANCH are nil when they
+cannot be resolved."
   (when (and (derived-mode-p 'magit-mode) default-directory)
     (require 'gp-watch)
     (let* ((dir (expand-file-name default-directory))
            (full-name (gp-watch--repo-for-path dir))
            (branch (and full-name (gp-watch--current-branch dir))))
-      (when (and full-name branch (fboundp 'gp-repo-pull-requests))
-        (cl-remove-if-not
-         (lambda (pr) (equal (gp-pr-source-branch pr) branch))
-         (gp-repo-pull-requests full-name))))))
+      (list dir full-name branch))))
+
+(defun gp-helm--magit-branch-prs ()
+  "Return the open PRs for the current magit buffer's repo+branch, or nil.
+Nil outside a magit buffer, or when the repo/branch cannot be
+resolved.  Used so `gp-helm' can jump straight to a lone branch PR."
+  (pcase-let ((`(,_dir ,full-name ,branch) (gp-helm--magit-context)))
+    (when (and full-name branch (fboundp 'gp-repo-pull-requests))
+      (gp-helm--prs-for-branch (gp-repo-pull-requests full-name) branch))))
+
+(defun gp-helm--reviewing-source (label candidates index actions keymap
+                                         &optional hint)
+  "Build a Helm source LABEL over one partition of the reviewing PRs.
+CANDIDATES is the `:candidates' function; INDEX selects the partition
+of `gp-helm--partition-reviewing' counted in the header, followed by
+HINT.  ACTIONS and KEYMAP are the source's.  Volatile, so async
+results replace the loading row as they land."
+  (helm-build-sync-source label
+    :candidates candidates
+    :volatile t
+    :action actions :nomark t :keymap keymap
+    :header-name
+    (lambda (name)
+      (concat name
+              (if (listp gp-helm--reviewing-cache)
+                  (format " (%d)"
+                          (length (nth index (gp-helm--partition-reviewing
+                                              gp-helm--reviewing-cache
+                                              gp-helm--reviewing-uuid))))
+                " (…)")
+              hint))))
 
 (defun gp-helm--list (include-merged &optional input)
   "Show the Helm workspace PR list.  See `gp-helm' for INCLUDE-MERGED.
-INPUT pre-fills the search pattern, so a caller can open the list
-already narrowed -- `gp-filter-by-label' passes a `label:NAME' token
-\(see `gp-helm--pr-search-tokens').  It is only a starting pattern:
-editing it widens the list again, so nothing is hidden behind a
-filter the user cannot see or undo."
+INPUT pre-fills the search pattern, e.g. the `label:NAME' token
+`gp-filter-by-label' passes; editing it widens the list again."
   (let* ((uuid (gp-user-uuid))
          (states (if include-merged '("OPEN" "MERGED" "DECLINED") '("OPEN")))
          (mine-hit (gp-cache-get (list 'mine uuid include-merged)))
-         ;; The recently-merged section only earns its keep on the open-only
-         ;; list: with include-merged on, every merged PR of the user's own
-         ;; is already shown in "My pull requests" itself (states above
-         ;; includes MERGED), so a second section repeating the same rows
-         ;; would add nothing worth a fetch.  Cached and fetched separately
-         ;; from "mine" -- capped at 20, so it never turns into a full
-         ;; history fetch.
+         ;; Only on the open-only list: with include-merged, "mine"
+         ;; already shows the user's merged PRs.
          (merged-hit (unless include-merged (gp-cache-get (list 'merged-recent uuid))))
          (actions (gp-helm--pr-actions))
          (km (gp-helm--list-keymap include-merged)))
-    ;; "Mine" used to be fetched synchronously right here, which froze Emacs
-    ;; for the whole round trip BEFORE helm existed -- so there was no window
-    ;; to show a spinner in.  Serve it from cache when we can, otherwise open
-    ;; helm immediately with a loading row and fill it in asynchronously, the
-    ;; same way the reviewing section below already works.
+    ;; Never fetch "mine" synchronously here: it would freeze Emacs before
+    ;; Helm has a window.  Serve from cache or fill in asynchronously.
     (setq gp-helm--mine-uuid uuid
           gp-helm--mine-cache (if (car mine-hit) (cdr mine-hit) 'loading))
     (setq gp-helm--reviewing-cache 'loading
           gp-helm--reviewing-uuid uuid)
     (if (car mine-hit)
-        ;; cached: still need the badges the async path would have fetched
+        ;; Cached: still fetch the badges the async path would have.
         (let ((cached (cdr mine-hit)))
           (run-with-idle-timer
            0.1 nil
@@ -1390,103 +1226,41 @@ filter the user cannot see or undo."
            (t 'loading)))
     (if (and gp-helm-show-merged-recent (not include-merged) (not (car merged-hit)))
         (gp-helm--fetch-merged-recent-async uuid)
-      ;; Served from cache, so `gp-helm--fetch-merged-recent-async' (and
-      ;; the live-deploy scan hanging off its on-done) never runs --
-      ;; without this the 🚢 badge on every cached merged row stays
-      ;; blank until the cache expires.  Mirrors the same fix for the
-      ;; reviewing section just below.
+      ;; Served from cache, so the fetch's live-deploy scan never runs;
+      ;; without this the 🚢 badges stay blank until the cache expires.
       (when (listp gp-helm--merged-recent-cache)
         (run-with-idle-timer
          0.1 nil
          (lambda () (gp-helm--scan-live-deploys-async gp-helm--merged-recent-cache)))))
-    (let ((reviewing-source
-           (helm-build-sync-source "Needs my review"
-             :candidates #'gp-helm--reviewing-candidates
-             ;; volatile so each helm-update re-runs :candidates and the
-             ;; async results replace the loading row as they arrive
-             :volatile t
-             :action actions :nomark t :keymap km
-             :header-name
-             (lambda (name)
-               (concat name
-                       (if (listp gp-helm--reviewing-cache)
-                           (format " (%d)"
-                                   (length (car (gp-helm--partition-reviewing
-                                                 gp-helm--reviewing-cache
-                                                 gp-helm--reviewing-uuid))))
-                         " (…)")
-                       "   (C-c g reload · C-c G refresh · C-c m merged)"))))
-          ;; PRs where the user's vote is already in: still worth seeing
-          ;; (a follow-up push may need another look), but they are not
-          ;; pending work, so they sit in their own section rather than
-          ;; padding "Needs my review".
-          (voted-source
-           (helm-build-sync-source "Approved by me"
-             :candidates #'gp-helm--voted-candidates
-             :volatile t
-             :action actions :nomark t :keymap km
-             :header-name
-             (lambda (name)
-               (concat name
-                       (if (listp gp-helm--reviewing-cache)
-                           (format " (%d)"
-                                   (length (nth 1 (gp-helm--partition-reviewing
-                                                   gp-helm--reviewing-cache
-                                                   gp-helm--reviewing-uuid))))
-                         " (…)")))))
-          ;; Enough other reviewers have approved (or asked for changes)
-          ;; that the user's vote would not change the outcome.  Still
-          ;; listed -- they may want to weigh in regardless -- but not
-          ;; counted as pending work.
-          (covered-source
-           (helm-build-sync-source "Covered by others"
-             :candidates #'gp-helm--covered-candidates
-             :volatile t
-             :action actions :nomark t :keymap km
-             :header-name
-             (lambda (name)
-               (concat name
-                       (if (listp gp-helm--reviewing-cache)
-                           (format " (%d)"
-                                   (length (nth 2 (gp-helm--partition-reviewing
-                                                   gp-helm--reviewing-cache
-                                                   gp-helm--reviewing-uuid))))
-                         " (…)")))))
-          (sources nil))
-      (setq sources
-            (cons reviewing-source
-                  (delq nil
-                        (list
-                         (gp-helm--mine-source "My pull requests" :mine nil actions km)
-                         voted-source
-                         covered-source
-                         (gp-helm--mine-source "My drafts" :drafts t actions km)
-                         ;; last, and styled like drafts: merged work is
-                         ;; reference rather than something to act on.  Omitted
-                         ;; outright rather than shown empty-and-loading when
-                         ;; include-merged already covers it via "mine" above.
-                         (when (and gp-helm-show-merged-recent (not include-merged))
-                           (gp-helm--merged-recent-source actions km))))))
-      ;; reviewing PRs have no fast endpoint: serve from cache, else scan
-      ;; repos in parallel (non-blocking) and fill the section as batches land
+    (let ((sources
+           (delq nil
+                 (list
+                  (gp-helm--reviewing-source
+                   "Needs my review" #'gp-helm--reviewing-candidates 0
+                   actions km
+                   "   (C-c g reload · C-c G refresh · C-c m merged)")
+                  (gp-helm--mine-source "My pull requests" :mine nil actions km)
+                  ;; Already voted: not pending work, but a follow-up push
+                  ;; may need another look.
+                  (gp-helm--reviewing-source
+                   "Approved by me" #'gp-helm--voted-candidates 1 actions km)
+                  ;; Other reviewers' votes already settle the outcome.
+                  (gp-helm--reviewing-source
+                   "Covered by others" #'gp-helm--covered-candidates 2
+                   actions km)
+                  (gp-helm--mine-source "My drafts" :drafts t actions km)
+                  ;; Omitted when include-merged already covers it via "mine".
+                  (when (and gp-helm-show-merged-recent (not include-merged))
+                    (gp-helm--merged-recent-source actions km))))))
+      ;; Reviewing PRs have no fast endpoint: serve from cache, else scan
+      ;; repos in parallel and fill the section as batches land.
       (let ((hit (gp-cache-get (list 'reviewing uuid states))))
         (if (car hit)
             (progn (setq gp-helm--reviewing-cache (cdr hit))
-                   ;; Served from cache, so `gp-helm--scan-reviewing-async'
-                   ;; (and the tally/pipeline fetches hanging off its on-done)
-                   ;; never runs -- without this the badges on every cached
-                   ;; reviewing row stay blank until the cache expires.
-                   (let ((cached (cdr hit)))
-                     (run-with-idle-timer
-                      0.1 nil
-                      (lambda ()
-                        (gp-helm--scan-pipelines-async cached)
-                        (gp-helm--scan-review-tallies-async cached)
-                        ;; per-reviewer data too, else "Covered by others"
-                        ;; only ever refreshes after a cold relist
-                        (gp-helm--scan-reviewers-async cached)
-                        (gp-helm--scan-comment-resolution-async cached)
-                        (gp-helm--scan-deploys-async cached))))
+                   ;; Served from cache, so the scan's badge fetches never
+                   ;; run; without this the badges stay blank until expiry.
+                   (run-with-idle-timer 0.1 nil #'gp-helm--scan-reviewing-badges
+                                        (cdr hit))
                    (run-with-idle-timer 0.1 nil #'gp-helm--refresh-if-alive))
           (run-with-idle-timer
            0.1 nil
@@ -1496,8 +1270,7 @@ filter the user cannot see or undo."
             :buffer gp-helm-buffer
             :full-frame gp-helm-full-frame
             :input (or input "")
-            ;; a pre-filled pattern already picks the row; preselecting the
-            ;; last-visited PR on top of it would fight the filter
+            ;; Preselecting on top of a pre-filled pattern would fight it.
             :preselect (unless input
                          (when gp-helm--last-visited-pr-id
                            (format "#%s " gp-helm--last-visited-pr-id)))))))
@@ -1523,32 +1296,22 @@ Results land in `gp-helm--pipeline-cache' keyed by commit hash."
 
 (defun gp-helm--my-vote (pr uuid)
   "Return UUID's own review state on PR, or nil.
-Wrapped because not every backend implements `gp-pr-my-review-state'
-\(the mock does not); a backend without it simply reports no vote,
-which degrades to the previous behaviour rather than erroring."
+A backend without `gp-pr-my-review-state' (e.g. the mock) reports no
+vote rather than erroring."
   (and uuid
        (ignore-errors (gp-pr-my-review-state pr uuid))))
 
 (defun gp-helm--voted-p (pr uuid)
   "Non-nil when UUID has already APPROVED PR.
-Such a PR no longer needs the user's action, so it moves out of
-`Needs my review' into the `Approved by me' section.
-
-Deliberately approval-only: a PR you sent back with changes requested
-is still yours to re-review once the author pushes, so it belongs in
-the pending list, not filed away as done."
+Such a PR moves from `Needs my review' to `Approved by me'.
+Approval-only on purpose: a PR you sent back with changes requested
+is still yours to re-review once the author pushes."
   (eq (gp-helm--my-vote pr uuid) 'approved))
 
 (defcustom gp-helm-min-approvals 2
   "Approvals by OTHER reviewers after which a PR no longer needs yours.
-
-A PR that already has this many approvals from people other than you
-moves out of \"Needs my review\" into \"Covered by others\" -- still
-listed, so you can weigh in anyway, but not counted as pending work.
-
-Your own vote is excluded from the count deliberately: the question is
-whether other people have already covered the review, not how many
-approvals exist in total.  Set to 0 to disable this grouping."
+Such a PR moves from \"Needs my review\" to \"Covered by others\".
+Your own vote is not counted.  Set to 0 to disable this grouping."
   :type 'integer :group 'bitbucket)
 
 (defcustom gp-helm-min-rejections 2
@@ -1560,18 +1323,13 @@ PR moves to \"Covered by others\".  Set to 0 to disable."
 
 (defun gp-helm--others-votes (pr uuid)
   "Return (APPROVED . CHANGES) counted over reviewers other than UUID.
-nil when the per-reviewer breakdown is not available, which callers
-must treat as unknown, NOT as quorum-met -- the data arrives
-asynchronously, and assuming quorum would make rows vanish from the
-pending list and then reappear.
-
-Uses the cached reviewer list rather than `gp-pr-review-tally', whose
-aggregate counts cannot tell the user's own vote from anyone else's."
+nil when the per-reviewer breakdown has not arrived yet, which callers
+must treat as unknown, NOT as quorum-met, or rows would vanish from
+the pending list and then reappear."
   (let ((reviewers (gethash (alist-get 'id pr) gp-helm--reviewers-cache)))
-    (when (eq reviewers 'none) (setq reviewers nil))
-    (when (gethash (alist-get 'id pr) gp-helm--reviewers-cache)
+    (when reviewers
       (let ((a 0) (c 0))
-        (dolist (r reviewers)
+        (dolist (r (unless (eq reviewers 'none) reviewers))
           (unless (and uuid (equal (plist-get r :id) uuid))
             (pcase (plist-get r :state)
               ('approved (setq a (1+ a)))
@@ -1592,7 +1350,6 @@ Unknown vote data (still loading) is never treated as covered."
 
 (defun gp-helm--partition-reviewing (prs uuid)
   "Split PRS into (NEEDS-ACTION APPROVED COVERED) for UUID.
-
 NEEDS-ACTION still wants the user's review; APPROVED are ones they
 already approved; COVERED are ones other reviewers have settled (see
 `gp-helm--covered-by-others-p').  The user's own vote wins over
@@ -1613,7 +1370,7 @@ others have since piled on."
     (setq gp-helm--reviewing-cache nil)
     (gp-reviewing-pull-requests-async
      uuid states
-     ;; on-batch: merge new PRs (dedup by id), refresh the section
+     ;; on-batch: merge new PRs, deduplicated by id.
      (lambda (prs)
        (dolist (pr prs)
          (let ((id (alist-get 'id pr)))
@@ -1622,19 +1379,21 @@ others have since piled on."
              (push pr acc))))
        (setq gp-helm--reviewing-cache (reverse acc))
        (gp-helm--refresh-if-alive))
-     ;; on-done: cache the final result for 5 min, fetch pipelines/reviews/deploys, refresh
      (lambda ()
        (let ((final (reverse acc)))
          (setq gp-helm--reviewing-cache final)
          (gp-cache-put (list 'reviewing uuid states) final)
-         (gp-helm--scan-pipelines-async final)
-         (gp-helm--scan-review-tallies-async final)
-         ;; per-reviewer data too: the quorum split needs to know WHO
-         ;; voted, which the aggregate tally cannot say
-         (gp-helm--scan-reviewers-async final)
-         (gp-helm--scan-comment-resolution-async final)
-         (gp-helm--scan-deploys-async final))
+         (gp-helm--scan-reviewing-badges final))
        (gp-helm--refresh-if-alive)))))
+
+(defun gp-helm--scan-reviewing-badges (prs)
+  "Fetch the badges and per-reviewer votes for reviewing PRS."
+  (gp-helm--scan-pipelines-async prs)
+  (gp-helm--scan-review-tallies-async prs)
+  ;; The quorum split needs WHO voted, which the tally cannot say.
+  (gp-helm--scan-reviewers-async prs)
+  (gp-helm--scan-comment-resolution-async prs)
+  (gp-helm--scan-deploys-async prs))
 
 ;;;; Others' open PRs ---------------------------------------------------------
 
@@ -1703,8 +1462,8 @@ for those)."
 ;;;###autoload
 (defun gp-helm-repo (full-name)
   "List the open pull requests in repo FULL-NAME (\"owner/slug\") with Helm.
-One quick per-repo fetch (cached 5 min), shown in a side window
-rather than full-frame -- handy from the per-repo mode-line count."
+One quick per-repo fetch (cached `gp-cache-ttl'), shown in a side
+window rather than full-frame -- handy from the mode-line count."
   (interactive
    (list (or (and (boundp 'gp-watch--repo) gp-watch--repo)
              (read-string "Repository (owner/slug): "))))
@@ -1712,7 +1471,8 @@ rather than full-frame -- handy from the per-repo mode-line count."
   (let* ((prs (gp-cache-with-cache
                (list 'repo-prs full-name)
                (lambda () (gp-repo-pull-requests full-name))))
-         (gp-helm-full-frame nil))     ;; side window, not whole frame
+         ;; Side window: C-c g/G/m reopen `gp-helm--list' under this binding.
+         (gp-helm-full-frame nil))
     (unless prs
       (user-error "No open pull requests in %s" full-name))
     (helm :sources

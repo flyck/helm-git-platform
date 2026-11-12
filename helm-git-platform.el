@@ -9,7 +9,7 @@
 ;;; Commentary:
 
 ;; A modern, magit-flavoured client for code-review platforms (Bitbucket
-;; Cloud today, with room for other forges behind a backend protocol).
+;; Cloud and GitHub, each behind the `git-platform' backend protocol).
 ;; List the pull requests across your whole workspace, split into "needs my
 ;; review" and "mine"; open a PR's comment thread; jump to the matching
 ;; local checkout and check out its branch; see inline review comments as
@@ -38,8 +38,9 @@
 ;;     (gp-magit-mode 1))           ; PR comments in magit diffs
 ;;
 ;; Nothing is hardcoded to a particular workspace or host: every value is
-;; a defcustom with a Bitbucket-Cloud default.  Credentials fall back to
-;; the environment then `auth-source'; see `bitbucket-api.el'.  Reading
+;; a defcustom (`git-platform-default-backend' picks the forge).
+;; Credentials fall back to the environment then `auth-source'; see
+;; `bitbucket-api.el' and `github-api.el'.  Reading
 ;; the BITBUCKET_* exports out of a shell rc file is an optional macOS
 ;; convenience -- load `bitbucket-env' yourself if you want it (see README).
 
@@ -62,16 +63,12 @@
 (require 'gp-overlay)
 (require 'gp-watch)
 (require 'gp-ui)
-;; magit-diff comment overlays are optional: only if magit is available.
 (when (require 'magit nil t)
   (require 'gp-magit))
-;; helm front-end is optional: only load it if helm is available.
 (when (require 'helm nil t)
   (require 'gp-helm))
 
-;; `bitbucket-env' (importing BITBUCKET_* from a shell rc file) is an
-;; opt-in convenience and is deliberately NOT required here -- load it
-;; yourself if you want it: (require 'bitbucket-env) (bitbucket-env-load).
+;; `bitbucket-env' is opt-in and deliberately NOT required here.
 
 ;;;###autoload
 (autoload 'gp-helm "gp-helm"
@@ -119,16 +116,13 @@
   (interactive)
   (gp-overlay-pr (gp-current-pr)))
 
-;; expose the overlay action from the list/detail keymaps
 (with-eval-after-load 'gp-ui
   (keymap-set gp-list-mode-map "i" #'gp-overlay-current-pr)
   (keymap-set gp-detail-mode-map "i" #'gp-overlay-current-pr)
   (transient-append-suffix 'gp-dispatch '(0 -1)
     '("i" "Inline overlays" gp-overlay-current-pr)))
 
-;; The package used to provide the feature `bitbucket'; keep that name as
-;; an alias so existing `(require 'bitbucket)' and `(with-eval-after-load
-;; 'bitbucket ...)' keep working.
+;; Former feature name, kept so `(require 'bitbucket)' still works.
 (provide 'bitbucket)
 (provide 'helm-git-platform)
 ;;; helm-git-platform.el ends here

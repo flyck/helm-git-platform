@@ -332,10 +332,7 @@ CREATE TABLE IF NOT EXISTS participants (
   '("development" "main" "release/1.0"))
 
 (cl-defmethod gp--backend-name ((_ git-platform-mock))
-  "Report `bitbucket'.
-The mock impersonates Bitbucket's shapes and semantics, so
-backend-keyed configuration (`gp-comment-delete-others') behaves in
-demos exactly as it will against the real thing."
+  "Report `bitbucket', so backend-keyed configuration behaves as live."
   'bitbucket)
 
 (defun gp-mock--reviewer-alist (users)
@@ -350,10 +347,18 @@ demos exactly as it will against the real thing."
   (gp-mock--reviewer-alist (seq-take gp-mock--users 1)))
 
 (cl-defmethod gp--repo-suggested-reviewers ((_ git-platform-mock) _full-name)
-  "The remaining workspace members, standing in for the members endpoint.
-Overrides the Bitbucket implementation this class inherits, which
-would otherwise hit the real network from demo/test runs."
+  "Return the non-default co-workers, standing in for the members endpoint.
+Overrides the inherited Bitbucket method, which would hit the network."
   (gp-mock--reviewer-alist (seq-drop gp-mock--users 1)))
+
+(defun gp-mock--add-reviewer (db pr-id uuid)
+  "Add UUID as a REVIEWER of PR-ID in DB unless already a participant."
+  (sqlite-execute db
+                  "INSERT OR IGNORE INTO participants
+                     (pr_id, user_uuid, user_name, role, state)
+                   VALUES (?,?,?,'REVIEWER',NULL)"
+                  (list pr-id uuid
+                        (or (cdr (assoc uuid gp-mock--users)) uuid))))
 
 (cl-defmethod gp--create-pull-request ((_ git-platform-mock)
                                        full-name source dest title
@@ -374,30 +379,18 @@ would otherwise hit the real network from demo/test runs."
                           source (format "%012x" (+ 100000 (* id 7919)))
                           dest now now))
     (dolist (uuid reviewer-uuids)
-      (sqlite-execute db
-                      "INSERT OR IGNORE INTO participants
-                         (pr_id, user_uuid, user_name, role, state)
-                       VALUES (?,?,?,'REVIEWER',NULL)"
-                      (list id uuid
-                            (or (cdr (assoc uuid gp-mock--users)) uuid))))
+      (gp-mock--add-reviewer db id uuid))
     (gp--pull-request (git-platform-backend) full-name id)))
 
 (cl-defmethod gp--set-pull-request-reviewers ((_ git-platform-mock)
                                               full-name id reviewer-ids
                                               &optional _current-ids)
   "Replace PR ID's REVIEWER participants with REVIEWER-IDS.
-Mirrors Bitbucket's whole-list PUT semantics: reviewers absent from
-REVIEWER-IDS are dropped.  Rows for people who already reviewed keep
-their `state', so re-saving an unchanged list does not silently
-discard an approval."
+Mirrors Bitbucket's whole-list PUT: reviewers absent from REVIEWER-IDS
+are dropped; existing rows keep their `state' (approvals survive)."
   (let ((db (gp-mock--db)))
     (dolist (uuid reviewer-ids)
-      (sqlite-execute db
-                      "INSERT OR IGNORE INTO participants
-                         (pr_id, user_uuid, user_name, role, state)
-                       VALUES (?,?,?,'REVIEWER',NULL)"
-                      (list id uuid
-                            (or (cdr (assoc uuid gp-mock--users)) uuid))))
+      (gp-mock--add-reviewer db id uuid))
     ;; drop the reviewers no longer wanted (leaving non-REVIEWER roles alone)
     (let ((keep (if reviewer-ids
                     (format "AND user_uuid NOT IN (%s)"
@@ -573,8 +566,7 @@ discard an approval."
   (let ((added 0) (removed 0))
     (dolist (line (split-string chunk "\n"))
       (cond
-       ((string-prefix-p "+++" line) nil)
-       ((string-prefix-p "---" line) nil)
+       ((or (string-prefix-p "+++" line) (string-prefix-p "---" line)) nil)
        ((string-prefix-p "+" line) (cl-incf added))
        ((string-prefix-p "-" line) (cl-incf removed))))
     (list :path path
@@ -600,8 +592,7 @@ discard an approval."
           :file-list files)))
 
 (cl-defmethod gp--pull-request-stats-async ((backend git-platform-mock) full-name id pr callback)
-  ;; local sqlite, so there is nothing to wait on -- a short timer keeps the
-  ;; detail view's async ordering (spinner, then fold-in) exercised
+  ;; a short timer keeps the detail view's async ordering exercised
   (let ((stats (gp--pull-request-stats backend full-name id pr)))
     (run-at-time 0.2 nil callback stats)))
 
@@ -704,33 +695,29 @@ discard an approval."
 
 (defun gp-mock--p104 (commit)
   "Return #104's pipeline for COMMIT: gated, running, or done."
-  (cond
-   ((null gp-mock--prod-run-at)
-    (gp-mock--pipeline "{mock-pipe-104}" 231 commit "IN_PROGRESS" "RUNNING"))
-   ((< (- (float-time) gp-mock--prod-run-at) 20)
-    (gp-mock--pipeline "{mock-pipe-104}" 231 commit "IN_PROGRESS" "RUNNING"))
-   (t (gp-mock--pipeline "{mock-pipe-104}" 231 commit
-                         "COMPLETED" "SUCCESSFUL"))))
+  (if (and gp-mock--prod-run-at
+           (>= (- (float-time) gp-mock--prod-run-at) 20))
+      (gp-mock--pipeline "{mock-pipe-104}" 231 commit "COMPLETED" "SUCCESSFUL")
+    (gp-mock--pipeline "{mock-pipe-104}" 231 commit "IN_PROGRESS" "RUNNING")))
 
 (defun gp-mock--p104-steps ()
   "Return #104's steps: the production apply is a manual gate."
-  (append
-   (list (gp-mock--step "{mock-step-plan}" "Terraform plan" "COMPLETED"
-                        :result "SUCCESSFUL" :duration 58)
-         (gp-mock--step "{mock-step-staging}" "Apply staging" "COMPLETED"
-                        :result "SUCCESSFUL" :duration 112))
-   (list
-    (cond
-     ((null gp-mock--prod-run-at)
-      (gp-mock--step "{mock-step-prod}" "Apply production" "PENDING"
-                     :manual t))
-     ((< (- (float-time) gp-mock--prod-run-at) 20)
-      (gp-mock--step "{mock-step-prod}" "Apply production" "IN_PROGRESS"
-                     :manual t
-                     :started (gp-mock--iso-at gp-mock--prod-run-at)))
-     (t
-      (gp-mock--step "{mock-step-prod}" "Apply production" "COMPLETED"
-                     :manual t :result "SUCCESSFUL" :duration 19))))))
+  (list
+   (gp-mock--step "{mock-step-plan}" "Terraform plan" "COMPLETED"
+                  :result "SUCCESSFUL" :duration 58)
+   (gp-mock--step "{mock-step-staging}" "Apply staging" "COMPLETED"
+                  :result "SUCCESSFUL" :duration 112)
+   (cond
+    ((null gp-mock--prod-run-at)
+     (gp-mock--step "{mock-step-prod}" "Apply production" "PENDING"
+                    :manual t))
+    ((< (- (float-time) gp-mock--prod-run-at) 20)
+     (gp-mock--step "{mock-step-prod}" "Apply production" "IN_PROGRESS"
+                    :manual t
+                    :started (gp-mock--iso-at gp-mock--prod-run-at)))
+    (t
+     (gp-mock--step "{mock-step-prod}" "Apply production" "COMPLETED"
+                    :manual t :result "SUCCESSFUL" :duration 19)))))
 
 (defun gp-mock--pipelines-for-pr (id commit)
   "Return the mock pipelines for PR ID with head COMMIT, newest first."
@@ -758,9 +745,8 @@ discard an approval."
     (when max-items (setq pipelines (seq-take pipelines max-items)))
     (bitbucket-pipelines-match-commit pipelines commit)))
 
-;; The mock reads a local sqlite db, so there is nothing to defer: the async
-;; twins just answer straight away.  Callers must already tolerate a
-;; synchronous callback (a warm commit-message cache does the same live).
+;; These async twins answer synchronously; callers must tolerate that (a warm
+;; commit-message cache does the same live).
 (cl-defmethod gp--pipelines-for-branch-async ((backend git-platform-mock) full-name branch
                                               max-items commit callback)
   (funcall callback
@@ -823,9 +809,8 @@ discard an approval."
     (string-join (seq-take gp-mock--test-log-lines n) "\n")))
 
 (cl-defmethod gp--pipeline-step-log-classify-line ((_ git-platform-mock) line)
-  ;; Mock logs use a "$ " command echo (distinct from Bitbucket's "+ ", so a
-  ;; test asserting on the real backend's prefix can't pass against the mock
-  ;; by accident).
+  ;; "$ " (not Bitbucket's "+ ") so tests of the real prefix can't pass
+  ;; against the mock by accident.
   (if (string-prefix-p "$ " line)
       (cons 'command (substring line 2))
     (cons nil line)))
@@ -871,9 +856,9 @@ discard an approval."
 (cl-defmethod gp--pipeline-run-manual-step ((_ git-platform-mock)
                                             _full-name _branch _pipeline step)
   (if (equal (alist-get 'uuid step) "{mock-step-prod}")
-      (progn (setq gp-mock--prod-run-at (float-time)) t)
-    (message "(mock) manual step %S started" (alist-get 'name step))
-    t))
+      (setq gp-mock--prod-run-at (float-time))
+    (message "(mock) manual step %S started" (alist-get 'name step)))
+  t)
 
 (defconst gp-mock--commit-messages
   '(("9d2b7c31e0aa" . "Add gift card model and migrations")

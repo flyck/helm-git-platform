@@ -12,8 +12,7 @@
 ;; Bitbucket and GitHub remotes are both recognised (see
 ;; `gp-local--forge-hosts').
 ;;
-;; Once resolved we can open the project, fetch, and check out the PR's
-;; source branch, all without leaving Emacs.
+;; Once resolved we can open the project and check out the PR's branch.
 
 ;;; Code:
 
@@ -23,10 +22,10 @@
 (declare-function gp-checkout-run "gp-checkout")
 (declare-function gp-checkout-ensure-clone "gp-checkout")
 (declare-function gp-checkout-current-branch "gp-checkout")
-(defvar gp-checkout-clone-base)   ;; defined in gp-checkout.el
+(defvar gp-checkout-clone-base)
 
 (defcustom gp-local-git-root "~/git"
-  "Directory containing local clones of Bitbucket repositories."
+  "Directory containing local clones of forge repositories."
   :type 'directory
   :group 'bitbucket)
 
@@ -53,22 +52,16 @@ e.g. `magit-status' or a projectile switch to taste."
   '((git-platform-bitbucket . "bitbucket\\.org")
     (git-platform-github . "github\\.com"))
   "Backend class -> the remote host regexp it actually talks to.
-Only one `git-platform' backend is active at a time (see
-`git-platform-backend'), so a repo whose remote is on the OTHER
-forge cannot be queried through it -- there is no Bitbucket-shaped
-call that succeeds against api.github.com or vice versa.  Used by
-`gp-local--active-backend-host-p' to recognise that mismatch and
+Only one backend is active at a time, so a repo on the OTHER forge
+cannot be queried; `gp-local--active-backend-host-p' uses this to
 show nothing instead of letting a doomed API call 404.")
 
 (defun gp-local--active-backend-host-p (url)
   "Return non-nil if URL's host matches the currently active backend.
-Nil for a URL on a different (but still recognised) forge, and nil
-for an unrecognised URL -- both cases should read as \"no repo here\"
-to callers, not surface a network error for a repo the active
-backend can never reach.  A backend class with no entry in
-`gp-local--backend-host-alist' (e.g. `git-platform-mock', which
-isn't tied to any real remote at all) matches nothing here; mock
-PRs are never resolved via a local git remote in the first place."
+Nil for another forge's URL or an unrecognised one: both read as
+\"no repo here\".  A backend with no entry in
+`gp-local--backend-host-alist' (e.g. `git-platform-mock') matches
+nothing."
   (when url
     (when-let* ((re (alist-get (eieio-object-class (git-platform-backend))
                                 gp-local--backend-host-alist)))
@@ -78,10 +71,7 @@ PRs are never resolved via a local git remote in the first place."
   "Return \"owner/slug\" parsed from a git remote URL, or nil.
 Handles SSH (git@HOST:owner/slug.git) and HTTPS
 (https://x@HOST/owner/slug.git) forms, but only when HOST matches
-the CURRENTLY ACTIVE backend (see `gp-local--active-backend-host-p')
--- a Bitbucket remote resolves to nil while the GitHub backend is
-active, and vice versa, rather than resolving to a full-name no
-network call against the active backend could ever reach."
+the active backend (see `gp-local--active-backend-host-p')."
   (when (gp-local--active-backend-host-p url)
     (when (string-match "\\(?:bitbucket\\.org\\|github\\.com\\)[:/]\\([^/]+\\)/\\([^/]+?\\)\\(?:\\.git\\)?/?\\'" url)
       (concat (match-string 1 url) "/" (match-string 2 url)))))
@@ -97,11 +87,9 @@ Nil on any non-zero exit or empty output."
 
 (defun gp-local--forge-remote-url (dir)
   "Return a recognised forge remote URL for DIR, preferring `origin', or nil.
-Asks git itself whether DIR is inside a work tree -- so this also
-works in worktrees and submodules, where `.git' is a FILE (a
-gitdir pointer) rather than a directory.  If `origin' is not a
-recognised forge remote (Bitbucket or GitHub), falls back to the
-first remote whose URL is."
+Asks git whether DIR is inside a work tree, so worktrees and
+submodules (where `.git' is a FILE) work too.  If `origin' is not a
+recognised forge remote, falls back to the first remote that is."
   (let ((default-directory (file-name-as-directory
                             (directory-file-name (expand-file-name dir)))))
     (when (equal "true" (gp-local--git-output
@@ -109,16 +97,13 @@ first remote whose URL is."
       (let ((origin (gp-local--git-output "remote" "get-url" "origin")))
         (if (gp-local--forge-host-p origin)
             origin
-          ;; origin missing or not a recognised forge -> scan every remote's URL
           (let ((remotes (gp-local--git-output "remote")))
             (catch 'hit
               (dolist (r (and remotes (split-string remotes "\n" t)))
                 (let ((url (gp-local--git-output "remote" "get-url" r)))
                   (when (gp-local--forge-host-p url)
                     (throw 'hit url))))
-              ;; nothing recognised; still hand back origin so the parse
-              ;; (which rejects unrecognised URLs) decides, keeping old
-              ;; behaviour for other remotes.
+              ;; Nothing recognised: let the parse reject origin.
               origin)))))))
 
 (defun gp-local--dir-remote (dir)
@@ -131,12 +116,8 @@ Works in plain clones, worktrees and submodules."
         cached
       (let ((parsed (gp-local--parse-remote
                      (gp-local--forge-remote-url key))))
-        ;; Only a successful parse is cached.  A nil here is not durably
-        ;; "no repo": `gp-local--parse-remote' also returns nil when the
-        ;; remote is on the forge the ACTIVE backend does not talk to, and
-        ;; the active backend is resolved lazily and memoised on first use
-        ;; (`git-platform-backend').  Caching that nil pins a wrong answer
-        ;; for the rest of the session, long after the backend is right.
+        ;; Cache only successes: nil may just mean the (lazily resolved)
+        ;; active backend is the other forge, and could change later.
         (when parsed
           (puthash key parsed gp-local--remote-cache))
         parsed))))
@@ -155,38 +136,23 @@ is checked first, then any sibling whose remote matches."
          (slug (file-name-nondirectory full-name))
          (fast (expand-file-name slug root)))
     (or
-     ;; fast path: folder named like the slug, with a matching remote
      (when (and (file-directory-p fast)
                 (equal (gp-local--dir-remote fast) full-name))
        fast)
-     ;; full scan: any immediate subdirectory whose remote matches
      (cl-loop for dir in (and (file-directory-p root)
                               (directory-files root t "\\`[^.]" t))
               when (and (file-directory-p dir)
                         (equal (gp-local--dir-remote dir) full-name))
               return dir))))
 
-;; PR field accessors are the protocol functions `gp-pr-full-name',
-;; `gp-pr-source-branch', `gp-pr-destination-branch' (see git-platform.el).
-
 (defun gp-local-anchor-to-checkout (pr)
   "Point the current buffer's `default-directory' at PR's local checkout.
+PR-scoped buffers otherwise inherit an unrelated directory, so
+`find-file', `compile' etc. would default to the wrong repo.
 
-PR-scoped buffers (detail, reviewers, pipeline logs) are created with
-`get-buffer-create', so they inherit `default-directory' from whatever
-buffer happened to be current -- usually unrelated.  Anchoring them to
-the checkout is what makes `find-file', `project-find-file', `compile'
-and shell commands default to the repository the buffer is about;
-`default-directory' is the native mechanism every one of those consults.
-
-Local resolution only: uses `gp-local-find-checkout' (a cached scan of
-`gp-local-git-root') rather than `gp-local-ensure-checkout', so merely
-painting a buffer never clones or switches branches over the network.
-When no clone exists the existing value is left untouched -- an
-inherited directory beats a wrong one.  Returns the directory, or nil.
-
-Because the value is resolved once at buffer creation, a clone that
-appears later is picked up on the next refresh, not retroactively."
+Local resolution only (`gp-local-find-checkout'): painting a buffer
+must never clone or switch branches.  With no clone the existing
+value is left untouched.  Returns the directory, or nil."
   (when-let* ((full-name (ignore-errors (gp-pr-full-name pr)))
               (dir (ignore-errors (gp-local-find-checkout full-name))))
     (setq default-directory (file-name-as-directory dir))))
@@ -227,19 +193,15 @@ checkout exists and cloning is off."
 
 (defun gp-local-ensure-checkout (pr)
   "Ensure PR's repo exists locally and is on its source branch; return the dir.
-
-Fast path: if the repo is already checked out and already on the
-PR's source branch, return immediately -- no git fetch/checkout.
-Only when the repo is missing or on a different branch does it
-clone/switch (a network operation).  This keeps file-visiting and
-comment navigation snappy on repeated use."
+When already checked out on that branch, return at once without any
+git fetch/checkout; otherwise clone/switch (a network operation)."
   (require 'gp-checkout)
   (let* ((full-name (gp-pr-full-name pr))
          (branch (gp-pr-source-branch pr))
          (dir (gp-local-find-checkout full-name)))
     (if (and dir branch
              (equal (gp-checkout-current-branch dir) branch))
-        dir                             ;; already here -- nothing to do
+        dir
       (let ((res (gp-local-checkout-branch pr dir)))
         (unless (plist-get res :ok)
           (user-error "Could not prepare %s: %s"
@@ -250,10 +212,8 @@ comment navigation snappy on repeated use."
   "Check out PR's source branch in its local clone via the checkout service.
 DIR overrides the auto-resolved directory; if there is no local
 clone, one is cloned when `gp-checkout-clone-base' is set.
-Returns the plist from `gp-checkout-run', which carries the :dir
-actually prepared -- that may be a sibling worktree already holding
-the branch rather than the DIR we asked about, so it is taken from
-the result and not overwritten here."
+Returns the plist from `gp-checkout-run'; its :dir (possibly a
+sibling worktree already holding the branch) wins over DIR."
   (require 'gp-checkout)
   (let* ((full-name (gp-pr-full-name pr))
          (branch (gp-pr-source-branch pr))

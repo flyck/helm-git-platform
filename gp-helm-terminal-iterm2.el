@@ -2,9 +2,9 @@
 
 ;;; Commentary:
 
-;; iTerm2 backend for `gp-helm-terminal'. It discovers sessions using AppleScript
-;; variables (`path' and `jobName') and either writes into a matching session or
-;; opens a fresh window in the repo checkout.
+;; iTerm2 backend for `gp-helm-terminal'.  Sessions are discovered by our
+;; `user.gpRepo' session variable, else by the processes on their tty; text
+;; is written into a matching session or a new tab in the repo checkout.
 
 ;;; Code:
 
@@ -66,54 +66,29 @@ Matches each process command's basename against
 
 (defun gp-helm-terminal-iterm2--session-from-fields (fields)
   "Build a terminal session struct from parsed FIELD strings.
-If the session carries our `user.gpRepo' tag (FIELDS index 2) it is used
-as the authoritative repo path and AI marker -- this is stable across the
-AI tool's title rewrites and pty wrappers (e.g. kiro-cli-term) that hide
-the real process from the session's own tty.  Untagged sessions fall back
-to deriving the cwd and job name from the tty's processes."
-  (let ((tag (let ((v (nth 2 fields)))
-               ;; AppleScript renders an unset variable as the literal
-               ;; "missing value"; treat that (and empty) as untagged.
-               (and v (not (string-empty-p v))
-                    (not (string-equal v "missing value"))
-                    v))))
-    (if tag
-        (make-gp-helm-terminal-session
-         :id (nth 0 fields)
-         :path tag
-         ;; A tag means we opened this for an AI tool; mark it as such so
-         ;; `gp-helm-terminal--ai-session-p' keeps it eligible.
-         :job-name "claude"
-         :name (nth 3 fields)
-         :promptp (string-equal (nth 4 fields) "true"))
-      (let ((procs (gp-helm-terminal-iterm2--tty-procs (nth 1 fields))))
-        (make-gp-helm-terminal-session
-         :id (nth 0 fields)
-         :path (gp-helm-terminal-iterm2--procs-cwd procs)
-         :job-name (gp-helm-terminal-iterm2--procs-job procs)
-         :name (nth 3 fields)
-         :promptp (string-equal (nth 4 fields) "true"))))))
+If the session carries our `user.gpRepo' tag (FIELDS index 2) it is the
+authoritative repo path and AI marker: it survives the AI tool's title
+rewrites and pty wrappers (e.g. kiro-cli-term) that hide the real
+process from the tty.  Untagged sessions derive cwd and job from the
+tty's processes."
+  (let* ((tag (let ((v (nth 2 fields)))
+                ;; AppleScript renders an unset variable as "missing value".
+                (and v (not (string-empty-p v))
+                     (not (string-equal v "missing value"))
+                     v)))
+         (procs (unless tag
+                  (gp-helm-terminal-iterm2--tty-procs (nth 1 fields)))))
+    (make-gp-helm-terminal-session
+     :id (nth 0 fields)
+     :path (or tag (gp-helm-terminal-iterm2--procs-cwd procs))
+     ;; A tag means we opened it for an AI tool; keep it eligible.
+     :job-name (if tag "claude" (gp-helm-terminal-iterm2--procs-job procs))
+     :name (nth 3 fields)
+     :promptp (string-equal (nth 4 fields) "true"))))
 
 (defun gp-helm-terminal-iterm2--run-script (lines &rest args)
-  "Run AppleScript LINES with `osascript', passing ARGS.
-Return stdout trimmed, or signal `user-error' with stderr details."
-  (gp-log 'info "iTerm2 AppleScript: %d lines, %d args" (length lines) (length args))
-  (with-temp-buffer
-    (let ((status (apply #'call-process
-                         "osascript" nil (current-buffer) nil
-                         "-l" "AppleScript"
-                         (append (cl-mapcan (lambda (line) (list "-e" line)) lines)
-                                 (cons "--" args)))))
-      (let ((output (string-trim (buffer-string))))
-        (if (and (integerp status) (zerop status))
-            (progn
-              (unless (string-empty-p output)
-                (gp-log 'info "iTerm2 AppleScript output: %s" output))
-              output)
-          (gp-log-error "iTerm2 AppleScript failed (status=%s): %s"
-                        status (if (string-empty-p output) "unknown error" output))
-          (user-error "iTerm2 AppleScript failed: %s"
-                      (if (string-empty-p output) "unknown error" output)))))))
+  "Run AppleScript LINES via `gp-helm-terminal--run-applescript' with ARGS."
+  (apply #'gp-helm-terminal--run-applescript "iTerm2" lines args))
 
 (defun gp-helm-terminal-iterm2--parse-sessions (text)
   "Parse iTerm2 session listing TEXT into session structs."
@@ -148,9 +123,7 @@ Return stdout trimmed, or signal `user-error' with stderr details."
      "try"
      "set sname to (name of s) as string"
      "end try"
-     ;; Our own tag: the repo this session was opened for.  Set via `set
-     ;; variable' on open; survives the AI tool's title rewrites and is
-     ;; invisible to the user.  Used as the primary cwd/AI signal.
+     ;; Our own tag: the repo this session was opened for (set on open).
      "try"
      (format "set gpTag to (variable s named %S)" "user.gpRepo")
      "if gpTag is not missing value then set sjob to (gpTag as string)"
@@ -174,8 +147,8 @@ Return stdout trimmed, or signal `user-error' with stderr details."
 
 (defun gp-helm-terminal-iterm2--call-with-paste-file (text fn)
   "Write TEXT to a temporary file, call FN with its path, then delete it.
-The file-backed path lets iTerm2 paste multi-line input as a single block
-without `write text' pressing Enter on every newline."
+A file-backed paste keeps multi-line input one block; `write text'
+would press Enter on every newline."
   (let ((file (make-temp-file "gp-iterm2-paste-")))
     (unwind-protect
         (progn
@@ -209,7 +182,6 @@ the prompt."
        "tell t to select"
        "tell s"
        "select"
-       ;; File-backed paste preserves embedded newlines as input text.
        "write contents of file payloadFile"
        "if submitFlag is \"true\" then"
        "delay 0.1"
@@ -228,9 +200,8 @@ the prompt."
 
 (defun gp-helm-terminal-iterm2--cd-launch-line (directory command)
   "Return a short shell line that enters DIRECTORY and starts COMMAND.
-When COMMAND is empty, only the `cd' is emitted.  The prompt is delivered
-separately (as a file-backed paste) once the command is ready, so it never
-appears inline here -- keeping the line short and free of newlines."
+When COMMAND is empty, only the `cd' is emitted.  The prompt is pasted
+separately, so this line stays short and free of newlines."
   (let ((cd (format "cd %s" (shell-quote-argument directory))))
     (if (and command (not (string-empty-p command)))
         (format "%s && %s" cd command)
@@ -238,11 +209,9 @@ appears inline here -- keeping the line short and free of newlines."
 
 (defun gp-helm-terminal-iterm2-open-session (directory text command delay submit)
   "Open a new iTerm2 window in DIRECTORY, start COMMAND, and send TEXT.
-The new session is created, COMMAND launched, then after DELAY seconds the
-prompt TEXT is delivered as one file-backed paste (so multi-line prompts
-survive) followed by a submit when SUBMIT is non-nil.  Splitting launch from
-delivery lets an interactive tool such as Claude finish starting up before it
-receives -- and acts on -- the prompt."
+After DELAY seconds (so a tool like Claude has started) TEXT is
+delivered as one file-backed paste, followed by a submit when SUBMIT
+is non-nil.  An empty TEXT sends nothing."
   (let ((cd-launch (gp-helm-terminal-iterm2--cd-launch-line directory command)))
     (gp-helm-terminal-iterm2--call-with-paste-file
      text
@@ -255,9 +224,8 @@ receives -- and acts on -- the prompt."
          "set payloadFile to POSIX file (item 2 of argv)"
          "set submitFlag to item 3 of argv"
          "set repoTag to item 4 of argv"
-         ;; The launch delay is baked into the script as a literal number rather
-         ;; than coerced from a string argv item -- AppleScript's `\"0.6\" as
-         ;; number' fails under decimal-comma locales (error -1700/Can't make).
+         ;; A literal, not an argv string: `\"0.6\" as number' fails under
+         ;; decimal-comma locales (error -1700).
          (format "set launchDelay to %s"
                  (number-to-string (max 0 (or delay 1.0))))
          (format "tell application %S" gp-helm-terminal-iterm2-application)
@@ -271,14 +239,10 @@ receives -- and acts on -- the prompt."
          "end if"
          "delay 0.2"
          "set gpSession to current session of current tab of current window"
-         ;; Tag the session with the repo so later discovery can reuse it.  This
-         ;; survives the AI tool's title rewrites and pty wrappers.
+         ;; Tag the session with the repo so later discovery can reuse it.
          (format "set variable gpSession named %S to repoTag" "user.gpRepo")
          "tell gpSession"
-         ;; Enter the repo and launch the interactive command first.
          "write text cdLaunch"
-         ;; Give the command time to come up before pasting the prompt into it.
-         ;; No prompt (a plain shell) means no paste and no submit.
          "if (item 5 of argv) is \"true\" then"
          "delay launchDelay"
          "write contents of file payloadFile"

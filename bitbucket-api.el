@@ -10,8 +10,8 @@
 ;;
 ;; All network access funnels through `bitbucket-api-request', which can be
 ;; rebound (e.g. with `cl-letf' in tests) to a mock service so that the
-;; higher-level functions in this file and in `bitbucket.el' can be unit
-;; tested without touching the network.  See tests/bitbucket-mock.el.
+;; higher-level functions here and in git-platform-bitbucket.el can be
+;; unit tested offline.  See tests/bitbucket-mock.el.
 ;;
 ;; Credentials are read from the environment by default
 ;; (BITBUCKET_USER_EMAIL, BITBUCKET_API_TOKEN, BITBUCKET_WORKSPACE) so they
@@ -99,9 +99,7 @@ the token in ~/.authinfo.gpg instead of the environment."
 
 (defvar bitbucket--mention-cache (make-hash-table :test 'equal)
   "ACCOUNT-ID -> display name, for resolving @{account_id} comment mentions.
-Unlike `gp--result-cache' (git-platform.el) this never expires on its own -- a
-mentioned user's display name is effectively permanent for our purposes,
-so it is only forgotten via `bitbucket-clear-cache'.")
+Never expires; only `bitbucket-clear-cache' forgets it.")
 
 ;;;; Credentials ------------------------------------------------------------
 
@@ -214,10 +212,9 @@ test mock) to run the whole package offline."
 
 (defun bitbucket--read-response-text (buf)
   "Read HTTP response in BUF into (STATUS . BODY-TEXT); kill BUF.
-The body is decoded as UTF-8 and returned unparsed -- the diff
-endpoint serves text/plain.  Does not signal on HTTP errors; the
-caller inspects STATUS.  `bitbucket--read-response' is the
-JSON-parsing twin and shares this header/body split."
+The body is decoded as UTF-8 and returned unparsed (the diff
+endpoint serves text/plain).  Does not signal on HTTP errors; the
+caller inspects STATUS."
   (unwind-protect
       (with-current-buffer buf
         (goto-char (point-min))
@@ -235,18 +232,8 @@ JSON-parsing twin and shares this header/body split."
   "Parse HTTP response in BUF into (STATUS . PARSED-JSON); kill BUF.
 The body is decoded as UTF-8.  Does not signal on HTTP errors --
 the caller inspects STATUS."
-  (unwind-protect
-      (with-current-buffer buf
-        (goto-char (point-min))
-        (let ((status (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
-                          (string-to-number (match-string 1))
-                        0)))
-          (re-search-forward "\n\n" nil t)
-          (let ((body (decode-coding-string
-                       (buffer-substring-no-properties (point) (point-max))
-                       'utf-8)))
-            (cons status (bitbucket--parse-json body)))))
-    (when (buffer-live-p buf) (kill-buffer buf))))
+  (let ((sc (bitbucket--read-response-text buf)))
+    (cons (car sc) (bitbucket--parse-json (cdr sc)))))
 
 (defun bitbucket-api-get-async (path params callback)
   "GET PATH with PARAMS asynchronously; call CALLBACK with parsed JSON.
@@ -359,7 +346,7 @@ when that argument is non-nil."
       (while next
         (let* ((page (bitbucket-api-request "GET" next next-params))
                (values (alist-get 'values page)))
-          (setq next-params nil)        ;; the "next" link already carries params
+          (setq next-params nil)        ; the "next" link carries params
           (dolist (v values)
             (push v acc)
             (when (and max-items (>= (length acc) max-items))
@@ -369,18 +356,15 @@ when that argument is non-nil."
 
 ;;;; TTL result cache ---------------------------------------------------------
 
-;; The cache itself is provider-agnostic and now lives in git-platform.el
-;; as `gp-cache-*'/`gp-cache-ttl', shared with the GitHub backend and the
-;; UI layers.  These names are kept as aliases so existing callers (and
-;; the dynamic `(let ((bitbucket-cache-ttl 0)) ...)' rebindings sprinkled
-;; through gp-ui.el/git-platform-mock.el/the test suite) keep working
-;; unchanged.
+;; The cache lives in git-platform.el (`gp-cache-*').  These aliases keep
+;; callers and `(let ((bitbucket-cache-ttl 0)) ...)' rebindings working.
 (defvaralias 'bitbucket-cache-ttl 'gp-cache-ttl)
 (defalias 'bitbucket-cache-get #'gp-cache-get)
 (defalias 'bitbucket-cache-put #'gp-cache-put)
 (defalias 'bitbucket-with-cache #'gp-cache-with-cache)
 
-(defvar bitbucket--repo-list-cache nil)   ;; defined fully further down; Bitbucket-only
+(defvar bitbucket--repo-list-cache nil
+  "Cached workspace repo list as (EXPIRY LIMIT . FULL-NAMES).")
 
 (defun bitbucket-cache-clear ()
   "Clear cached PR-list results and Bitbucket's repo list (forces a fresh fetch)."
@@ -430,11 +414,8 @@ network error) are left as-is."
     (replace-regexp-in-string
      "@{\\([^{}]+\\)}"
      (lambda (m)
-       ;; `bitbucket-mention-display-name' runs regex ops of its own (in the
-       ;; cache lookup, the API layer, or a caller's mock); without
-       ;; `save-match-data' those clobber the match data that
-       ;; `replace-regexp-in-string' itself still needs after this function
-       ;; returns, corrupting the rest of the substitution.
+       ;; The lookup may run regexps (API layer, mocks); protect the match
+       ;; data `replace-regexp-in-string' still needs.
        (save-match-data
          (let ((name (bitbucket-mention-display-name (match-string 1 m))))
            (if name (concat "@" name) m))))
@@ -442,12 +423,9 @@ network error) are left as-is."
 
 (defun bitbucket-workspace-pull-requests (&optional uuid state max-items)
   "Return all pull requests in the workspace involving UUID.
-
-This uses the workspace-level endpoint
-/workspaces/{ws}/pullrequests/{uuid}, which returns, in a single
-paginated query, every PR across the whole workspace that the
-user authored or is a reviewer on -- so we never have to iterate
-over individual repositories.
+Uses /workspaces/{ws}/pullrequests/{uuid}: one paginated query across
+all repositories.  It returns authored PRs only; see
+`bitbucket-reviewing-pull-requests' for PRs to review.
 
 UUID defaults to the authenticated user.  STATE defaults to
 \"OPEN\".  MAX-ITEMS caps the number of PRs fetched."
@@ -458,25 +436,19 @@ UUID defaults to the authenticated user.  STATE defaults to
 
 (defun bitbucket--workspace-pull-requests-path (uuid)
   "Return the workspace pull-request endpoint path for UUID.
-UUID defaults to the authenticated user -- note that resolving that
-default is itself a blocking request, so async callers must pass a
-UUID they already hold."
+UUID defaults to the authenticated user; resolving that default is a
+blocking request, so async callers must pass a UUID."
   (format "/workspaces/%s/pullrequests/%s"
           (bitbucket-workspace-value) (or uuid (bitbucket-user-uuid))))
 
 (defun bitbucket--workspace-pull-requests-params (state)
   "Return the query alist for a workspace pull-request listing in STATE.
-Shared by the sync and async variants so the two never drift on the
-`fields' projection -- a field missing from one but not the other
-shows up as a silently blank column in the overview.
+Shared by the sync and async variants so their `fields' projection
+cannot drift (a missing field shows as a blank overview column).
 
-`values.merge_commit.hash' is included even though it is only ever
-populated on a MERGED PR: without it in this projection, Bitbucket's
-list endpoint omits the field entirely (it is not returned unless
-explicitly requested, unlike a single-PR fetch), and
-`gp-pr-merge-commit' silently resolves to nil for every merged PR --
-which is exactly the commit the \"deployed live\" 🚢 badge needs to
-find the pipeline that actually ran post-merge."
+`values.merge_commit.hash' must be requested explicitly: the list
+endpoint omits it otherwise, and `gp-pr-merge-commit' needs it for
+the \"deployed live\" badge on merged PRs."
   `(("state" . ,(or state "OPEN"))
     ("fields" . ,(concat
                   "values.id,values.title,values.state,values.draft,"
@@ -494,14 +466,8 @@ find the pipeline that actually ran post-merge."
 
 (defun bitbucket-workspace-pull-requests-async (callback &optional uuid state max-items)
   "Async twin of `bitbucket-workspace-pull-requests'; CALLBACK gets (OK PRS).
-Truly non-blocking: the workspace endpoint is a single paginated
-query, so this is `bitbucket-api-paged-async' over the same path and
-`fields' projection the synchronous variant uses.
-
-UUID must be supplied by the caller when it is known; falling back to
-`bitbucket-user-uuid' here would block on an identity request before
-the first page is even requested, which is exactly what the async
-path exists to avoid."
+Pass UUID when known: falling back to `bitbucket-user-uuid' blocks
+on an identity request."
   (bitbucket-api-paged-async
    (bitbucket--workspace-pull-requests-path uuid)
    (bitbucket--workspace-pull-requests-params state)
@@ -531,15 +497,9 @@ Only `REVIEWER' participants are counted: approved (state
 
 (defun bitbucket-pr-review-tally-async (pr callback)
   "Fetch PR's id/full-name fresh from Bitbucket, then CALLBACK with its tally.
-`bitbucket-pr-review-tally' reads PR's already-embedded `participants',
-which is exactly the data that goes stale in a cached PR-list entry
-\(see `gp-cache-get' / `gp-helm--reviewing-cache'): another reviewer's
-vote on Bitbucket does not invalidate our list cache, so a badge
-derived from the cached PR object can keep showing a vote that has
-since changed for up to `gp-cache-ttl' seconds.  Refetching PR here --
-bypassing the PR-object cache, not just the list cache -- is what
-makes approvals as fresh as `gp-helm--scan-review-tallies-async''s
-docstring already promises."
+PR's embedded `participants' go stale in a cached PR-list entry (other
+reviewers' votes do not invalidate it), so PR is refetched bypassing
+the cache.  Falls back to PR itself if the fetch fails."
   (let ((full-name (let-alist pr .destination.repository.full_name))
         (id (alist-get 'id pr)))
     (if (not (and full-name id))
@@ -566,11 +526,9 @@ per-reviewer breakdown `gp-helm--covered-by-others-p' relies on."
 
 (defun bitbucket-pr-reviewers (pr)
   "Return PR's `REVIEWER' participants as plists (:id :name :avatar :state).
-STATE is `approved', `changes', or `pending', matching
-`bitbucket-pr-review-tally''s classification of the same data.
-:ID is the account uuid -- the same identifier
-`bitbucket-set-pull-request-reviewers' takes, so a reviewer shown in
-the UI can be mapped back to an API identity."
+STATE is `approved', `changes', or `pending', as classified by
+`bitbucket-pr-review-tally'.  :ID is the account uuid, the identifier
+`bitbucket-set-pull-request-reviewers' takes."
   (let (out)
     (dolist (p (alist-get 'participants pr))
       (when (equal (alist-get 'role p) "REVIEWER")
@@ -597,13 +555,9 @@ no pipeline ran."
 
 (defcustom bitbucket-reviewing-repo-scan-limit 15
   "How many recently-updated repos to scan for PRs awaiting your review.
-
-The workspace pull-request endpoint only returns PRs you authored,
-not ones where you are merely a reviewer, and Bitbucket offers no
-workspace-wide \"reviewing\" query.  So we scan the most recently
-updated repositories (this many) for open PRs that list you as a
-reviewer.  Raise it to cover more repos at the cost of more API
-calls; lower it to go faster."
+Bitbucket has no workspace-wide \"reviewing\" query, so this many of
+the most recently updated repositories are scanned instead.  Higher
+covers more repos at the cost of more API calls."
   :type 'integer
   :group 'bitbucket)
 
@@ -733,10 +687,8 @@ what to keep (e.g. excluding their own)."
 
 (defun bitbucket-pull-request (full-name id)
   "Return the full PR object for FULL-NAME (\"ws/slug\") and PR ID.
-The PR object (title, branches, author, state) changes rarely, so a
-non-nil result is cached under `bitbucket-cache-ttl'; a `g' refresh
-bypasses the cache by binding that TTL to 0.  A nil/error result is
-not cached, so a later open re-fetches."
+A non-nil result is cached under `bitbucket-cache-ttl' (bind it to 0
+to bypass); a nil/error result is not cached."
   (let ((key (list 'pull-request full-name id)))
     (let ((hit (bitbucket-cache-get key)))
       (if (car hit)
@@ -804,11 +756,10 @@ also delete the remote branch.  Requires Pull-requests:Write."
 
 (defun bitbucket-set-pull-request-title (full-name id title)
   "Set the title of PR ID in FULL-NAME to TITLE.
-The endpoint is a whole-object PUT, so the DESCRIPTION has to be resent
-alongside -- the mirror image of `bitbucket-set-pull-request-description'
-resending the title.  Omitting it would silently blank the description.
-Bitbucket only allows mutating OPEN pull requests.  Requires
-Pull-requests:Write.  Returns the updated PR."
+The endpoint is a whole-object PUT, so the description is fetched and
+resent; omitting it would blank it.  Bitbucket only allows mutating
+OPEN pull requests.  Requires Pull-requests:Write.  Returns the
+updated PR."
   (when (or (null title) (string-empty-p (string-trim title)))
     (error "A pull request title cannot be empty"))
   (let ((description (or (alist-get 'description (bitbucket-pull-request full-name id)) "")))
@@ -819,8 +770,7 @@ Pull-requests:Write.  Returns the updated PR."
 (defun bitbucket-set-pull-request-description (full-name id description &optional title)
   "Set the description of PR ID in FULL-NAME to DESCRIPTION.
 PUT replaces the PR, so TITLE is sent to preserve it (fetched when
-not given), for the same reason `bitbucket-set-pull-request-draft'
-does.  Bitbucket only allows mutating OPEN pull requests.  Requires
+not given).  Bitbucket only allows mutating OPEN pull requests.  Requires
 Pull-requests:Write.  Returns the updated PR."
   (let ((title (or title (alist-get 'title (bitbucket-pull-request full-name id)))))
     (bitbucket-api-request
@@ -831,16 +781,13 @@ Pull-requests:Write.  Returns the updated PR."
   "Set PR ID in FULL-NAME's reviewers to exactly REVIEWER-UUIDS.
 The endpoint is a whole-object PUT: the `reviewers' array it receives
 replaces the existing one, so REVIEWER-UUIDS must be the complete
-desired list and not just the additions.  `title' is sent alongside
-for the same reason `bitbucket-set-pull-request-draft' does -- a PUT
-that omits it would blank the title.
+desired list.  `title' is resent since omitting it would blank it.
 
 Bitbucket only allows mutating OPEN pull requests.  Requires
 Pull-requests:Write.  Returns the updated PR.
 
-The array is built as a vector, not a list: `json-encode' renders the
-empty list as `null', which Bitbucket rejects, whereas the empty
-vector gives the `[]' needed to clear every reviewer."
+The array is a vector because `json-encode' renders an empty list as
+`null', which Bitbucket rejects; [] is needed to clear all reviewers."
   (let ((title (alist-get 'title (bitbucket-pull-request full-name id))))
     (bitbucket-api-request
      "PUT" (format "/repositories/%s/pullrequests/%s" full-name id)
@@ -903,32 +850,25 @@ branch to be deleted on merge; REVIEWER-UUIDS is a list of account
 uuids to add as reviewers.  Returns the created PR object.
 Requires a token with Pull-requests:Write; SOURCE must already
 exist on the remote (push it first)."
-  (let ((data (list (cons 'title title)
-                    (cons 'source (list (cons 'branch (list (cons 'name source)))))
-                    (cons 'destination (list (cons 'branch (list (cons 'name dest))))))))
-    (when (and description (not (string-empty-p description)))
-      (setq data (append data (list (cons 'description description)))))
-    (when draft
-      (setq data (append data (list (cons 'draft t)))))
-    (when close-source-branch
-      (setq data (append data (list (cons 'close_source_branch t)))))
-    (when reviewer-uuids
-      (setq data (append data
-                         (list (cons 'reviewers
-                                     (mapcar (lambda (u) (list (cons 'uuid u)))
-                                             reviewer-uuids))))))
-    (bitbucket-api-request
-     "POST" (format "/repositories/%s/pullrequests" full-name)
-     nil data)))
+  (bitbucket-api-request
+   "POST" (format "/repositories/%s/pullrequests" full-name)
+   nil
+   (append `((title . ,title)
+             (source (branch (name . ,source)))
+             (destination (branch (name . ,dest))))
+           (when (and description (not (string-empty-p description)))
+             `((description . ,description)))
+           (when draft '((draft . t)))
+           (when close-source-branch '((close_source_branch . t)))
+           (when reviewer-uuids
+             `((reviewers . ,(mapcar (lambda (u) (list (cons 'uuid u)))
+                                     reviewer-uuids)))))))
 
 (defun bitbucket-repo-default-reviewers (full-name)
   "Return repo FULL-NAME's default reviewers as a list of user alists.
 Each element has at least `uuid' and `display_name'.  Empty list
-when none are configured (needs Repositories:Read).
-
-A non-empty result is cached; an empty result (whether genuinely
-empty or from a transient error) is NOT cached, so a later open
-re-fetches rather than sticking on a stale empty list."
+when none are configured (needs Repositories:Read).  Only a
+non-empty result is cached, so a transient error is not sticky."
   (let ((key (list 'default-reviewers full-name)))
     (let ((hit (bitbucket-cache-get key)))
       (if (car hit)
@@ -944,17 +884,10 @@ re-fetches rather than sticking on a stale empty list."
 
 (defun bitbucket-repo-suggested-reviewers (full-name)
   "Return workspace members of FULL-NAME's workspace as reviewer candidates.
-Bitbucket has no per-PR \"suggested reviewers\" resource, and
-`bitbucket-repo-default-reviewers' only covers reviewers the repo
-admin pre-configured -- so picking any other colleague was
-impossible from the create form.  The workspace member list is the
-closest available candidate pool.
-
-Yourself and anyone already in the default-reviewer list are
-filtered out, so the create form never shows a name twice.  Needs
-Account:Read; failures degrade to an empty list rather than
-breaking the create form.  Cached like the default reviewers, and
-likewise only when non-empty."
+Bitbucket has no per-PR \"suggested reviewers\" resource, so the
+workspace member list is the closest candidate pool.  Yourself and
+default reviewers are filtered out.  Needs Account:Read; failures
+yield an empty list.  Cached only when non-empty."
   (let* ((workspace (car (split-string full-name "/")))
          (key (list 'workspace-members workspace))
          (hit (bitbucket-cache-get key))
@@ -984,13 +917,22 @@ Cheap: requests a single-item page and reads the `size' total."
     (or (alist-get 'size page) 0)))
 
 (defun bitbucket-repo-pull-requests (full-name &optional state)
-  "Return the OPEN pull requests in repo FULL-NAME (one call).
-STATE defaults to \"OPEN\"."
+  "Return pull requests in repo FULL-NAME in STATE (default \"OPEN\")."
   (bitbucket-api-paged
    (format "/repositories/%s/pullrequests" full-name)
    `(("state" . ,(or state "OPEN"))
      ("sort" . "-updated_on")
      ("fields" . ,bitbucket--pr-list-fields))))
+
+(defconst bitbucket--comment-fields
+  (concat "values.id,values.deleted,values.content.raw,"
+          "values.user.display_name,values.user.uuid,"
+          "values.user.links.avatar.href,values.created_on,"
+          "values.resolution.user.display_name,"
+          "values.inline.path,values.inline.from,values.inline.to,"
+          "values.links.html.href,values.pending,"
+          "values.parent.id,next")
+  "Field selector for PR comment listings.")
 
 (defun bitbucket-pull-request-comments (full-name id &optional max-items)
   "Return comments for PR ID in FULL-NAME (\"ws/slug\").
@@ -999,29 +941,15 @@ Deleted comments are filtered out.  MAX-ITEMS caps the count."
    (lambda (c) (alist-get 'deleted c))
    (bitbucket-api-paged
     (format "/repositories/%s/pullrequests/%s/comments" full-name id)
-    `(("fields" . ,(concat
-                    "values.id,values.deleted,values.content.raw,"
-                    "values.user.display_name,values.user.uuid,"
-                    "values.user.links.avatar.href,values.created_on,"
-                    "values.resolution.user.display_name,"
-                    "values.inline.path,values.inline.from,values.inline.to,"
-                    "values.links.html.href,values.pending,"
-                    "values.parent.id,next")))
-     max-items)))
+    `(("fields" . ,bitbucket--comment-fields))
+    max-items)))
 
 (defun bitbucket-pull-request-comments-async (full-name id callback &optional max-items)
   "Fetch comments for PR ID in FULL-NAME asynchronously.
 CALLBACK receives (OK COMMENTS). Deleted comments are filtered out."
   (bitbucket-api-paged-async
    (format "/repositories/%s/pullrequests/%s/comments" full-name id)
-   `(("fields" . ,(concat
-                   "values.id,values.deleted,values.content.raw,"
-                   "values.user.display_name,values.user.uuid,"
-                   "values.user.links.avatar.href,values.created_on,"
-                   "values.resolution.user.display_name,"
-                   "values.inline.path,values.inline.from,values.inline.to,"
-                   "values.links.html.href,values.pending,"
-                   "values.parent.id,next")))
+   `(("fields" . ,bitbucket--comment-fields))
    (lambda (ok comments)
      (funcall callback ok
               (if ok
@@ -1038,9 +966,9 @@ CALLBACK receives (OK COMMENTS). Deleted comments are filtered out."
   (eq (alist-get 'pending comment) t))
 
 (defun bitbucket--comment-data (text &optional inline parent-id pending)
-  "Build the JSON body for a comment write from TEXT and optional
-INLINE/PARENT-ID/PENDING.  Shared by `bitbucket-create-comment' and
-`bitbucket-add-review-batch-comment' so the two never drift."
+  "Return the JSON body for a comment with TEXT.
+INLINE, PARENT-ID and PENDING are as for `bitbucket-create-comment'
+and `bitbucket-add-review-batch-comment'."
   (let ((data `((content . ((raw . ,text))))))
     (when inline
       (push `(inline . ((path . ,(car inline)) (to . ,(cdr inline)))) data))
@@ -1074,18 +1002,15 @@ ever returns it to the user who wrote it until it is unpended (see
 
 (defun bitbucket-review-batch-comments (full-name id)
   "Return the caller's own pending (unsubmitted) comments on PR ID in FULL-NAME.
-Bitbucket only ever returns another user's pending comments as
-invisible, so no UUID filter is needed here -- everything the fetch
-returns with `pending' true is necessarily the caller's own."
+Bitbucket never returns another user's pending comments, so no UUID
+filter is needed."
   (cl-remove-if-not
    (lambda (c) (eq (alist-get 'pending c) t))
    (bitbucket-pull-request-comments full-name id)))
 
 (defun bitbucket-review-batch-comments-async (full-name id callback)
   "Async twin of `bitbucket-review-batch-comments'.  CALLBACK gets the list.
-Bitbucket already returns pending comments inline from the ordinary
-comments fetch, so this reuses that async fetch and filters the
-result rather than issuing a second request."
+Filters the ordinary async comments fetch; no extra request."
   (bitbucket-pull-request-comments-async
    full-name id
    (lambda (ok comments)
@@ -1096,32 +1021,16 @@ result rather than issuing a second request."
 
 (defun bitbucket-submit-review-batch (full-name id &optional event _body)
   "Make every pending review-batch comment visible, then apply EVENT.
-Bitbucket Cloud's public API has NO documented way to un-pend an
-existing comment in place:
-  - `PUT .../comments/{id}' with a `pending' key 400s outright
-    (\"extra keys not allowed\"), confirmed live -- the field this
-    package's own POST sets to create a pending comment cannot be
-    unset through the same resource.
-  - There is no separate \"finish review\" endpoint (that exists only
-    in Bitbucket Data Center, a different product).
-  - The web UI's own \"Finish review\" button calls an *internal*
-    endpoint (`POST bitbucket.org/!api/internal/repositories/.../
-    pullrequests/{id}/review', confirmed by inspecting the browser's
-    network tab), authenticated by browser session cookie rather than
-    an API token -- not reachable from here, and approving/requesting
-    changes was confirmed NOT to trigger it as a side effect (an
-    earlier assumption to that effect was wrong; verified live: the
-    verdict posts successfully but the comment stays pending).
-So instead this recreates each pending comment as an ordinary
-\(non-pending, immediately visible\) one with the same text and inline
-location, then deletes the original pending copy -- fully within the
-documented, token-authenticated public API.  The tradeoff: the
-recreated comment gets a new id and `created_on' (now, not when it
-was originally written); nothing else can have replied to or reacted
-to a pending comment in the meantime, since nobody else could see it,
-so nothing is lost there.  EVENT is `approve', `changes', or nil
-\(comments-only, still meaningful now that un-pending is real work
-rather than a side effect of the verdict)."
+EVENT is `approve', `changes', or nil (comments only).
+
+Bitbucket Cloud's public API cannot un-pend a comment in place: PUT
+with `pending' 400s (\"extra keys not allowed\"), there is no
+\"finish review\" endpoint (Data Center only), the web UI uses an
+internal cookie-authenticated endpoint, and approving does not
+un-pend as a side effect (verified live).  So each pending comment is
+recreated as a visible one with the same text and location, then the
+pending copy is deleted.  The copy gets a new id and `created_on';
+nothing else is lost since nobody else could see the original."
   (dolist (c (bitbucket-review-batch-comments full-name id))
     (let-alist c
       (bitbucket-create-comment
@@ -1207,16 +1116,11 @@ nor requested changes (or is not a participant)."
     state))
 
 (defun bitbucket-pull-request-stats (full-name id &optional pr)
-  "Return a plist (:files N :added N :removed N :commits N) for a PR.
-The diffstat lives at a per-PR signed URL exposed as the PR's
-`links.diffstat.href' (the constructed path 404s), so fetch the
-PR object (or accept it via PR) and follow that link.  Commits
-come from the commits endpoint.
-
-Stats only change when the PR's source commit does, so a non-nil
-result is cached keyed by that commit hash (a `g' refresh binds
-`bitbucket-cache-ttl' to 0 to force a fresh fetch).  When the
-commit hash is unavailable the result is not cached."
+  "Return a plist (:files :added :removed :commits :file-list) for a PR.
+The diffstat lives at the PR's signed `links.diffstat.href' (the
+constructed path 404s), so the PR object is fetched unless given as
+PR.  A non-nil result is cached keyed by the source commit hash; with
+no hash it is not cached."
   (let* ((pr (or pr (bitbucket-pull-request full-name id)))
          (commit (let-alist pr .source.commit.hash))
          (key (and commit (list 'pr-stats full-name id commit)))
@@ -1228,39 +1132,32 @@ commit hash is unavailable the result is not cached."
         stats))))
 
 (defun bitbucket--pull-request-stats-1 (full-name id pr)
-  "Compute the diffstat plist for PR (uncached).
-See `bitbucket-pull-request-stats'."
+  "Compute `bitbucket-pull-request-stats' for PR, uncached."
   (let* ((diffstat-url (let-alist pr .links.diffstat.href))
          (stat (when diffstat-url
                  (bitbucket-api-paged diffstat-url nil)))
          (commits (bitbucket-api-paged
                    (format "/repositories/%s/pullrequests/%s/commits" full-name id)
                    '(("fields" . "values.hash,next")))))
-    (list :files (length stat)
-          :added (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_added s) 0)) stat))
-          :removed (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_removed s) 0)) stat))
-          :commits (length commits)
-          :file-list (mapcar #'bitbucket--diffstat-entry stat))))
+    (bitbucket--stats-plist stat commits)))
+
+(defun bitbucket--stats-plist (stat commits)
+  "Return the stats plist for diffstat entries STAT and COMMITS."
+  (list :files (length stat)
+        :added (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_added s) 0)) stat))
+        :removed (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_removed s) 0)) stat))
+        :commits (length commits)
+        :file-list (mapcar #'bitbucket--diffstat-entry stat)))
 
 (defun bitbucket-pull-request-mergeability (full-name id)
   "Return (MERGEABLE . STATE) for PR ID in FULL-NAME, or nil.
 
-Bitbucket Cloud's PR payload has no mergeability field, and the
-dedicated `.../pullrequests/{id}/conflicts' endpoint rejects this
-package's Atlassian API-token auth (confirmed live: it redirects to
-`.../file-conflicts/{spec}', which answers 404 with header
-`X-Credential-Type: unauthenticated_identity' even though ordinary PR
-reads succeed on the same credentials).
-
-The diffstat this package already fetches for `bitbucket-pull-request-stats'
-carries a per-file `status', which the Bitbucket community has
-reported can read \"merge conflict\" -- so derive mergeability from
-that instead of a second request.  Reuses the same cache (keyed by
-source commit), so this costs nothing extra when stats were already
-loaded.  Not independently verified against a live conflicted PR, so
-treat STATE \"unverified\" as a hint, not a guarantee -- a false
-\"mergeable\" reading here is possible if the status value turns out
-unreliable (see `todo.md')."
+The PR payload has no mergeability field, and the `.../conflicts'
+endpoint rejects API-token auth (404 with `X-Credential-Type:
+unauthenticated_identity', confirmed live).  Instead this reuses the
+cached diffstat from `bitbucket-pull-request-stats', whose per-file
+`status' is reported to read \"merge conflict\".  Not verified against
+a live conflicted PR, hence STATE \"unverified\" (see todo.md)."
   (let* ((pr (bitbucket-pull-request full-name id))
          (stats (and pr (bitbucket-pull-request-stats full-name id pr)))
          (files (plist-get stats :file-list)))
@@ -1273,12 +1170,7 @@ unreliable (see `todo.md')."
 (defun bitbucket-pull-request-stats-async (full-name id pr callback)
   "Fetch the stats plist for PR FULL-NAME/ID asynchronously.
 CALLBACK gets the plist, or nil on error.  Caching matches the
-synchronous `bitbucket-pull-request-stats': keyed by source commit,
-served from cache when warm, and only non-nil results are stored.
-
-Async because this is deferred detail-view data: the synchronous twin
-blocks Emacs for the whole round-trip (two paged fetches), which is
-felt as a freeze after every `g'."
+synchronous `bitbucket-pull-request-stats'."
   (let* ((commit (let-alist pr .source.commit.hash))
          (key (and commit (list 'pr-stats full-name id commit)))
          (hit (and key (bitbucket-cache-get key))))
@@ -1287,7 +1179,7 @@ felt as a freeze after every `g'."
       (let ((diffstat-url (let-alist pr .links.diffstat.href)))
         (if (not diffstat-url)
             (funcall callback nil)
-          ;; two independent paged fetches; join them when both land
+          ;; join the two independent paged fetches
           (let ((stat nil) (commits nil) (pending 2) (failed nil))
             (cl-labels
                 ((done ()
@@ -1295,11 +1187,7 @@ felt as a freeze after every `g'."
                    (when (zerop pending)
                      (let ((stats
                             (unless failed
-                              (list :files (length stat)
-                                    :added (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_added s) 0)) stat))
-                                    :removed (apply #'+ (mapcar (lambda (s) (or (alist-get 'lines_removed s) 0)) stat))
-                                    :commits (length commits)
-                                    :file-list (mapcar #'bitbucket--diffstat-entry stat)))))
+                              (bitbucket--stats-plist stat commits))))
                        (when (and key stats) (bitbucket-cache-put key stats))
                        (funcall callback stats)))))
               (bitbucket-api-paged-async
@@ -1318,13 +1206,9 @@ felt as a freeze after every `g'."
 
 (defun bitbucket-pull-request-diff-async (full-name id commit pr callback)
   "Fetch the unified diff text for PR FULL-NAME/ID asynchronously.
-CALLBACK gets the diff string, or nil on error.  Caching matches the
-synchronous `bitbucket-pull-request-diff': keyed by source COMMIT, and
-an empty diff is never cached so a transient empty response re-fetches.
-
-PR supplies `links.diff.href' -- the constructed /diff path is rejected,
-so the pre-signed link is the only one that works (see
-`bitbucket--pull-request-diff-1')."
+CALLBACK gets the diff string, or nil on error.  Cached keyed by source
+COMMIT; an empty diff is never cached.  PR supplies the pre-signed
+`links.diff.href', since the constructed /diff path is rejected."
   (let* ((key (and commit (list 'pr-diff full-name id commit)))
          (hit (and key (bitbucket-cache-get key))))
     (if (and hit (car hit))
@@ -1378,12 +1262,8 @@ Uses the new path, falling back to the old (for deletions)."
 
 (defun bitbucket-pull-request-diff (full-name id &optional commit)
   "Return the unified diff text for PR ID in FULL-NAME.
-A PR's diff only changes when its source commit does, so when the
-source COMMIT hash is supplied a non-empty result is cached under
-that key; a `g' refresh binds `bitbucket-cache-ttl' to 0 to force
-fresh.  Without COMMIT the result is not cached (we can't key it
-safely).  An empty diff is not cached, so a transient empty
-response is re-fetched."
+A non-empty result is cached keyed by the source COMMIT hash; without
+COMMIT nothing is cached."
   (let* ((key (and commit (list 'pr-diff full-name id commit)))
          (hit (and key (bitbucket-cache-get key))))
     (if (and hit (car hit))
@@ -1395,11 +1275,8 @@ response is re-fetched."
 
 (defun bitbucket--pull-request-diff-1 (full-name id)
   "Fetch the unified diff text for PR ID in FULL-NAME (uncached)."
-  ;; The diff endpoint returns text/plain, not JSON; reuse the request
-  ;; machinery but read the raw body.  The constructed
-  ;; /pullrequests/ID/diff path is rejected (\"you may not have access\")
-  ;; -- like diffstat, the working URL is the PR's pre-signed
-  ;; `links.diff.href', so prefer that and fall back to the path.
+  ;; The constructed /pullrequests/ID/diff path is rejected ("you may not
+  ;; have access"); like diffstat, prefer the pre-signed `links.diff.href'.
   (let* ((url (or (ignore-errors
                     (let-alist (bitbucket-pull-request full-name id)
                       .links.diff.href))
@@ -1438,9 +1315,8 @@ Drafts are included in whichever side they fall on; use
 
 (defun bitbucket-categorize-pull-requests (prs uuid)
   "Categorise PRS for UUID into a plist (:reviewing :mine :drafts).
-A draft authored by the user goes to :drafts; non-draft authored
-PRs to :mine; everything else (PRs the user reviews) to
-:reviewing.  Order within each group is preserved."
+Authored drafts go to :drafts, other authored PRs to :mine, the rest
+to :reviewing.  Order within each group is preserved."
   (let (mine reviewing drafts)
     (dolist (pr prs)
       (cond
@@ -1489,9 +1365,8 @@ Repositories:Read)."
 
 (defun bitbucket-commit-message-async (full-name hash callback)
   "Fetch the commit message for HASH in FULL-NAME; CALLBACK gets it (or nil).
-Shares `bitbucket-commit-message's cache, so a warm entry answers
-without any network round-trip -- CALLBACK is then invoked directly,
-NOT deferred to a timer (callers must tolerate a synchronous call)."
+Shares `bitbucket-commit-message's cache; on a hit CALLBACK runs
+synchronously, not deferred, and callers must tolerate that."
   (if (not (and full-name hash))
       (funcall callback nil)
     (let* ((key (list 'commit-msg full-name hash))
@@ -1503,8 +1378,7 @@ NOT deferred to a timer (callers must tolerate a synchronous call)."
          '(("fields" . "message"))
          (lambda (parsed)
            (let ((msg (and parsed (alist-get 'message parsed))))
-             ;; only cache a real answer: caching nil would pin a transient
-             ;; failure for the whole TTL
+             ;; caching nil would pin a transient failure for the whole TTL
              (when msg (gp-cache-put key msg))
              (funcall callback msg))))))))
 
@@ -1530,10 +1404,8 @@ unchanged."
 
 (defun bitbucket-pipelines-for-branch (full-name branch &optional max-items commit)
   "Return pipelines in FULL-NAME for BRANCH, newest first.
-When COMMIT is non-nil, only pipelines whose target commit matches
-it are returned -- a PR's relevant pipelines are the ones for its
-current head commit, not every run on the branch.  Caps the
-*fetched* set at MAX-ITEMS (default 20) before the commit filter."
+When COMMIT is non-nil, only pipelines targeting it are returned.
+MAX-ITEMS (default 20) caps the fetched set before the commit filter."
   (when (and full-name branch)
     (bitbucket-pipelines-match-commit
      (bitbucket-api-paged
@@ -1608,12 +1480,9 @@ with Pipelines:Write."
 
 (defun bitbucket-pipeline-run-manual-step (full-name branch pipeline step)
   "Run a waiting manual STEP of PIPELINE in FULL-NAME on BRANCH.
-Bitbucket Cloud has no public per-step run endpoint -- the web UI's
-play button calls an internal API, and POSTing to
-.../steps/STEP-UUID/run returns 404.  The only documented way to
-advance a manual step is to re-trigger its pipeline with the custom
-selector naming the pipeline pattern, which starts a NEW pipeline
-run.  Errors unless STEP is a manual step.  Requires Pipelines:Write."
+There is no public per-step run endpoint, so this re-triggers the
+pipeline with its custom selector, which starts a NEW pipeline run.
+Errors unless STEP is a manual step.  Requires Pipelines:Write."
   (unless (bitbucket-pipeline-step-manual-p step)
     (user-error "Step %S is not a manual step"
                 (or (alist-get 'name step) "?")))
@@ -1624,8 +1493,7 @@ run.  Errors unless STEP is a manual step.  Requires Pipelines:Write."
 (defun bitbucket-pipeline-step-log (full-name pipeline-uuid step-uuid)
   "Return the captured log text for STEP-UUID of PIPELINE-UUID in FULL-NAME.
 Returns an empty string when the step has produced no log yet.  The
-endpoint returns text/plain, so this reads the raw body (like the
-diff endpoint) rather than parsing JSON."
+endpoint serves text/plain, so the raw body is returned."
   (when (and full-name pipeline-uuid step-uuid)
     (let* ((url (bitbucket--build-url
                  (format "/repositories/%s/pipelines/%s/steps/%s/log"
@@ -1643,7 +1511,7 @@ diff endpoint) rather than parsing JSON."
               (if (save-excursion
                     (re-search-forward "^HTTP/[0-9.]+ 404"
                                        (line-end-position) t))
-                  ""                    ;; no log produced yet
+                  ""                    ; no log produced yet
                 (re-search-forward "\n\n" nil t)
                 (decode-coding-string
                  (buffer-substring-no-properties (point) (point-max)) 'utf-8)))

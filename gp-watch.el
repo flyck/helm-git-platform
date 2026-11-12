@@ -11,18 +11,16 @@
 ;; The pipeline on `find-file', all early-exit and cached:
 ;;
 ;;   1. Is the file under a git repo with a known-forge remote?
-;;      -> `gp-local--dir-remote', memoised here for ONE DAY since
-;;         a checkout's origin essentially never changes.
+;;      -> `gp-local--dir-remote'; a hit is memoised for a day, a miss
+;;         only briefly (`gp-watch-repo-negative-cache-ttl').
 ;;   2. What branch is checked out?  (cheap git call)
 ;;   3. Is there an OPEN PR whose source branch is that branch?
 ;;      -> short-cached per (repo,branch).
 ;;   4. Does that PR have inline comments for THIS file?
-;;      -> short-cached per PR; only then do we draw overlays and turn on
-;;         `gp-overlay-mode'.
+;;      -> only then do we draw overlays and turn on `gp-overlay-mode'.
 ;;
-;; If any step says no, the mode stays dormant for that buffer -- no
-;; overlays, no mode-line noise.  Step 1's repo membership and the open-PR
-;; count are also surfaced in the mode line.
+;; If any step says no, the mode stays dormant for that buffer.  Magit
+;; buffers run steps 1-3 too, for the mode line.
 
 ;;; Code:
 
@@ -37,8 +35,6 @@
 (declare-function gp-helm-repo-branch "gp-helm")
 (declare-function gp-helm-repo "gp-helm")
 (declare-function gp-show-pr "gp-ui")
-;; Forward declaration: the minor-mode variable is defined below but
-;; referenced by the activation helper above its definition.
 (defvar gp-watch-mode)
 (defvar magit-mode-hook)
 (defvar magit-post-refresh-hook)
@@ -50,10 +46,8 @@
 
 (defcustom gp-watch-repo-negative-cache-ttl 60
   "Seconds to cache a FAILED repo lookup for a directory (default 1 minute).
-Shorter than `gp-watch-repo-cache-ttl' on purpose: a failure can mean the
-directory is not a forge repo, but it can equally mean the active backend
-does not talk to that remote's forge, which is a condition that changes
-within a session."
+Short on purpose: a failure can also mean the active backend does not
+talk to that remote's forge, which can change within a session."
   :type 'integer
   :group 'bitbucket)
 
@@ -88,7 +82,7 @@ within a session."
 ;;;; Generic TTL cache -------------------------------------------------------
 
 (defun gp-watch--now ()
-  "Current time as a float."
+  "Return the current time as a float, via `gp-watch-now-function'."
   (funcall gp-watch-now-function))
 
 (defun gp-watch--cache-get (table key)
@@ -113,26 +107,29 @@ A stored `none' represents a cached negative; it is returned as nil."
 
 ;;;; Resolution steps (each cached) ------------------------------------------
 
+(defun gp-watch--path-dir (path)
+  "Return PATH as a directory: itself if one, else its parent; nil for nil."
+  (when path
+    (let ((expanded (expand-file-name path)))
+      (if (file-directory-p expanded)
+          (file-name-as-directory expanded)
+        (file-name-directory expanded)))))
+
 (defun gp-watch--repo-for-path (path)
   "Return the repo \"ws/slug\" for PATH, or nil.
 PATH may be a file or directory.  A hit is cached for
 `gp-watch-repo-cache-ttl', a miss only for
 `gp-watch-repo-negative-cache-ttl'."
   (when path
-    (let* ((expanded (expand-file-name path))
-           (dir (if (file-directory-p expanded)
-                    (file-name-as-directory expanded)
-                  (file-name-directory expanded)))
+    (let* ((dir (gp-watch--path-dir path))
            (root (and dir (or (locate-dominating-file dir ".git") dir)))
            (key (directory-file-name (expand-file-name root)))
            (cached (gp-watch--cache-get gp-watch--repo-cache key)))
       (if (not (eq cached 'miss))
           cached
         (let ((full-name (gp-local--dir-remote key)))
-          ;; A hit is a durable fact about the directory and gets the full
-          ;; TTL.  A miss is not: it also happens when the active backend
-          ;; talks to the other forge (see `gp-local--dir-remote'), so a
-          ;; day-long negative would outlive the condition that caused it.
+          ;; A miss may only mean the active backend talks to the other
+          ;; forge, so it must not be cached as long as a hit.
           (gp-watch--cache-put
            gp-watch--repo-cache key full-name
            (if full-name gp-watch-repo-cache-ttl
@@ -144,11 +141,7 @@ PATH may be a file or directory.  A hit is cached for
   "Return the git branch checked out for PATH's repo, or nil.
 PATH may be a file or directory."
   (require 'gp-checkout)
-  (let* ((expanded (and path (expand-file-name path)))
-         (dir (and expanded
-                   (if (file-directory-p expanded)
-                       (file-name-as-directory expanded)
-                     (file-name-directory expanded))))
+  (let* ((dir (gp-watch--path-dir path))
          (root (and dir (locate-dominating-file dir ".git"))))
     (when root (gp-checkout-current-branch root))))
 
@@ -210,7 +203,6 @@ PR for the current branch -- shown as a clickable comment counter."
                            'help-echo "Open PRs in this repo — click to list"
                            'mouse-face 'mode-line-highlight
                            'local-map gp-watch--modeline-count-map)))
-     ;; clickable comment counter for the current-branch PR
      (when pr
        (let ((n (or (alist-get 'comment_count pr) 0)))
          (concat
@@ -231,13 +223,10 @@ PR for the current branch -- shown as a clickable comment counter."
         (gp-watch--format-mode-line count pr))
   (force-mode-line-update))
 
-(declare-function gp-show-pr "gp-ui")
-
 (defun gp-watch-visit-branch-pr ()
   "Open the detail page for the current buffer's branch PR.
-Bound to the mode-line comment counter.  The \"@\" in the
-`interactive' spec selects the window whose mode line was clicked,
-so the correct buffer's branch PR is used."
+Bound to the mode-line comment counter.  The \"@\" interactive spec
+selects the window whose mode line was clicked."
   (interactive "@")
   (let ((pr gp-watch--branch-pr)
         (full-name gp-watch--repo)
@@ -254,14 +243,12 @@ so the correct buffer's branch PR is used."
                        (lambda (candidate)
                          (equal (gp-pr-source-branch candidate) branch))
                        prs)))
-        (pcase (length matches)
-          (0 (require 'gp-ui)
-             (gp-show-pr pr))
-          (1 (require 'gp-ui)
-             (gp-show-pr (car matches)))
-          (_ (if (fboundp 'gp-helm-repo-branch)
-                 (gp-helm-repo-branch full-name branch)
-               (user-error "Multiple pull requests found for branch %s" branch)))))))))
+        (if (cdr matches)
+            (if (fboundp 'gp-helm-repo-branch)
+                (gp-helm-repo-branch full-name branch)
+              (user-error "Multiple pull requests found for branch %s" branch))
+          (require 'gp-ui)
+          (gp-show-pr (or (car matches) pr))))))))
 
 ;;;; Per-buffer activation ---------------------------------------------------
 
@@ -296,8 +283,6 @@ this file.  Errors are swallowed so opening files never breaks."
                      (pr (gp-watch--pr-for full-name branch)))
                 (setq gp-watch--repo full-name)
                 (gp-watch--update-mode-line count pr)
-                ;; only draw when on a visited file that's on a PR branch
-                ;; and comments exist here.
                 (when (and pr buffer-file-name)
                   (gp-watch--overlay-if-comments pr full-name)))
             (gp-watch--clear-buffer-state))
@@ -329,7 +314,6 @@ overlays are drawn yet."
   (let ((pr gp-watch--branch-pr))
     (unless pr
       (user-error "No open pull request for this file's branch"))
-    ;; gp-overlay-new-comment composes at point; it reads gp-overlay--pr
     (setq gp-overlay--pr pr)
     (gp-overlay-new-comment)))
 
@@ -341,7 +325,7 @@ overlays are drawn yet."
 ;;;; Global mode -------------------------------------------------------------
 
 (defun gp-watch--find-file-hook ()
-  "Entry from `find-file-hook'."
+  "Run `gp-watch--maybe-activate' from `find-file-hook'."
   (gp-watch--maybe-activate))
 
 (defun gp-watch--magit-refresh-hook ()
@@ -379,7 +363,6 @@ file line at point (when the file belongs to an open PR), and
         (with-eval-after-load 'magit
           (add-hook 'magit-post-refresh-hook #'gp-watch--magit-refresh-hook)
           (add-hook 'magit-mode-hook #'gp-watch--magit-refresh-hook))
-        ;; activate for already-open file buffers too
         (dolist (buf (buffer-list))
           (gp-watch--maybe-activate buf)))
     (remove-hook 'find-file-hook #'gp-watch--find-file-hook)

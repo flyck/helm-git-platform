@@ -46,9 +46,7 @@
 (require 'cl-lib)
 (require 'auth-source)
 (require 'gp-log)
-;; for the provider-agnostic TTL cache (`gp-cache-get'/`gp-cache-put'),
-;; same dependency direction `bitbucket-api.el' already takes
-(require 'git-platform)
+(require 'git-platform)                 ; `gp-cache-get'/`gp-cache-put'
 
 (defcustom github-api-host "api.github.com"
   "Host of the GitHub REST API."
@@ -81,10 +79,8 @@
 When nil, falls back first to the variable named by
 `github-api-token-env', then to `auth-source' (host
 `github-api-host') so you can keep the token in ~/.authinfo.gpg
-instead of the environment.  Unlike Bitbucket, a token is optional:
-unauthenticated requests are sent (without an Authorization header)
-when none is configured, which works for read-only access to public
-repos."
+instead of the environment.  A token is optional: without one,
+requests go out unauthenticated, which works for reading public repos."
   :type '(choice (const :tag "From environment / auth-source" nil) string)
   :group 'bitbucket)
 
@@ -194,10 +190,7 @@ BODY is the UTF-8 decoded response body."
   "Request-body keys whose values are replaced before logging.")
 
 (defun github--redact-for-log (data)
-  "Render DATA for the log, replacing any credential-shaped value.
-A request body is normally innocuous (a comment body, a path, a line),
-but it is not worth risking a token reaching a buffer the user pastes
-into an issue report."
+  "Render DATA for the log, replacing any credential-shaped value."
   (let ((printed
          (cond
           ((and (consp data) (consp (car data)))
@@ -217,13 +210,9 @@ Non-strings (including the `:null' the JSON parser yields for an
 empty body) are returned unchanged, so callers can normalise first
 and type-check afterwards.
 
-GitHub's web UI submits its textareas as part of an HTML form, and
-the HTML spec mandates CRLF for textarea line breaks; the REST API
-then hands that body back verbatim.  So every piece of text a human
-typed into github.com -- PR bodies, issue and review comment bodies,
-commit messages written in the web editor -- arrives with CRLF, which
-would otherwise render as stray ^M in the detail buffer.  Bitbucket
-normalises to LF server-side, which is why this is GitHub-only.
+Text typed into github.com's web forms (PR bodies, comments, web-editor
+commit messages) comes back from the API with CRLF, per the HTML
+textarea spec, and would otherwise render as stray ^M.
 
 Deliberately NOT applied to diffs/patch text or Action logs: there a
 carriage return can be part of the content being shown."
@@ -269,9 +258,7 @@ mock) to run the whole client offline."
                   "%s %s -> %d (%.0fms)" method path
                   status (* 1000 (- (float-time) start))))
         (when (or (< status 200) (>= status 300))
-          ;; The request payload is the diagnostic on a write failure -- a 422
-          ;; names the field it rejected, which only means something next to
-          ;; the value that was sent.
+          ;; A 422 names the rejected field; log the payload to make it useful.
           (when data
             (gp-log-error "  sent: %s" (github--redact-for-log data)))
           (gp-log-error "  body: %s" (string-trim body))
@@ -487,24 +474,16 @@ instead of failing the whole fetch.  CALLBACK runs exactly once."
 
 ;;;; Pull requests ----------------------------------------------------------------
 
-(defconst github--issue-search-fields "is:pr"
-  "Base search-qualifier applied to every issue-search PR query.")
-
 (defun github--full-name-of-search-hit (hit)
-  "Return \"owner/repo\" for search HIT (an /search/issues item).
-The search API only gives the issue's `repository_url', not a
-`repository' object, so the owner/repo has to be parsed out of it."
+  "Return \"owner/repo\" parsed from search HIT's `repository_url'."
   (let ((url (alist-get 'repository_url hit)))
     (when (and url (string-match "/repos/\\(.+\\)\\'" url))
       (match-string 1 url))))
 
 (defun github--search-pull-requests (q &optional max-items)
   "Run issue-search Q (a GitHub search qualifier string), fetch full PRs.
-The search API returns issue-shaped hits, not full PR objects (no
-head/base branch, no requested reviewers, no draft flag) -- so each
-hit is followed up with a real PR fetch.  This costs one extra
-request per result, but there is no server-side field projection
-like Bitbucket's `fields' parameter to avoid it."
+Search hits are issue-shaped (no head/base, reviewers or draft flag),
+so each hit costs one follow-up PR fetch."
   (let ((hits (github-api-paged "/search/issues"
                                 `(("q" . ,q) ("per_page" . "100"))
                                 max-items)))
@@ -522,35 +501,24 @@ like Bitbucket's `fields' parameter to avoid it."
 STATE is \"OPEN\"/\"MERGED\"/\"DECLINED\"-shaped like Bitbucket's, but
 GitHub search only distinguishes open/closed -- \"MERGED\"/\"DECLINED\"
 are both mapped to a closed-PR search, and the caller can tell them
-apart afterwards via `github-pr-draft-p'/`merged_at'."
+apart afterwards via `merged_at'."
   (github--search-pull-requests
    (github--workspace-pr-query (or login (github-user-login)) state)
    max-items))
 
 (defun github--workspace-pr-query (login state)
-  "Return the issue-search query for LOGIN's PRs in STATE.
-Shared by the sync and async listings so the two cannot drift on which
-PRs they consider in scope."
+  "Return the issue-search query for LOGIN's PRs in STATE."
   (format "is:pr author:%s %s"
           login
           (if (or (null state) (equal state "OPEN")) "is:open" "is:closed")))
 
 (defun github--search-pull-requests-async (q callback &optional max-items)
   "Async twin of `github--search-pull-requests'; CALLBACK gets (OK PRS).
-Genuinely non-blocking, in two chained async stages: the issue search
-itself, then one `github-pull-request-async' per hit to turn the
-issue-shaped hits into full PR objects (the search API returns no
-head/base branch, reviewers or draft flag).
+Genuinely non-blocking: the search, then one `github-pull-request-async'
+per hit.  Wrapping the sync version in a timer would only relocate the
+freeze, so every hit must go through the async fetch too.
 
-Wrapping the synchronous version in a timer instead would NOT do:
-each stage is its own blocking request, so a timer just relocates the
-multi-second freeze -- Emacs never reaches redisplay, and the caller's
-spinner stays invisible.  Every hit must therefore go through the
-async fetch too, not just the search.
-
-Individual PR fetches that fail are dropped, mirroring the
-`ignore-errors' in the synchronous variant: one unreadable repo
-should not lose the whole list.  CALLBACK runs exactly once, after
+PR fetches that fail are dropped.  CALLBACK runs exactly once, after
 the last outstanding fetch settles."
   (github-api-paged-async
    "/search/issues"
@@ -566,9 +534,7 @@ the last outstanding fetch settles."
                                  (and full-name number (cons full-name number))))
                              hits)))
               (pending (length targets))
-              ;; Preserve the search's ordering (relevance/recency) rather
-              ;; than letting completion order decide: fill a fixed-length
-              ;; vector by index, since the fetches finish out of order.
+              ;; Fill by index to keep search order; fetches finish out of order.
               (slots (make-vector (length targets) nil)))
          (if (zerop pending)
              (funcall callback t nil)
@@ -587,13 +553,9 @@ the last outstanding fetch settles."
 
 (defun github-workspace-pull-requests-async (callback &optional login state max-items)
   "Async twin of `github-workspace-pull-requests'; CALLBACK gets (OK PRS).
-Truly non-blocking, via `github--search-pull-requests-async'.
-
-LOGIN must be supplied by the caller when known: resolving the
-default through `github-user-login' is itself a blocking request, and
-doing it here would freeze Emacs before the first async stage even
-starts -- exactly what this exists to avoid.  When LOGIN is nil the
-lookup is deferred onto a timer so the caller can still paint first."
+Pass LOGIN when known: resolving it via `github-user-login' blocks.
+When LOGIN is nil that lookup is deferred onto a timer so the caller
+can still paint first."
   (if login
       (github--search-pull-requests-async
        (github--workspace-pr-query login state) callback max-items)
@@ -610,9 +572,7 @@ lookup is deferred onto a timer so the caller can still paint first."
 
 (defun github-reviewing-pull-requests (&optional login limit states)
   "Return PRs across GitHub where LOGIN is a requested reviewer.
-LIMIT is accepted for signature parity with the Bitbucket op (which
-uses it to cap a repo scan) but GitHub's search already covers the
-whole account in one query, so it is applied as MAX-ITEMS instead.
+LIMIT caps the number of search results.
 STATES nil/(\"OPEN\") means open only; `all' means both."
   (let* ((login (or login (github-user-login)))
          (open-p (or (null states) (equal states '("OPEN"))))
@@ -622,12 +582,9 @@ STATES nil/(\"OPEN\") means open only; `all' means both."
 
 (defun github-reviewing-pull-requests-async (login states on-batch on-done &optional limit)
   "Async twin of `github-reviewing-pull-requests'.
-GitHub's search is already a single global query (unlike Bitbucket's
-per-repo fan-out), so this just runs synchronously on a timer and
-delivers everything as one batch.  Uses a wall-clock `run-at-time',
-NOT `run-with-idle-timer' -- see `github-pull-request-comments-async'
-for why: ongoing `url-retrieve' I/O elsewhere can starve idle timers
-scheduled around the same moment, silently never firing this scan."
+Runs the single global search on a timer and delivers one batch.
+Uses `run-at-time', NOT `run-with-idle-timer': ongoing `url-retrieve'
+I/O can starve idle timers so the scan never fires."
   (run-at-time
    0 nil
    (lambda ()
@@ -641,13 +598,10 @@ scheduled around the same moment, silently never firing this scan."
 
 (defun github-open-pull-requests-async (states on-batch on-done &optional limit)
   "Async scan of ALL open PRs across every repo the token can see.
-GitHub has no single \"every open PR\" query scoped usefully without
-naming an org/user, so this searches PRs involving the authenticated
-user as a broad stand-in (mirrors `github-reviewing-pull-requests'
-without the reviewer restriction) -- good enough for the \"others'
-open PRs\" list in a personal/demo setting.  Uses a wall-clock
-`run-at-time', NOT `run-with-idle-timer' -- see
-`github-pull-request-comments-async' for why."
+GitHub has no useful unscoped \"every open PR\" query, so this
+searches PRs involving the authenticated user as a stand-in.  Uses
+`run-at-time', NOT `run-with-idle-timer' (see
+`github-reviewing-pull-requests-async')."
   (let ((login (ignore-errors (github-user-login))))
     (run-at-time
      0 nil
@@ -665,21 +619,13 @@ open PRs\" list in a personal/demo setting.  Uses a wall-clock
           (funcall on-done)))))))
 
 (defun github--reshape-pr (pr)
-  "Return PR with `id' overwritten to hold its per-repo `number'.
-Every `gp-*' caller (approve, comments, draft-toggle, the detail
-view's re-fetch, …) treats `(alist-get \\='id pr)' as THE identifier
-to hand back to the backend's own endpoints -- correct for Bitbucket,
-where `id' genuinely is the value its PR URLs take. GitHub's PR `id'
-is a global, opaque database id that no per-repo endpoint accepts;
-the value every GitHub endpoint actually wants is `number'. Rather
-than change every `id' call site in gp-ui.el, every PR object handed
-back across the protocol boundary is reshaped here so `id' already
-holds `number' -- the rest of the app never needs to know GitHub
-draws this distinction.  The original database id survives under
-`gh-database-id' in case something ever needs it."
+  "Return a copy of PR with `id' overwritten to hold its per-repo `number'.
+Callers treat `id' as the identifier to hand back to the backend, but
+GitHub's PR `id' is a global database id no per-repo endpoint accepts.
+The original survives under `gh-database-id'.  The body's newlines are
+normalised too."
   (when pr
     (let* ((number (alist-get 'number pr))
-           ;; Copy first: never mutate the alist the caller handed us.
            (pr (copy-alist pr))
            (body (assq 'body pr)))
       (when body (setcdr body (github--normalize-newlines (cdr body))))
@@ -730,9 +676,7 @@ one per reviewer counts toward the current approval state."
 REVIEWS is the raw review list (as from `github--pr-reviews'),
 REQUESTED-LOGINS the PR's `requested_reviewers' logins.  Counts each
 reviewer's most recent review only, plus any reviewer still
-requested but who has not submitted a review at all (pending).
-Shared by `github-pr-review-tally' (sync) and
-`github-pr-review-tally-async' so the two can never drift."
+requested but who has not submitted a review at all (pending)."
   (let* ((latest (github--latest-review-per-user reviews))
          (approved 0) (changes 0) (pending 0))
     (dolist (kv latest)
@@ -747,8 +691,7 @@ Shared by `github-pr-review-tally' (sync) and
 
 (defun github-pr-review-tally (pr)
   "Return a plist (:approved N :changes N :pending N) over PR's reviews.
-Fetches synchronously -- see `gp-pr-review-tally-async' for a
-non-blocking twin suited to rendering many PRs at once."
+Fetches synchronously; see `github-pr-review-tally-async'."
   (let* ((full-name (let-alist pr .base.repo.full_name))
          (number (alist-get 'number pr))
          (reviews (and full-name number (github--pr-reviews full-name number)))
@@ -757,8 +700,7 @@ non-blocking twin suited to rendering many PRs at once."
     (github--review-tally-from reviews requested)))
 
 (defun github-pr-review-tally-async (pr callback)
-  "Fetch PR's review tally asynchronously; CALLBACK gets the plist.
-Non-blocking twin of `github-pr-review-tally'."
+  "Fetch PR's review tally asynchronously; CALLBACK gets the plist."
   (let* ((full-name (let-alist pr .base.repo.full_name))
          (number (alist-get 'number pr))
          (requested (mapcar (lambda (u) (alist-get 'login u))
@@ -778,11 +720,8 @@ REVIEWS is the raw review list; REQUESTED-REVIEWERS is the PR's
 no review to carry their avatar).  Counts only the most recent
 review per person, like `github--review-tally-from'.
 
-:ID is the login -- the identifier
-`github-set-pull-request-reviewers' takes -- so a reviewer shown in
-the UI maps back to an API identity.  It equals :NAME here (GitHub
-has no separate display name on these payloads); the two are kept
-distinct because the Bitbucket side's :ID is an opaque uuid."
+:ID is the login `github-set-pull-request-reviewers' takes.  It equals
+:NAME here, but is kept distinct because Bitbucket's :ID is a uuid."
   (let ((latest (github--latest-review-per-user reviews))
         (reviewed-logins (make-hash-table :test 'equal))
         out)
@@ -807,7 +746,7 @@ distinct because the Bitbucket side's :ID is an opaque uuid."
 
 (defun github-pr-reviewers-async (pr callback)
   "Fetch PR's individual reviewers asynchronously; CALLBACK gets the list.
-See `gp-pr-reviewers-async'."
+The list is shaped as by `github--reviewers-from'."
   (let* ((full-name (let-alist pr .base.repo.full_name))
          (number (alist-get 'number pr))
          (requested (alist-get 'requested_reviewers pr)))
@@ -837,11 +776,9 @@ A repository can disable any of them; ask rather than assume (see
 
 (defun github-pull-request-merge-strategies (full-name _number)
   "Return (STRATEGIES . DEFAULT) permitted in FULL-NAME.
-Unlike Bitbucket this is a repository setting rather than a per-branch
-one, so NUMBER is ignored -- the signature matches the Bitbucket twin so
-the protocol op can be backend-agnostic.  DEFAULT is the first permitted
-method in GitHub's own order (a merge commit where allowed), since the
-API has no \"default method\" field of its own."
+This is a repository setting on GitHub, so NUMBER is ignored.  DEFAULT
+is the first permitted method in GitHub's order, as the API has no
+\"default method\" field."
   (let* ((repo (ignore-errors (github-api-request "GET" (format "/repos/%s" full-name))))
          (allowed (delq nil
                        (list (and (eq (alist-get 'allow_merge_commit repo) t) "merge")
@@ -855,13 +792,10 @@ MERGEABLE is t, nil (conflicts) or `unknown'; STATE is GitHub's own
 `mergeable_state' word (\"clean\", \"dirty\", \"blocked\", \"behind\",
 \"unstable\", \"draft\", \"unknown\").
 
-`mergeable' is computed lazily: GitHub answers null on the first fetch
-of a PR it has not tested yet, filling it in moments later.  This
-package's JSON parser maps both null AND false to nil, so `mergeable'
-alone cannot separate \"conflicts\" from \"not computed yet\" -- getting
-that backwards would refuse to merge a perfectly clean PR.
-`mergeable_state' is what disambiguates: \"dirty\" is a real conflict,
-\"unknown\" is GitHub still thinking."
+`mergeable' is computed lazily (null until GitHub has tested the PR),
+and the JSON parser maps both null and false to nil, so only
+`mergeable_state' separates a real conflict (\"dirty\") from
+\"not computed yet\" (\"unknown\")."
   (let* ((pr (ignore-errors
                (github-api-request "GET" (format "/repos/%s/pulls/%s" full-name number))))
          (raw (alist-get 'mergeable pr))
@@ -891,10 +825,8 @@ the target branch this PR is\".  Nil when the comparison fails."
   "Merge PR NUMBER in FULL-NAME, returning the API's merge result.
 STRATEGY is one of `github-merge-methods' (nil lets GitHub choose).
 MESSAGE becomes the merge commit's message body.  CLOSE-SOURCE-BRANCH is
-ignored: GitHub deletes the head branch only per the repository's
-`delete_branch_on_merge' setting, with no per-merge override, so the
-argument exists for signature parity with Bitbucket.  Requires Pull
-requests: write."
+ignored: only the repo's `delete_branch_on_merge' setting decides.
+Requires Pull requests: write."
   (when (and strategy (not (member strategy github-merge-methods)))
     (error "Not a GitHub merge method: %s" strategy))
   (github-api-request
@@ -905,10 +837,8 @@ requests: write."
              `((commit_message . ,message))))))
 
 (defun github-set-pull-request-title (full-name number title)
-  "Set PR NUMBER in FULL-NAME's title to TITLE.
-A partial PATCH, so nothing else is touched -- no need to resend the
-body the way the Bitbucket backend must.  Requires Pull requests: write.
-Returns the updated PR."
+  "Set PR NUMBER in FULL-NAME's title to TITLE; return the updated PR.
+Requires Pull requests: write."
   (when (or (null title) (string-empty-p (string-trim title)))
     (error "A pull request title cannot be empty"))
   (github-api-request
@@ -916,23 +846,16 @@ Returns the updated PR."
    nil `((title . ,title))))
 
 (defun github-set-pull-request-description (full-name number description &optional _title)
-  "Set PR NUMBER in FULL-NAME's body to DESCRIPTION.
-Unlike the draft flag, this is plain REST: a PATCH with just `body'
-leaves the title and everything else untouched, so TITLE is accepted
-for signature parity with the Bitbucket backend and ignored.
-Requires Pull-requests:Write.  Returns the updated PR."
+  "Set PR NUMBER in FULL-NAME's body to DESCRIPTION; return the updated PR.
+TITLE is ignored: a partial PATCH leaves the title untouched.
+Requires Pull requests: write."
   (github-api-request
    "PATCH" (format "/repos/%s/pulls/%s" full-name number)
    nil `((body . ,(or description "")))))
 
 (defun github-set-pull-request-draft (full-name number draft &optional _title)
-  "Set PR NUMBER in FULL-NAME's draft flag to DRAFT.
-GitHub's REST API has no way to toggle draft state at all -- both
-directions are GraphQL-only: `markPullRequestReadyForReview' takes a
-PR out of draft, `convertPullRequestToDraft' puts a ready PR back
-into draft.  (The GitHub web UI does offer \"Convert to draft\" on an
-open PR, which is this same mutation -- there is no REST-visible gap
-here, just a REST/GraphQL split, same as comment resolution.)"
+  "Set PR NUMBER in FULL-NAME's draft flag to DRAFT; return the updated PR.
+REST cannot toggle draft state; both directions are GraphQL mutations."
   (let* ((pr (github-pull-request full-name number))
          (node-id (alist-get 'node_id pr))
          (mutation (if draft
@@ -967,11 +890,8 @@ here, just a REST/GraphQL split, same as comment resolution.)"
     (full-name source dest title
      &key description draft close-source-branch reviewer-uuids)
   "Open a pull request in FULL-NAME from branch SOURCE into DEST.
-CLOSE-SOURCE-BRANCH is accepted for signature parity with Bitbucket
-but has no GitHub equivalent at creation time (GitHub always leaves
-branch deletion to a separate, later action) and is ignored.
-REVIEWER-UUIDS are GitHub logins despite the Bitbucket-flavoured
-parameter name -- the shared protocol names it generically."
+CLOSE-SOURCE-BRANCH has no GitHub equivalent and is ignored.
+REVIEWER-UUIDS are GitHub logins (the protocol's generic name)."
   (let* ((data (list (cons 'title title)
                      (cons 'head source)
                      (cons 'base dest))))
@@ -992,17 +912,12 @@ parameter name -- the shared protocol names it generically."
 (defun github-set-pull-request-reviewers (full-name id reviewer-logins
                                                     &optional current-logins)
   "Make REVIEWER-LOGINS the requested reviewers of PR ID in FULL-NAME.
-GitHub has no whole-list endpoint here: `requested_reviewers' is
-mutated by POSTing additions and DELETEing removals.  So the desired
-end state is diffed against CURRENT-LOGINS (the PR's present
-reviewers) and only the difference is sent -- re-POSTing an existing
-reviewer would needlessly re-notify them.
+There is no whole-list endpoint, so the target is diffed against
+CURRENT-LOGINS and only additions (POST) and removals (DELETE) are
+sent; re-POSTing an existing reviewer would re-notify them.
 
-Removing a login that already submitted a review has no effect: the
-review stays attached to the PR and GitHub does not treat the author
-as a requested reviewer anymore.  Callers must therefore not offer to
-remove reviewed people (`gp-ui-edit-reviewers' locks them).
-
+Removing a login that already submitted a review has no effect, so
+callers must not offer it (`gp-ui-edit-reviewers' locks them).
 Requires Pull requests: write.  Returns non-nil on success."
   (let* ((add (cl-remove-if (lambda (l) (member l current-logins)) reviewer-logins))
          (del (cl-remove-if (lambda (l) (member l reviewer-logins)) current-logins))
@@ -1014,33 +929,21 @@ Requires Pull requests: write.  Returns non-nil on success."
     t))
 
 (defun github-repo-default-reviewers (full-name)
-  "Return repo FULL-NAME's default reviewers.
-Always nil: GitHub has no repo-level \"default reviewers\" endpoint
-comparable to Bitbucket's (the closest concept, CODEOWNERS, is a
-file-based routing rule, not a queryable list of users), and an
-empty list is a legitimate, non-erroring answer here, unlike an
-actual capability gap that would need a `user-error' instead."
+  "Return repo FULL-NAME's default reviewers: always nil.
+GitHub has no repo-level default-reviewers endpoint (CODEOWNERS is not
+a queryable list), and an empty list is a legitimate answer."
   (ignore full-name)
   nil)
 
 (defun github-repo-suggested-reviewers (full-name)
   "Return repo FULL-NAME's collaborators as reviewer suggestions.
-GitHub's real \"suggested reviewers\" (GraphQL `suggestedReviewers',
-based on blame/recent-review history) is a field on an *existing*
-PullRequest, so it cannot populate a pre-PR create form -- there is
-no PR yet to compute suggestions against.  As a pre-PR approximation,
-this lists the repo's collaborators instead (`GET
-/repos/{owner}/{repo}/collaborators'), excluding the authenticated
-user (you can't request a review from yourself).  Reshaped to the
-same alist shape as `github-repo-default-reviewers' would use
-\(`uuid' = login, `display_name' = name or login) so callers don't
-need to special-case the source.  Errors are swallowed -- an
-unreadable collaborator list should degrade to \"no suggestions\",
-same as `github-repo-default-reviewers', not break the form.
+GitHub's GraphQL `suggestedReviewers' needs an existing PR, so for the
+pre-PR create form this approximates it with the collaborators,
+excluding the authenticated user.  Each entry is an alist with `uuid'
+= login and `display_name' = name or login.  Errors yield nil.
 
-A non-empty result is cached (`gp-cache-ttl') so reopening the create
-form doesn't re-page the collaborator list; an empty one is not, so a
-transient failure doesn't stick as \"nobody to suggest\"."
+A non-empty result is cached (`gp-cache-ttl'); an empty one is not, so
+a transient failure doesn't stick."
   (let* ((key (list 'github-collaborators full-name))
          (hit (gp-cache-get key)))
     (if (car hit)
@@ -1072,18 +975,13 @@ transient failure doesn't stick as \"nobody to suggest\"."
 
 ;;;; Labels ------------------------------------------------------------------
 
-;; A PR's own labels need no endpoint and are never cached: GitHub embeds them
-;; in the PR payload, so `github-pr-labels' reads what `github-pull-request'
-;; already fetched and a plain refresh picks up changes for free.  Only the
-;; repo-wide *pool* -- the candidate list offered when editing -- costs a
-;; request, and that goes through the shared `gp-cache-*' TTL cache.
+;; A PR's own labels are embedded in the PR payload (never cached); only the
+;; repo-wide candidate pool costs a request, cached via `gp-cache-*'.
 
 (defun github--label (label)
   "Return LABEL (a GitHub label alist) as a (:name :color) plist.
-GitHub writes the colour as bare hex with no leading \"#\"; it is kept in
-that form so the value round-trips unchanged to any consumer.  Returns
-nil for anything without a name, so a malformed entry drops out rather
-than rendering as an empty tag."
+The colour stays bare hex with no leading \"#\", as GitHub sends it.
+Returns nil for anything without a name."
   (let ((name (alist-get 'name label))
         (color (alist-get 'color label)))
     (when (and (stringp name) (not (string-empty-p name)))
@@ -1092,25 +990,18 @@ than rendering as an empty tag."
 
 (defun github--label-list (labels)
   "Return LABELS (a GitHub `labels' value) as a list of `github--label' plists.
-LABELS arrives as a vector, and as `:null' rather than nil when the
-field is present but empty -- so it is normalised here instead of at
-each call site."
+LABELS may be a vector, a list, or a non-list such as `:null'."
   (when (or (listp labels) (vectorp labels))
     (delq nil (mapcar #'github--label (append labels nil)))))
 
 (defun github-pr-labels (pr)
-  "Return PR's labels as (:name :color) plists.
-Read straight off the PR payload -- GitHub embeds `labels' in the PR
-object, so this touches no network and cannot go stale relative to the
-PR it came from."
+  "Return PR's labels as (:name :color) plists, read off the PR payload."
   (github--label-list (alist-get 'labels pr)))
 
 (defun github-repo-labels (full-name)
   "Return every label defined in repo FULL-NAME, as (:name :color) plists.
-A repo's label set changes rarely while the completion pool is wanted on
-every label edit, so a non-empty result is cached (`gp-cache-ttl').  An
-empty one is not, so a transient failure cannot stick as \"no labels\"
-\(the same reasoning as `github-repo-suggested-reviewers')."
+A non-empty result is cached (`gp-cache-ttl'); an empty one is not, so
+a transient failure cannot stick as \"no labels\"."
   (let* ((key (list 'github-repo-labels full-name))
          (hit (gp-cache-get key)))
     (if (car hit)
@@ -1122,9 +1013,8 @@ empty one is not, so a transient failure cannot stick as \"no labels\"
 
 (defun github-set-pull-request-labels (full-name number labels)
   "Set PR NUMBER in FULL-NAME to carry exactly LABELS (a list of names).
-Labels live on the issue side of a pull request, so the complete set is
-PUT to the issues endpoint -- one request, and any name left out comes
-off.  Requires Issues: write.  Returns non-nil on success."
+The complete set is PUT to the issues endpoint, so any name left out
+comes off.  Requires Issues: write.  Returns non-nil on success."
   (github-api-request "PUT" (format "/repos/%s/issues/%s/labels" full-name number)
                       nil `((labels . ,(vconcat labels))))
   t)
@@ -1138,12 +1028,10 @@ Anything else is rejected by the API with 422.")
 
 (defun github--reaction-base (full-name comment)
   "Return the reactions endpoint path for COMMENT in FULL-NAME.
-An inline review comment and a general (issue) comment live under
-different collections -- `pulls/comments/{id}' vs
-`issues/comments/{id}' -- and the ids come from separate sequences, so
-the wrong base would 404 or, worse, hit an unrelated comment.  COMMENT
-is a reshaped comment alist; the `inline' key is what distinguishes
-the two (see `github--reshape-review-comment')."
+Inline (`pulls') and general (`issues') comments live in separate
+collections with separate id sequences, so the wrong base could hit an
+unrelated comment.  COMMENT is a reshaped alist; its `inline' key
+decides."
   (format "/repos/%s/%s/comments/%s/reactions"
           full-name
           (if (alist-get 'inline comment) "pulls" "issues")
@@ -1151,12 +1039,8 @@ the two (see `github--reshape-review-comment')."
 
 (defun github--reshape-reaction (r)
   "Reshape a REST reaction R into the shared shape.
-GitHub identifies the reactor by `login', but every other comment
-accessor in this package exposes the identity as `uuid' (see
-`github--reshape-issue-comment'), and `gp-user-uuid' returns a login on
-this backend.  Without this mapping a caller asking \"is this reaction
-mine?\" reads a nil `uuid' and always decides no -- which silently turns
-a toggle into add-only."
+The reactor's login is also exposed as `uuid', which is what callers
+compare against `gp-user-uuid'; without it a toggle becomes add-only."
   `((id . ,(alist-get 'id r))
     (content . ,(alist-get 'content r))
     (user (login . ,(let-alist r .user.login))
@@ -1166,18 +1050,15 @@ a toggle into add-only."
 (defun github-comment-reactions (full-name comment)
   "Return the reactions on COMMENT in FULL-NAME as a list of alists.
 Each entry has `id', `content' and a `user' whose `uuid' matches what
-`gp-user-uuid' reports, so callers can both count reactions and tell
-which are their own.  The reaction's own id is needed to remove it
-again, which is why this returns the full list rather than just counts."
+`gp-user-uuid' reports."
   (mapcar #'github--reshape-reaction
           (github-api-paged (github--reaction-base full-name comment))))
 
 (defun github-add-comment-reaction (full-name comment content)
   "React to COMMENT in FULL-NAME with CONTENT (see `github-reaction-contents').
-Returns the created reaction.  POSTing a reaction the user already has
-is idempotent -- GitHub answers 200 with the existing one instead of
-creating a duplicate -- so callers need not check first.  Requires
-Pull requests: write (review comments) or Issues: write (general ones)."
+Returns the created reaction.  Idempotent: an existing reaction is
+returned rather than duplicated.  Requires Pull requests: write (review
+comments) or Issues: write (general ones)."
   (unless (member content github-reaction-contents)
     (error "Not a GitHub reaction: %s" content))
   (github-api-request "POST" (github--reaction-base full-name comment)
@@ -1186,9 +1067,8 @@ Pull requests: write (review comments) or Issues: write (general ones)."
 (defun github-remove-comment-reaction (full-name comment content &optional login)
   "Remove LOGIN's CONTENT reaction from COMMENT in FULL-NAME.
 LOGIN defaults to the authenticated user.  Deleting needs the
-reaction's own id, not the content, so this looks the reaction up
-first; returns non-nil when one was found and deleted, nil when there
-was nothing to remove."
+reaction's id, so it is looked up first; returns non-nil when one was
+found and deleted."
   (let* ((login (or login (github-user-login)))
          (mine (seq-find (lambda (r)
                            (and (equal (alist-get 'content r) content)
@@ -1250,18 +1130,15 @@ without one; resolution just won't be reflected."
 
 (defvar github--viewer-reactions (make-hash-table :test 'eql)
   "Comment id -> list of reaction contents the viewer has reacted with.
-Populated by `github--refresh-viewer-reactions'.  REST ships per-emoji
-counts with each comment but never says whether *you* are among the
-reactors, so the renderer would otherwise have to fetch per comment --
-which is exactly the mid-render network call that made the detail view
-draw each comment several times over.")
+Populated by `github--refresh-viewer-reactions'.  REST never says
+whether the viewer reacted, and the renderer must not fetch per comment
+mid-render.")
 
 (defun github--refresh-viewer-reactions (full-name number)
   "Cache which reactions the viewer holds on PR NUMBER's comments.
-One GraphQL query covers every comment of both kinds, using
-`viewerHasReacted' -- the flag REST does not expose.  Errors are
-swallowed (GraphQL needs a token) so reaction counts still render
-without one; only the \"is it mine\" hint is lost."
+One GraphQL query covers every comment of both kinds via
+`viewerHasReacted'.  Errors are swallowed (GraphQL needs a token); only
+the \"is it mine\" hint is lost."
   (ignore-errors
     (let* ((owner (car (split-string full-name "/")))
            (repo (cadr (split-string full-name "/")))
@@ -1294,9 +1171,7 @@ without one; only the \"is it mine\" hint is lost."
   '(("THUMBS_UP" . "+1") ("THUMBS_DOWN" . "-1") ("LAUGH" . "laugh")
     ("CONFUSED" . "confused") ("HEART" . "heart") ("HOORAY" . "hooray")
     ("ROCKET" . "rocket") ("EYES" . "eyes"))
-  "GraphQL `ReactionContent' enum -> the REST content token.
-GraphQL spells the thumbs `THUMBS_UP'/`THUMBS_DOWN' while REST uses
-`+1'/`-1'; everything downstream speaks REST tokens.")
+  "GraphQL `ReactionContent' enum -> the REST content token.")
 
 (defun github--reaction-token (graphql-content)
   "Return the REST token for GRAPHQL-CONTENT (a `ReactionContent' value)."
@@ -1320,19 +1195,12 @@ and, for inline comments, `inline.path'/`inline.to'."
 
 (defun github-pull-request-comments-async (full-name number callback &optional max-items)
   "Async twin of `github-pull-request-comments'.  CALLBACK gets (OK COMMENTS).
-Genuinely non-blocking: the three requests behind a comment list -- the
-GraphQL thread-resolution query, the issue comments and the review
-comments -- all run through their async twins concurrently, and the
-merged result is delivered once the last one settles.
+Genuinely non-blocking: the GraphQL thread-resolution query and the
+issue and review comment listings run concurrently; the merged result
+is delivered once the last settles.  A timer around the sync version
+would still block redisplay.
 
-Wrapping the synchronous version in a timer instead (what this used to
-do) does NOT work: all three requests still block, roughly a second in
-total on a real PR, so Emacs never reaches redisplay and the detail
-buffer's ⏳ spinner stays invisible for the whole load.
-
-The GraphQL stage is optional enrichment -- it only marks which
-comments sit in a resolved thread -- so its failure is tolerated and
-the REST comments are still returned."
+A GraphQL failure is tolerated; the REST comments are still returned."
   (let ((pending 3)
         (issue nil)
         (review nil)
@@ -1344,11 +1212,9 @@ the REST comments are still returned."
              (let ((all (append
                          (mapcar #'github--reshape-issue-comment issue)
                          (mapcar #'github--reshape-review-comment review))))
-               ;; Reshaping must happen HERE, not as each response lands: the
-               ;; issue/review reshapers consult
+               ;; Reshape only now: the reshapers read
                ;; `github--resolved-thread-comment-ids', which the GraphQL
-               ;; stage fills in -- doing it earlier would drop resolution
-               ;; markers whenever GraphQL answered last.
+               ;; stage fills in, possibly last.
                (funcall callback (not failed)
                         (if max-items
                             (cl-subseq all 0 (min max-items (length all)))
@@ -1359,7 +1225,6 @@ the REST comments are still returned."
          github--resolved-threads-query
          `((owner . ,owner) (repo . ,repo) (number . ,number))
          (lambda (ok data)
-           ;; optional: a GraphQL failure must not fail the comment list
            (when ok (github--record-resolved-threads data))
            (settle))))
       (github-api-paged-async
@@ -1374,10 +1239,7 @@ the REST comments are still returned."
          (settle))))))
 
 (defun github--reaction-counts (c)
-  "Extract ((CONTENT . COUNT) …) from comment C's inline `reactions' object.
-GitHub already ships per-emoji counts with every comment, so the common
-case -- drawing the summary -- needs no extra request.  Only the reactor
-NAMES require the reactions endpoint, which is why that fetch is lazy."
+  "Extract ((CONTENT . COUNT) …) from comment C's inline `reactions' object."
   (when-let* ((r (alist-get 'reactions c)))
     ;; The thumbs keys need escaping as symbols (`\+1' / `\-1'); their
     ;; `symbol-name' is the plain "+1" / "-1" the rest of the code uses.
@@ -1388,8 +1250,8 @@ NAMES require the reactions endpoint, which is why that fetch is lazy."
                         (cons (symbol-name k) n))))
                   '(\+1 \-1 laugh confused heart hooray rocket eyes)))))
 
-(defun github--reshape-issue-comment (c)
-  "Reshape a REST issue comment C into the shared comment alist shape."
+(defun github--reshape-comment (c &optional extra)
+  "Reshape REST comment C into the shared alist shape, splicing in EXTRA."
   `((reaction-counts . ,(github--reaction-counts c))
     (reaction-mine . ,(gethash (alist-get 'id c) github--viewer-reactions))
     (id . ,(alist-get 'id c))
@@ -1399,26 +1261,22 @@ NAMES require the reactions endpoint, which is why that fetch is lazy."
           (links (avatar (href . ,(let-alist c .user.avatar_url)))))
     (created_on . ,(alist-get 'created_at c))
     (links (html (href . ,(alist-get 'html_url c))))
+    ,@extra
     ,@(when (gethash (alist-get 'id c) github--resolved-thread-comment-ids)
         '((resolution (user (display_name . "GitHub")))))))
 
+(defun github--reshape-issue-comment (c)
+  "Reshape a REST issue comment C into the shared comment alist shape."
+  (github--reshape-comment c))
+
 (defun github--reshape-review-comment (c)
   "Reshape a REST review (inline) comment C into the shared alist shape."
-  `((reaction-counts . ,(github--reaction-counts c))
-    (reaction-mine . ,(gethash (alist-get 'id c) github--viewer-reactions))
-    (id . ,(alist-get 'id c))
-    (content (raw . ,(github--normalize-newlines (alist-get 'body c))))
-    (user (display_name . ,(let-alist c .user.login))
-          (uuid . ,(let-alist c .user.login))
-          (links (avatar (href . ,(let-alist c .user.avatar_url)))))
-    (created_on . ,(alist-get 'created_at c))
-    (links (html (href . ,(alist-get 'html_url c))))
-    (inline (path . ,(alist-get 'path c))
-            (from . ,(alist-get 'line c))
-            (to . ,(alist-get 'line c)))
-    (parent . ,(when-let* ((pid (alist-get 'in_reply_to_id c))) `((id . ,pid))))
-    ,@(when (gethash (alist-get 'id c) github--resolved-thread-comment-ids)
-        '((resolution (user (display_name . "GitHub")))))))
+  (github--reshape-comment
+   c `((inline (path . ,(alist-get 'path c))
+               (from . ,(alist-get 'line c))
+               (to . ,(alist-get 'line c)))
+       (parent . ,(when-let* ((pid (alist-get 'in_reply_to_id c)))
+                    `((id . ,pid)))))))
 
 (defun github-comment-resolved-p (comment)
   "Return non-nil if COMMENT's review thread was reported resolved."
@@ -1426,12 +1284,7 @@ NAMES require the reactions endpoint, which is why that fetch is lazy."
 
 (defun github-comment-resolvable-p (comment)
   "Return non-nil if COMMENT belongs to a resolvable review thread.
-Only inline review comments do -- reshaped by
-`github--reshape-review-comment', which is the only place that adds
-an `inline' key.  Plain issue (general discussion) comments, from
-`github--reshape-issue-comment', have no `inline' key and no
-GraphQL review thread, so GitHub has no \"resolve\" concept for
-them at all."
+Only inline review comments (those with an `inline' key) have one."
   (and (alist-get 'inline comment) t))
 
 (defun github-comment-own-p (comment login)
@@ -1440,10 +1293,8 @@ them at all."
 
 (defun github--diff-commentable-lines (diff)
   "Return ((PATH . ((START . END) …)) …): the new-side hunk ranges in DIFF.
-GitHub only accepts an inline review comment on a line that appears in
-the pull request's diff, so these ranges are exactly where a comment
-can land.  Only the new side (`+++ b/…' and the `+N,M' half of each
-`@@' header) is considered, matching the `side' the package posts on."
+GitHub only accepts an inline comment on a line in the PR's diff.  Only
+the new side is considered, matching the `side' the package posts on."
   (let (out path)
     (dolist (line (split-string (or diff "") "\n"))
       (cond
@@ -1467,11 +1318,9 @@ can land.  Only the new side (`+++ b/…' and the `+N,M' half of each
 
 (defun github-inline-target-problem (full-name number path line)
   "Return a human explanation if PATH:LINE cannot take an inline comment.
-Nil means the target is fine.  GitHub answers a bad target with a bare
-422 (`pull_request_review_thread.path/line could not be resolved')
-*after* the comment has been written, so checking first turns that into
-a message that says which lines are actually available.  Bitbucket has
-no such restriction, which is why this lives in the GitHub layer."
+Nil means the target is fine.  GitHub rejects a bad target with an
+opaque 422 after the comment was written; checking first lets the
+message name the lines that are available."
   (let* ((ranges (github--diff-commentable-lines
                   (github-pull-request-diff full-name number)))
          (for-file (cdr (assoc path ranges))))
@@ -1480,7 +1329,7 @@ no such restriction, which is why this lives in the GitHub layer."
      ((null for-file)
       (format "%s is not among the files changed by PR #%s (changed: %s)"
               path number
-              (if ranges (mapconcat #'car ranges ", ") "none")))
+              (mapconcat #'car ranges ", ")))
      ((not (seq-some (lambda (r) (and (>= line (car r)) (<= line (cdr r)))) for-file))
       (format "line %d of %s is not in PR #%s's diff (commentable lines: %s)"
               line path number
@@ -1548,13 +1397,10 @@ FULL-NAME the first time any of its comments needs resolving."
 
 (defun github-resolve-comment (full-name number comment-id)
   "Mark the review thread containing COMMENT-ID on PR NUMBER as resolved.
-REST v3 has no endpoint for this at all -- only GraphQL's
-`resolveReviewThread' mutation can, and it operates on the *thread*,
-not the comment, so the comment id is first mapped to its thread's
-GraphQL node id (see `github--review-thread-id').  Signals a clear
-`user-error' when COMMENT-ID is not part of any review thread (e.g.
-it is a plain issue comment, which GitHub has no concept of
-\"resolving\")."
+Only GraphQL's `resolveReviewThread' can, and it takes the thread, so
+COMMENT-ID is first mapped via `github--review-thread-id'.  Signals a
+`user-error' when COMMENT-ID is in no review thread (e.g. a general
+PR comment)."
   (let ((tid (github--review-thread-id full-name number comment-id)))
     (unless tid
       (user-error "Comment %s has no resolvable review thread (likely a general PR comment, not an inline review comment -- GitHub has no \"resolve\" concept for those)" comment-id))
@@ -1574,13 +1420,10 @@ See `github-resolve-comment'."
 
 (defun github-delete-comment (full-name number comment-id)
   "Delete COMMENT-ID on PR NUMBER in FULL-NAME.
-Tries the review-comments endpoint first, then the issue comment one,
-since the caller only has a comment id and not which kind it is; then
-falls back to `github-delete-review-batch-comment' for a comment that
-is still sitting in the caller's own PENDING review -- REST 404s on
-those (they are not \"real\" comments yet), and only GraphQL's
-`deletePullRequestReviewComment' (by node id, not this databaseId)
-can remove one without discarding the whole batch."
+The comment's kind is unknown, so this tries the review-comment
+endpoint, then the issue-comment one, then
+`github-delete-review-batch-comment' for a comment in the caller's
+PENDING review (REST 404s on those)."
   (condition-case nil
       (github-api-request "DELETE" (format "/repos/%s/pulls/comments/%s" full-name comment-id))
     (error
@@ -1588,17 +1431,19 @@ can remove one without discarding the whole batch."
          (github-api-request "DELETE" (format "/repos/%s/issues/comments/%s" full-name comment-id))
        (error (github-delete-review-batch-comment full-name number comment-id))))))
 
+(defun github--pending-comment-node-id (full-name number comment-id)
+  "Return the GraphQL node id of pending COMMENT-ID (a databaseId).
+GraphQL's review-comment mutations take the node id, not the databaseId
+REST and this package use.  Signals a `user-error' when not found."
+  (let ((review (github--pending-review full-name number)))
+    (or (cl-loop for c in (append (let-alist review .comments.nodes) nil)
+                 when (equal (alist-get 'databaseId c) comment-id)
+                 return (alist-get 'id c))
+        (user-error "Comment %s is not in your pending review" comment-id))))
+
 (defun github-delete-review-batch-comment (full-name number comment-id)
-  "Delete pending COMMENT-ID (a databaseId) from the caller's review batch.
-Looks up its GraphQL node id among the pending review's own comments,
-since `deletePullRequestReviewComment' takes that, not the databaseId
-REST and the rest of this package use everywhere else."
-  (let* ((review (github--pending-review full-name number))
-         (node-id (cl-loop for c in (append (let-alist review .comments.nodes) nil)
-                            when (equal (alist-get 'databaseId c) comment-id)
-                            return (alist-get 'id c))))
-    (unless node-id
-      (user-error "Comment %s is not in your pending review" comment-id))
+  "Delete pending COMMENT-ID (a databaseId) from the caller's review batch."
+  (let ((node-id (github--pending-comment-node-id full-name number comment-id)))
     (github-graphql-request
      "mutation($id:ID!){deletePullRequestReviewComment(input:{id:$id}){
         pullRequestReview{id}}}"
@@ -1606,10 +1451,8 @@ REST and the rest of this package use everywhere else."
 
 (defun github-edit-comment (full-name number comment-id text)
   "Replace COMMENT-ID's body with raw TEXT on PR NUMBER in FULL-NAME.
-Tries the review-comments endpoint first, then the issue comment one,
-then falls back to `github-edit-review-batch-comment' for a comment
-still sitting in the caller's own PENDING review (same reasoning as
-`github-delete-comment')."
+Tries the same endpoints in the same order as `github-delete-comment',
+ending with `github-edit-review-batch-comment'."
   (condition-case nil
       (github--reshape-review-comment
        (github-api-request "PATCH" (format "/repos/%s/pulls/comments/%s" full-name comment-id)
@@ -1622,16 +1465,8 @@ still sitting in the caller's own PENDING review (same reasoning as
        (error (github-edit-review-batch-comment full-name number comment-id text))))))
 
 (defun github-edit-review-batch-comment (full-name number comment-id text)
-  "Replace the body of pending COMMENT-ID (a databaseId) with TEXT.
-Same node-id lookup as `github-delete-review-batch-comment', for the
-same reason: `updatePullRequestReviewComment' needs the GraphQL node
-id, not the databaseId REST and this package use elsewhere."
-  (let* ((review (github--pending-review full-name number))
-         (node-id (cl-loop for c in (append (let-alist review .comments.nodes) nil)
-                            when (equal (alist-get 'databaseId c) comment-id)
-                            return (alist-get 'id c))))
-    (unless node-id
-      (user-error "Comment %s is not in your pending review" comment-id))
+  "Replace the body of pending COMMENT-ID (a databaseId) with TEXT."
+  (let ((node-id (github--pending-comment-node-id full-name number comment-id)))
     (let ((data (github-graphql-request
                  "mutation($id:ID!,$body:String!){
                     updatePullRequestReviewComment(input:{
@@ -1647,12 +1482,9 @@ id, not the databaseId REST and this package use elsewhere."
 
 (defun github--dismiss-own-review (full-name number event reason)
   "Dismiss the authenticated user's latest review of EVENT state, if any.
-Used to approximate \"unapprove\"/\"unrequest changes\", which GitHub
-has no direct retraction for -- dismissing is the closest action,
-though it is semantically a different thing (a dismissal is visible
-in the PR timeline as an explicit event carrying REASON, not a
-silent retraction -- see `gp-review-retraction-kind').  Signals when
-no matching review can be found to dismiss."
+Approximates \"unapprove\"/\"unrequest changes\", which GitHub cannot
+retract; the dismissal shows on the PR timeline with REASON.  Signals
+when no matching review exists."
   (let* ((login (github-user-login))
          (reviews (github--pr-reviews full-name number))
          (mine (cl-find-if (lambda (r) (and (equal (let-alist r .user.login) login)
@@ -1666,9 +1498,8 @@ no matching review can be found to dismiss."
 
 (defun github-approve-pr (full-name number &optional unapprove reason)
   "Approve PR NUMBER in FULL-NAME.
-With UNAPPROVE non-nil, dismiss your latest APPROVED review instead
-of retracting it outright, with REASON as the dismissal message --
-see `github--dismiss-own-review'."
+With UNAPPROVE non-nil, dismiss your latest APPROVED review instead,
+with REASON as the dismissal message."
   (if unapprove
       (github--dismiss-own-review full-name number "APPROVED" reason)
     (github-api-request
@@ -1687,21 +1518,13 @@ with REASON as the dismissal message."
 
 (defun github-review-retraction-kind ()
   "Return `dismiss': GitHub has no true review retraction.
-Withdrawing a review here always goes through
-`github--dismiss-own-review', which leaves a visible dismissal event
-on the PR's timeline rather than making the review disappear."
+Withdrawing leaves a visible dismissal event on the PR's timeline."
   'dismiss)
 
 ;;;; Review batch (pending review, GraphQL only) --------------------------------
 
-;; REST's \"create a review\" (POST .../pulls/{n}/reviews) can only submit a
-;; whole `comments' array in one call -- there is no REST way to add one more
-;; comment to a review already sitting PENDING.  GraphQL can:
-;; `addPullRequestReviewThread' takes a `pullRequestReviewId' and adds a
-;; single new inline thread to that review, whatever state it is in.  So the
-;; whole batch flow (find-or-create the pending review, add threads to it one
-;; at a time, submit or delete it) goes through GraphQL, mirroring how
-;; comment resolution above already has to.
+;; REST cannot add a comment to an existing PENDING review; GraphQL's
+;; `addPullRequestReviewThread' can, so the whole batch flow uses GraphQL.
 
 (defun github--pr-node-id (full-name number)
   "Return the GraphQL node id of PR NUMBER in FULL-NAME."
@@ -1718,19 +1541,13 @@ on the PR's timeline rather than making the review disappear."
              author{login avatarUrl}
              createdAt url}}}}}}}"
   "GraphQL query behind `github--pending-review' and its async twin.
-Kept as one constant so the sync/async paths can never drift apart.
-Each comment's GraphQL `id' (distinct from `databaseId') is fetched
-here because `github-delete-review-batch-comment' needs it -- REST's
-comment delete endpoint 404s on a comment still inside a pending
-review; only the GraphQL node id works with
-`deletePullRequestReviewComment'.")
+Each comment's node `id' is fetched for the review-comment mutations
+\(see `github--pending-comment-node-id').")
 
 (defun github--pending-review (full-name number)
   "Return the caller's own PENDING review object on PR NUMBER, or nil.
-Fetched fresh every time (no cache): the batch's contents are what
-`github-review-batch-comments' shows, and a stale review id would
-either 404 on submit or silently reuse a review the user already
-submitted or deleted from the web UI."
+Never cached: a stale review id would 404 on submit or reuse a review
+already submitted or deleted from the web UI."
   (let* ((owner (car (split-string full-name "/")))
          (repo (cadr (split-string full-name "/")))
          (data (github-graphql-request
@@ -1751,10 +1568,8 @@ submitted or deleted from the web UI."
 
 (defun github--reshape-pending-comment (c)
   "Reshape a pending-review GraphQL comment node C into the shared shape.
-Mirrors `github--reshape-review-comment', with `pending' set so
-`github-comment-pending-p' can tell it apart -- these never go
-through the REST reshapers, since REST does not surface a comment
-still sitting in a PENDING review."
+Mirrors `github--reshape-review-comment', with `pending' set for
+`github-comment-pending-p'.  REST does not surface pending comments."
   (let-alist c
     `((pending . t)
       (id . ,.databaseId)
@@ -1769,10 +1584,8 @@ still sitting in a PENDING review."
 
 (defun github-add-review-batch-comment (full-name number text inline &optional parent-id)
   "Add a PENDING inline comment on PR NUMBER in FULL-NAME to the caller's batch.
-INLINE is a cons (PATH . LINE).  PARENT-ID replies to an existing
-review comment -- `addPullRequestReviewThreadReply' takes the
-comment's REST/databaseId directly, no thread lookup needed, unlike
-resolving (`github--review-thread-id')."
+INLINE is a cons (PATH . LINE).  PARENT-ID (a databaseId) replies to
+an existing review comment."
   (let* ((review-id (github--ensure-pending-review full-name number)))
     (if parent-id
         (github-graphql-request
@@ -1790,8 +1603,7 @@ resolving (`github--review-thread-id')."
          (body . ,text))))))
 
 (defun github-review-batch-comments (full-name number)
-  "Return the caller's own pending (unsubmitted) comments on PR NUMBER
-in FULL-NAME."
+  "Return the caller's pending comments on PR NUMBER in FULL-NAME."
   (let ((review (github--pending-review full-name number)))
     (mapcar #'github--reshape-pending-comment
             (append (let-alist review .comments.nodes) nil))))
@@ -1846,16 +1658,14 @@ BODY is an optional summary attached to the review."
 
 (defun github-pull-request-diff (full-name number &optional _commit)
   "Return the unified diff text for PR NUMBER in FULL-NAME.
-GitHub serves the diff directly off the PR resource via content
-negotiation -- no signed-URL indirection like Bitbucket needs."
+Served off the PR resource via content negotiation, so COMMIT is unused."
   (github-api-request-raw
    "GET" (format "/repos/%s/pulls/%s" full-name number) nil
    '(("Accept" . "application/vnd.github.v3.diff"))))
 
 (defun github--diffstat-entry (f)
   "Return a plist (:path :status :added :removed) for `/files' entry F.
-Mirrors `bitbucket--diffstat-entry''s shape so `gp--insert-changed-files'
-in gp-ui.el needs no backend-specific handling."
+Same shape as `bitbucket--diffstat-entry'."
   (list :path (alist-get 'filename f)
         :status (alist-get 'status f)
         :added (or (alist-get 'additions f) 0)
@@ -1863,10 +1673,8 @@ in gp-ui.el needs no backend-specific handling."
 
 (defun github--commit-entry (c)
   "Normalise a GitHub PR commit C to (:hash :summary :author :date).
-Mirrors `bitbucket--commit-entry''s shape so the detail view needs no
-backend-specific handling.  Prefers the linked GitHub account's login
-and falls back to the raw git author name, which is all there is for
-commits whose email matches no account."
+Same shape as `bitbucket--commit-entry'.  The author is the linked
+account's login, else the raw git author name."
   (let ((name (or (let-alist c .author.login)
                   (let-alist c .commit.author.name))))
     (list :hash (alist-get 'sha c)
@@ -1877,10 +1685,8 @@ commits whose email matches no account."
 
 (defun github-pull-request-commits-async (full-name number callback &optional max-items)
   "Fetch PR FULL-NAME/NUMBER's commits; CALLBACK gets normalised plists.
-Returned newest-first to match the Bitbucket backend -- GitHub's
-endpoint lists commits oldest-first, so the collected page is
-reversed before MAX-ITEMS is applied (taking the newest, not the
-oldest, when the list is capped)."
+Returned newest-first (GitHub lists oldest-first), so MAX-ITEMS keeps
+the newest commits."
   (if (not (and full-name number))
       (funcall callback nil)
     (github-api-paged-async
@@ -1896,25 +1702,26 @@ oldest, when the list is capped)."
      ;; no max-items here: the cap must apply after reversing
      nil)))
 
+(defun github--stats-plist (pr files)
+  "Return the stats plist for PR's totals and its `/files' entries FILES."
+  (list :files (or (alist-get 'changed_files pr) 0)
+        :added (or (alist-get 'additions pr) 0)
+        :removed (or (alist-get 'deletions pr) 0)
+        :commits (or (alist-get 'commits pr) 0)
+        :file-list (mapcar #'github--diffstat-entry files)))
+
 (defun github-pull-request-stats (full-name number &optional pr)
   "Return a plist (:files :added :removed :commits :file-list) for a PR.
-:file-list is fetched separately via `/pulls/{number}/files' -- the PR
-resource's own `changed_files'/`additions'/`deletions' are just totals,
-with no per-file breakdown (unlike Bitbucket's diffstat endpoint,
-whose response IS the per-file list)."
+Totals come from PR (fetched when nil); :file-list needs a separate
+`/pulls/{number}/files' request."
   (let* ((pr (or pr (github-pull-request full-name number)))
          (files (ignore-errors (github-api-paged (format "/repos/%s/pulls/%s/files" full-name number)))))
-    (list :files (or (alist-get 'changed_files pr) 0)
-          :added (or (alist-get 'additions pr) 0)
-          :removed (or (alist-get 'deletions pr) 0)
-          :commits (or (alist-get 'commits pr) 0)
-          :file-list (mapcar #'github--diffstat-entry files))))
+    (github--stats-plist pr files)))
 
 (defun github-api-get-raw-async (path callback &optional extra-headers)
   "GET PATH asynchronously and call CALLBACK with the raw body text.
 CALLBACK receives the body, or nil on error (logged).  The
-JSON-parsing twin is `github-api-get-async'; diffs come back as
-text/plain via content negotiation, so the body must not be parsed."
+JSON-parsing twin is `github-api-get-async'."
   (let* ((url (github--build-url path nil))
          (url-request-method "GET")
          (auth (github--auth-header))
@@ -1940,10 +1747,8 @@ text/plain via content negotiation, so the body must not be parsed."
 
 (defun github-pull-request-diff-async (full-name number _commit _pr callback)
   "Fetch PR FULL-NAME/NUMBER's unified diff asynchronously.
-CALLBACK gets the diff text, or nil on error.  GitHub serves the diff
-off the PR resource via content negotiation, so no signed URL (and
-hence no PR object) is needed -- the argument list matches the
-protocol op, which Bitbucket needs it for."
+CALLBACK gets the diff text, or nil on error.  The commit and PR
+arguments exist for protocol parity and are unused."
   (github-api-get-raw-async
    (format "/repos/%s/pulls/%s" full-name number)
    callback
@@ -1951,18 +1756,12 @@ protocol op, which Bitbucket needs it for."
 
 (defun github-pull-request-stats-async (full-name number pr callback)
   "Fetch PR FULL-NAME/NUMBER's stats plist asynchronously.
-CALLBACK gets the plist, or nil on error.  The totals come off PR
-itself; only the per-file list needs fetching (see
-`github-pull-request-stats')."
+CALLBACK gets the plist.  The totals come off PR itself; only the
+per-file list is fetched."
   (github-api-paged-async
    (format "/repos/%s/pulls/%s/files" full-name number) nil
    (lambda (_ok files)
-     (funcall callback
-              (list :files (or (alist-get 'changed_files pr) 0)
-                    :added (or (alist-get 'additions pr) 0)
-                    :removed (or (alist-get 'deletions pr) 0)
-                    :commits (or (alist-get 'commits pr) 0)
-                    :file-list (mapcar #'github--diffstat-entry files))))))
+     (funcall callback (github--stats-plist pr files)))))
 
 ;;;; Commit statuses ------------------------------------------------------------
 
@@ -2009,16 +1808,12 @@ CI posts no legacy commit statuses has results only here."
 (defun github-commit-build-states (full-name hash)
   "Return the build state strings for commit HASH in FULL-NAME.
 
-Merges GitHub's two independent CI report channels: legacy commit
-statuses (posted by external integrations) and check runs (where
-GitHub Actions reports).  A repo may use either or both, so both are
-consulted and the states concatenated; `gp-build-states-summary'
-then reduces them, failure dominating.
+Concatenates legacy commit statuses and check runs (where GitHub
+Actions reports), since a repo may use either or both.
 
 The combined-status endpoint answers \"pending\" with a zero
-`total_count' when a repo posts no statuses at all.  That is absence
-of data, not a build in flight, so it is dropped rather than reported
-as INPROGRESS -- which would strand the helm bubble on blue forever."
+`total_count' when a repo posts no statuses; that is dropped rather
+than reported as INPROGRESS, which would stick forever."
   (when hash
     (let* ((combined (ignore-errors
                        (github-api-request
@@ -2039,9 +1834,8 @@ as INPROGRESS -- which would strand the helm bubble on blue forever."
 
 (defun github-commit-message-async (full-name hash callback)
   "Fetch the commit message for HASH in FULL-NAME; CALLBACK gets it (or nil).
-Non-blocking twin of `github-commit-message'.  Commit messages are
-immutable, so the result is cached under the same key shape the
-Bitbucket side uses; a warm entry calls CALLBACK synchronously."
+Commit messages are immutable, so the result is cached; a warm entry
+calls CALLBACK synchronously."
   (if (not (and full-name hash))
       (funcall callback nil)
     (let* ((key (list 'commit-msg full-name hash))
@@ -2063,17 +1857,12 @@ Bitbucket side uses; a warm entry calls CALLBACK synchronously."
 
 ;;;; CI: GitHub Actions workflow runs (Bitbucket Pipelines analogue) -----------
 
-;; Mapping notes (see also the Commentary block at the top of this file):
+;; CI mapping notes (see also the Commentary):
 ;;   * a workflow run  ~ a Bitbucket "pipeline"
-;;   * a run's jobs    ~ a pipeline's "steps" (one level; a job's own
-;;     internal `steps' array is not surfaced, to keep the mapping simple)
-;;   * triggering requires a workflow id/filename -- there is no
-;;     "run whatever the branch's default pipeline is" concept in
-;;     Actions, so `github-pipeline-trigger' requires SELECTOR (used as
-;;     the workflow file name, e.g. "ci.yml") and errors clearly without it
-;;   * there is no per-job "run this step" endpoint; the closest is
-;;     re-dispatching the whole workflow, which is not the same thing, so
-;;     `github-pipeline-run-manual-step' user-errors instead of faking it
+;;   * a run's jobs    ~ a pipeline's "steps" (a job's own internal
+;;     `steps' array is not surfaced)
+;;   * triggering needs a workflow file/id: Actions has no default pipeline
+;;   * no per-job "run this step" endpoint exists
 
 (defun github-pipelines-for-branch (full-name branch &optional max-items commit)
   "Return workflow runs in FULL-NAME for BRANCH, newest first.
@@ -2100,17 +1889,14 @@ Non-blocking twin of `github-pipelines-for-branch'."
      (or max-items 20))))
 
 (defun github-pipeline-steps (full-name run-id)
-  "Return the jobs of workflow RUN-ID in FULL-NAME, in order.
-Mapped 1:1 to Bitbucket \"steps\" -- see the Commentary/CI note above."
+  "Return the jobs of workflow RUN-ID in FULL-NAME, in order."
   (when (and full-name run-id)
     (alist-get 'jobs
                (github-api-request "GET" (format "/repos/%s/actions/runs/%s/jobs" full-name run-id)))))
 
 (defun github-pipeline-steps-async (full-name run-id callback)
   "Fetch the jobs of workflow RUN-ID in FULL-NAME; CALLBACK gets them (or nil).
-Non-blocking twin of `github-pipeline-steps'.  `github--unwrap-page'
-already unwraps the `jobs' envelope, so the collected values are the
-job list itself."
+Non-blocking twin of `github-pipeline-steps'."
   (if (not (and full-name run-id))
       (funcall callback nil)
     (github-api-paged-async
@@ -2124,10 +1910,9 @@ job list itself."
 
 (defun github-pipeline-trigger (full-name branch &optional selector variables)
   "Dispatch a workflow run in FULL-NAME for BRANCH.
-SELECTOR names the workflow file (e.g. \"ci.yml\") or numeric
-workflow id -- REQUIRED, since Actions (unlike Bitbucket Pipelines)
-has no single default-pipeline concept to fall back to when omitted.
-VARIABLES becomes the dispatch's `inputs'."
+SELECTOR, the workflow file (e.g. \"ci.yml\") or numeric id, is
+required: Actions has no default pipeline.  VARIABLES becomes the
+dispatch's `inputs'."
   (unless selector
     (user-error "GitHub Actions requires a workflow file name or id to trigger (pass SELECTOR)"))
   (let ((data `((ref . ,branch))))
@@ -2142,31 +1927,21 @@ VARIABLES becomes the dispatch's `inputs'."
 
 (defun github-pipeline-run-manual-step (full-name branch pipeline step)
   "Signal that GitHub Actions has no per-job manual-run endpoint.
-Bitbucket gates a step and lets the API start just that step;
-Actions has no equivalent -- the closest analogues (re-dispatching
-the whole workflow, or approving a deployment environment) are
-different enough in effect that faking this would mislead the user,
-so this always errors clearly instead.  Note this is a different
-capability from `github-pipeline-step-rerun', which GitHub DOES
-support (re-running a single already-finished job)."
+Re-dispatching the whole workflow is different enough that faking
+it would mislead, so this always signals a `user-error'.  Distinct
+from `github-pipeline-step-rerun', which GitHub does support."
   (ignore full-name branch pipeline step)
   (user-error "GitHub Actions has no per-job manual-run endpoint; re-dispatch the workflow instead"))
 
 (defun github-pipeline-step-rerunnable-p (step)
   "Return non-nil if job STEP can be individually re-run in place.
-GitHub Actions supports rerunning a single job via
-`POST /actions/jobs/{job_id}/rerun', but only once it has actually
-finished -- a queued or in-progress job has nothing to rerun yet.
-This is a real, distinct capability from Bitbucket's \"manual gate\"
-concept (see `github-pipeline-step-manual-p'): it restarts a
-finished (typically failed) job, not a step waiting for its first
-run, so it never reports as manual/runnable-manual."
+Only a finished job can be re-run.  This is distinct from a manual
+gate (see `github-pipeline-step-manual-p')."
   (equal (alist-get 'status step) "completed"))
 
 (defun github-pipeline-step-rerun (full-name _run-id step)
   "Re-run job STEP (in FULL-NAME) in place via its rerun endpoint.
-Signals a clear `user-error' when STEP has not finished yet, since
-GitHub's rerun endpoint only applies to a completed job."
+Signals a `user-error' when STEP has not finished yet."
   (unless (github-pipeline-step-rerunnable-p step)
     (user-error "Job %S has not finished yet; only a completed job can be re-run"
                 (or (alist-get 'name step) "?")))
@@ -2183,8 +1958,7 @@ Deep-links to STEP's job when given."
 
 (defun github-pipeline-step-log (full-name run-id job-id)
   "Return the captured log text for JOB-ID of RUN-ID in FULL-NAME.
-The endpoint redirects to a plain-text blob; `url-retrieve-synchronously'
-follows redirects transparently, so this reads the final body as text."
+The endpoint redirects to a plain-text blob, which is followed."
   (ignore run-id)
   (when (and full-name job-id)
     (github-api-request-raw "GET" (format "/repos/%s/actions/jobs/%s/logs" full-name job-id))))
@@ -2195,11 +1969,8 @@ follows redirects transparently, so this reads the final body as text."
 
 (defun github-pipeline-step-log-classify-line (line)
   "Classify LINE for `gp-pipeline-step-log-classify-line'.
-GitHub prefixes every raw log line with an RFC3339 timestamp, then
-uses \"##[group]\"/\"##[endgroup]\"/\"##[error]\"/\"##[warning]\"/
-\"##[notice]\" workflow-command markers for structure -- there is no
-Bitbucket-style command echo, since Actions logs the *step name*, not
-each shell line, and that already renders as its own log section."
+The timestamp prefix is stripped and \"##[group]\"-style workflow
+command markers are recognised.  Actions has no per-command echo."
   (let* ((rest (if (string-match github--log-timestamp-re line)
                     (substring line (match-end 0))
                   line)))
@@ -2224,8 +1995,7 @@ each shell line, and that already renders as its own log section."
 
 (defun github-pipeline-state (pipeline)
   "Return PIPELINE's coarse state: QUEUED/PENDING/IN_PROGRESS/COMPLETED.
-Translated from GitHub's `status' (queued/in_progress/completed) to
-the vocabulary the UI already expects from Bitbucket."
+Translated from GitHub's `status' to the Bitbucket vocabulary."
   (pcase (alist-get 'status pipeline)
     ("completed" "COMPLETED")
     ("in_progress" "IN_PROGRESS")
@@ -2245,7 +2015,7 @@ Translated from GitHub's `conclusion'."
       (_ (upcase c)))))
 
 (defun github-pipeline-finished-p (pipeline)
-  "Non-nil when PIPELINE (workflow run) has finished."
+  "Return non-nil when PIPELINE (workflow run) has finished."
   (equal (alist-get 'status pipeline) "completed"))
 
 (defun github-pipeline-number (pipeline)
@@ -2263,12 +2033,8 @@ Translated from GitHub's `conclusion'."
      pipelines)))
 
 (defun github-pipeline-step-state (step)
-  "Return STEP (job)'s coarse state (QUEUED/PENDING/IN_PROGRESS/COMPLETED/…)."
-  (pcase (alist-get 'status step)
-    ("completed" "COMPLETED")
-    ("in_progress" "IN_PROGRESS")
-    ("queued" "QUEUED")
-    (_ "PENDING")))
+  "Return STEP (job)'s coarse state, as `github-pipeline-state' does."
+  (github-pipeline-state step))
 
 (defun github-pipeline-step-result (step)
   "Return STEP (job)'s result string, or nil."
@@ -2280,16 +2046,15 @@ Translated from GitHub's `conclusion'."
       (_ (upcase c)))))
 
 (defun github-pipeline-step-running-p (step)
-  "Non-nil when STEP (job) is currently running."
+  "Return non-nil when STEP (job) is currently running."
   (equal (alist-get 'status step) "in_progress"))
 
 (defun github-pipeline-step-manual-p (_step)
-  "Always nil: GitHub Actions jobs have no \"manual/gated\" concept exposed here.
-See the CI mapping note at the top of the Actions section."
+  "Return nil: Actions jobs expose no \"manual/gated\" concept."
   nil)
 
 (defun github-pipeline-step-runnable-manual-p (_step)
-  "Always nil -- see `github-pipeline-step-manual-p'."
+  "Return nil, like `github-pipeline-step-manual-p'."
   nil)
 
 (defun github-pipelines-sort (pipelines step-counts)

@@ -2,22 +2,16 @@
 
 ;;; Commentary:
 
-;; Ghostty backend for `gp-helm-terminal'. Ghostty ships a native AppleScript
-;; scripting dictionary (since 1.3.0) exposing `terminal' objects with a
-;; stable `id' and `working directory', plus `input text'/`send key' commands
-;; addressed directly by that id. Unlike iTerm2, there is no tty/job-name
-;; introspection available, so AI-session detection here falls back to the
-;; terminal's title (`name'), which AI CLIs (Claude, opencode) typically set.
+;; Ghostty backend for `gp-helm-terminal', using Ghostty's native
+;; AppleScript dictionary (since 1.3.0): `terminal' objects with a stable
+;; `id' and `working directory', and `input text'/`send key' addressed by
+;; that id, so no window-focus juggling is needed (System Events window
+;; enumeration is unreliable for Ghostty anyway).  There is no tty/job-name
+;; introspection, so AI-session detection matches the terminal title.
 ;;
-;; Because targeting is always by stable id, no window/frontmost focus juggling
-;; is required (and none would be reliable -- Ghostty's Accessibility/System
-;; Events window enumeration is not trustworthy across multiple processes).
-;;
-;; New surfaces always run the user's login shell -- never Ghostty's
-;; `command of cfg', which execs directly and so bypasses shell aliases
-;; (e.g. a `claude' shell alias would silently fail to resolve, exiting the
-;; surface before a prompt could ever be sent). A launch command is instead
-;; typed into that shell as ordinary input, just as the user would type it.
+;; New surfaces run the login shell, never `command of cfg': that execs
+;; directly and bypasses shell aliases (a `claude' alias would not
+;; resolve).  The launch command is typed into the shell instead.
 
 ;;; Code:
 
@@ -32,27 +26,8 @@
   :group 'bitbucket)
 
 (defun gp-helm-terminal-ghostty--run-script (lines &rest args)
-  "Run AppleScript LINES with `osascript', passing ARGS via argv.
-ARGS are passed positionally (never interpolated into the script text) so
-arbitrary text -- including shell metacharacters and embedded newlines --
-is safe. Return stdout trimmed, or signal `user-error' with stderr details."
-  (gp-log 'info "Ghostty AppleScript: %d lines, %d args" (length lines) (length args))
-  (with-temp-buffer
-    (let ((status (apply #'call-process
-                         "osascript" nil (current-buffer) nil
-                         "-l" "AppleScript"
-                         (append (cl-mapcan (lambda (line) (list "-e" line)) lines)
-                                 (cons "--" args)))))
-      (let ((output (string-trim (buffer-string))))
-        (if (and (integerp status) (zerop status))
-            (progn
-              (unless (string-empty-p output)
-                (gp-log 'info "Ghostty AppleScript output: %s" output))
-              output)
-          (gp-log-error "Ghostty AppleScript failed (status=%s): %s"
-                        status (if (string-empty-p output) "unknown error" output))
-          (user-error "Ghostty AppleScript failed: %s"
-                      (if (string-empty-p output) "unknown error" output)))))))
+  "Run AppleScript LINES via `gp-helm-terminal--run-applescript' with ARGS."
+  (apply #'gp-helm-terminal--run-applescript "Ghostty" lines args))
 
 (defconst gp-helm-terminal-ghostty--field-separator (string 31)
   "Field separator used between AppleScript terminal columns.")
@@ -72,9 +47,8 @@ is safe. Return stdout trimmed, or signal `user-error' with stderr details."
 
 (defun gp-helm-terminal-ghostty-list-sessions ()
   "Return Ghostty terminals as `gp-helm-terminal-session' structs.
-No tty/job-name introspection is available, so `job-name' is left nil;
-`gp-helm-terminal--ai-session-p' falls back to matching the terminal title
-(`name') against `gp-helm-terminal-ai-job-regexp'."
+`job-name' is left nil, so `gp-helm-terminal--ai-session-p' matches the
+terminal title (`name') instead."
   (gp-helm-terminal-ghostty--parse-sessions
    (gp-helm-terminal-ghostty--run-script
     (list
@@ -103,9 +77,7 @@ No tty/job-name introspection is available, so `job-name' is left nil;
 
 (defun gp-helm-terminal-ghostty-send-text (terminal-id text submit)
   "Send TEXT to the running terminal TERMINAL-ID via Ghostty.
-When SUBMIT is non-nil, a separate Enter key event is sent afterwards to
-submit the prompt. TEXT is passed as an argv item, never interpolated into
-the script text, so embedded newlines and shell metacharacters are safe."
+When SUBMIT is non-nil, a separate Enter key event is sent afterwards."
   (gp-helm-terminal-ghostty--run-script
    (list
     "on run argv"
@@ -123,15 +95,10 @@ the script text, so embedded newlines and shell metacharacters are safe."
 
 (defun gp-helm-terminal-ghostty-open-session (directory text command delay submit)
   "Open a new Ghostty window in DIRECTORY, start COMMAND, and send TEXT.
-The new terminal runs the user's normal login shell (never Ghostty's
-`command of cfg', which execs directly and so never sees shell aliases --
-e.g. a `claude' alias defined in .zshrc would silently fail to resolve
-and the surface would exit before the prompt could be sent). Instead
-COMMAND, when given, is typed into that shell as ordinary input, exactly
-as if the user had typed it. After DELAY seconds (to let COMMAND finish
-starting), the prompt TEXT is delivered via `input text', followed by a
-submit when SUBMIT is non-nil.  An empty TEXT sends nothing at all -- no
-input and no submit -- which is how a plain shell is opened."
+COMMAND, when given, is typed into the login shell (see Commentary).
+After DELAY seconds TEXT is delivered via `input text', followed by a
+submit when SUBMIT is non-nil.  An empty TEXT sends nothing, which is
+how a plain shell is opened."
   (gp-log 'info "Ghostty open: dir=%s command=%s delay=%s" directory command delay)
   (gp-helm-terminal-ghostty--run-script
    (list

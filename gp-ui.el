@@ -99,15 +99,14 @@
   "Face for branch names." :group 'bitbucket-faces)
 (defface gp-repo-face '((t :inherit magit-branch-remote))
   "Face for a repository name in the detail buffer.
-Distinct from `gp-branch-face' so the repo line does not read as
-another branch: they sit one above the other and would otherwise be
-one indistinguishable block." :group 'bitbucket-faces)
+Distinct from `gp-branch-face' so the repo line, which sits directly
+above the branch line, does not read as another branch."
+  :group 'bitbucket-faces)
 (defface gp-dirty-tree-face '((t :inherit warning))
   "Face for the uncommitted-local-changes notice in the detail buffer.
-`warning', not `error': uncommitted work is a caution about what a
-checkout would move, not something broken -- the conflict warning
-right below it owns `error', and two lines shouting equally would
-flatten the difference." :group 'bitbucket-faces)
+Inherits `warning', not `error': the conflict warning below it owns
+`error', and uncommitted work is a caution, not a breakage."
+  :group 'bitbucket-faces)
 (defface gp-comment-author-face '((t :inherit bold))
   "Face for comment authors." :group 'bitbucket-faces)
 (defface gp-detail-title-face
@@ -122,23 +121,18 @@ flatten the difference." :group 'bitbucket-faces)
 (defface gp-label-face '((t :inherit magit-tag))
   "Fallback face for a PR label with no usable colour.
 Also the base every colour-derived label face inherits from, so a
-theme can restyle all labels (box, weight, height) in one place while
-each keeps its own platform colour."
+theme can restyle all labels in one place."
   :group 'bitbucket-faces)
 
 (defcustom gp-label-colors t
   "When non-nil, render each PR label in the colour the platform gives it.
-GitHub assigns every label a hex colour; honouring it makes the list
-scan the same way the web UI does.  Set to nil to render every label
-in `gp-label-face' instead -- useful on a terminal whose palette
-fights the repo's colours."
+Set to nil to render every label in `gp-label-face' instead -- useful
+on a terminal whose palette fights the repo's colours."
   :type 'boolean :group 'bitbucket)
 
 (defvar gp--label-face-cache (make-hash-table :test 'equal)
   "HEX -> face symbol, for faces derived from platform label colours.
-Faces are interned, so they are built once per distinct colour rather
-than per render (a list view repeats the same handful of labels across
-many rows).")
+Each face is built once per distinct colour, not once per render.")
 
 (defun gp--color-luminance (hex)
   "Return the relative luminance (0..1) of \"RRGGBB\" string HEX, or nil.
@@ -153,10 +147,8 @@ this is the cheap sRGB approximation, not the gamma-corrected form."
 (defun gp--label-face (hex)
   "Return a face rendering a label whose platform colour is HEX.
 Falls back to `gp-label-face' when HEX is missing or malformed, when
-`gp-label-colors' is nil, or when the display has too few colours to
-place an arbitrary background (a 16-colour TTY would snap every label
-to the same approximate shade, losing the distinction the colour was
-carrying)."
+`gp-label-colors' is nil, or when the display has fewer than 256
+colours (a 16-colour TTY would snap every label to the same shade)."
   (let ((lum (and gp-label-colors (gp--color-luminance hex))))
     (if (or (null lum) (< (display-color-cells) 256))
         'gp-label-face
@@ -178,18 +170,13 @@ carrying)."
     (define-key map (kbd "C-c C-c") #'gp-filter-by-label)
     map)
   "Keymap active on a rendered label, for filtering by it.
-Lives on the label text itself rather than in the mode map, so the
-binding only fires where a label actually is -- `C-c C-c' anywhere
-else in the buffer keeps whatever meaning the mode gives it.")
+Lives on the label text, not the mode map, so `C-c C-c' elsewhere keeps
+the mode's meaning.")
 
 (defun gp--format-labels (labels)
   "Return LABELS as one propertized string, or \"\" when there are none.
-LABELS is `gp-pr-labels' shape.  Returns the empty string rather than
-nil so callers can `concat' it unconditionally.
-
-Each label carries its name in a `gp-label' text property and the
-`gp-label-map' keymap, so clicking it (or `C-c C-c' on it) can filter
-the list by that label without re-deriving which one was under point."
+LABELS is `gp-pr-labels' shape.  Each label carries its name in a
+`gp-label' text property and the `gp-label-map' keymap."
   (if (null labels)
       ""
     (mapconcat
@@ -209,20 +196,16 @@ the list by that label without re-deriving which one was under point."
 
 ;;;; Section types -----------------------------------------------------------
 
-;; Both section types stash their backing object in the standard `value'
-;; slot magit provides, so no extra slots are needed.
+;; All section types keep their backing object in magit's `value' slot.
 (defclass gp-pr-section (magit-section) ())
 (defclass gp-comment-section (magit-section) ())
 (defclass gp-file-section (magit-section) ())
 (defclass gp-commit-section (magit-section) ())
 
-;; magit carries section visibility across a redraw by looking the new section
-;; up in the old tree by `magit-section-ident', whose default method uses the
-;; section's whole `value'.  Ours are freshly-parsed API objects, so any changed
-;; field (`updated_on', an edited comment body, a new reply count) makes the
-;; value non-`equal', the lookup misses, and a section the user had collapsed
-;; comes back expanded.  Keying on the immutable id/hash instead keeps
-;; collapsed sections collapsed across a refresh.
+;; magit keeps visibility across a redraw by matching `magit-section-ident',
+;; which defaults to the whole `value'.  Our values are freshly-parsed API
+;; objects that change on any edit, so key on the immutable id/hash instead,
+;; or collapsed sections re-expand on refresh.
 
 (cl-defmethod magit-section-ident-value ((section gp-comment-section))
   "Identify a comment section by its comment id."
@@ -286,20 +269,15 @@ Fetched asynchronously via `gp-pr-reviewers-async' -- see
 `gp--detail-load-reviewers'.")
 (defvar-local gp--detail-pending-action nil
   "Tag of the action button currently in flight, or nil.
-Set by `gp--detail-run-action' just before a blocking mutation (draft
-toggle, approve, resolve, …) and cleared once it returns.  The
-render functions check this so that ONE button swaps to a spinner in
-its own slot on the immediate redraw, instead of the mutation
-blocking Emacs with no feedback until the full post-mutation refresh
-lands (see `gp--insert-action-button/spinner').")
+Set by `gp--detail-run-action' around a blocking mutation so that one
+button renders as a spinner on the immediate redraw (see
+`gp--insert-action-button/spinner').")
 (defvar-local gp--detail-local-dirty nil
   "Local working-tree state of the PR's checkout, or nil.
 Plist (:dir DIR :branch BRANCH :count N), set only when the tree has
 uncommitted changes.  Filled by `gp--detail-load-local-dirty', never
-during a render: it shells out to git, and the no-fetch-in-render rule
-covers a subprocess just as much as a request.  Nil also means \"no
-clone\" and \"not asked yet\", all three of which draw nothing -- a
-notice about work that may not exist is worse than none.")
+during a render (it shells out to git).  Nil -- clean, no clone, or not
+asked yet -- draws nothing.")
 (defvar-local gp--detail-marked-comment-ids nil
   "Comment ids marked for batch terminal handoff in the detail buffer.")
 (defvar-local gp--detail-refresh-token 0
@@ -310,9 +288,7 @@ notice about work that may not exist is worse than none.")
   "Return a one-line propertized heading string for PR."
   (let-alist pr
     (let ((count (gp-pr-comment-count pr))
-          ;; Labels sit with the title -- they say what the PR *is*.  Platforms
-          ;; without them (Bitbucket) contribute nothing here, so no empty slot
-          ;; is left behind and the line reads exactly as it did before.
+          ;; "" on platforms without labels (Bitbucket)
           (labels (gp--format-labels (gp-pr-labels pr))))
       (concat
        (propertize (format "#%s" .id) 'face 'gp-pr-id-face)
@@ -373,51 +349,41 @@ Assumes the buffer is in `gp-list-mode' and writable."
         (format "%s:%s" .inline.path (or .inline.to .inline.from "?"))
       "general")))
 
+(defun gp--url-keymap (url)
+  "Return a keymap opening URL on mouse-1, mouse-2 and RET."
+  (let ((m (make-sparse-keymap))
+        (open (lambda () (interactive) (browse-url url))))
+    (define-key m [mouse-1] open)
+    (define-key m [mouse-2] open)
+    (define-key m (kbd "RET") open)
+    m))
+
 (defun gp--linkify (start)
   "Add `link' face + clickability to markdown/bare links from START in buffer.
 Handles \[label](url) (showing the label), bare http(s) URLs, and
 ticket keys like \"WP-1231\" (see `gp-ticket-key-pattern')."
-  (save-excursion
-    ;; [label](url) -> clickable label
-    (goto-char start)
-    (while (re-search-forward "\\[\\([^]]+\\)\\](\\(https?://[^)]+\\))" nil t)
-      (let ((label (match-string 1)) (url (match-string 2)))
-        (replace-match
-         (propertize label 'face 'link 'mouse-face 'highlight
-                     'help-echo url 'follow-link t
-                     'keymap (let ((m (make-sparse-keymap)))
-                               (define-key m [mouse-1]
-                                           (lambda () (interactive) (browse-url url)))
-                               (define-key m [mouse-2]
-                                           (lambda () (interactive) (browse-url url)))
-                               (define-key m (kbd "RET")
-                                           (lambda () (interactive) (browse-url url)))
-                               m))
-         t t)))
-    ;; bare URLs not already faced
-    (goto-char start)
-    (while (re-search-forward "\\(?:^\\|[ \t]\\)\\(https?://[^ \t\n]+\\)" nil t)
-      (unless (eq (get-text-property (match-beginning 1) 'face) 'link)
-        (let ((url (match-string 1)))
+  (cl-flet ((url-props (url)
+              (list 'face 'link 'mouse-face 'highlight 'help-echo url
+                    'follow-link t 'keymap (gp--url-keymap url))))
+    (save-excursion
+      ;; [label](url) -> clickable label
+      (goto-char start)
+      (while (re-search-forward "\\[\\([^]]+\\)\\](\\(https?://[^)]+\\))" nil t)
+        (let ((label (match-string 1)) (url (match-string 2)))
+          (replace-match (apply #'propertize label (url-props url)) t t)))
+      ;; bare URLs not already faced
+      (goto-char start)
+      (while (re-search-forward "\\(?:^\\|[ \t]\\)\\(https?://[^ \t\n]+\\)" nil t)
+        (unless (eq (get-text-property (match-beginning 1) 'face) 'link)
+          (add-text-properties (match-beginning 1) (match-end 1)
+                               (url-props (match-string 1)))))
+      ;; ticket keys not already faced (by either pass above)
+      (goto-char start)
+      (while (re-search-forward gp-ticket-key-pattern nil t)
+        (unless (eq (get-text-property (match-beginning 0) 'face) 'link)
           (add-text-properties
-           (match-beginning 1) (match-end 1)
-           (list 'face 'link 'mouse-face 'highlight 'help-echo url
-                 'follow-link t
-                 'keymap (let ((m (make-sparse-keymap)))
-                           (define-key m [mouse-1]
-                                       (lambda () (interactive) (browse-url url)))
-                           (define-key m [mouse-2]
-                                       (lambda () (interactive) (browse-url url)))
-                           (define-key m (kbd "RET")
-                                       (lambda () (interactive) (browse-url url)))
-                           m))))))
-    ;; ticket keys not already faced (by either pass above)
-    (goto-char start)
-    (while (re-search-forward gp-ticket-key-pattern nil t)
-      (unless (eq (get-text-property (match-beginning 0) 'face) 'link)
-        (add-text-properties
-         (match-beginning 0) (match-end 0)
-         (gp-ticket--props (match-string 0)))))))
+           (match-beginning 0) (match-end 0)
+           (gp-ticket--props (match-string 0))))))))
 
 (defun gp--render-markdown (text)
   "Return TEXT fontified as GitHub-flavoured Markdown, with colored links.
@@ -466,15 +432,10 @@ original (chronological) order."
 (defun gp--comment-thread-resolved-p (comment by-id)
   "Return non-nil if COMMENT or any ancestor of it is resolved.
 BY-ID maps comment id -> comment, for walking `parent.id' links.
-
-A reply's own `resolution' is usually unset even when its thread has
-been resolved: Bitbucket only sets it on the comment the resolve
-action targeted, normally the thread root.  Testing a reply on its own
-therefore leaves it expanded under a collapsed root, which is exactly
-the noise collapsing resolved threads is meant to remove.  Mirrors
-`gp-overlay--comment-thread-resolved-p', which solves the same problem
-for the overlay layer.  The `seen' guard keeps a cyclic parent chain
-from looping forever."
+Bitbucket sets `resolution' only on the comment the resolve targeted
+(normally the root), so replies must inherit it.  Mirrors
+`gp-overlay--comment-thread-resolved-p'.  The `seen' guard stops a
+cyclic parent chain from looping."
   (let ((c comment) (seen (make-hash-table :test 'eql)))
     (catch 'done
       (while c
@@ -508,11 +469,8 @@ reply threads.  BY-ID, when given, maps comment id -> comment so a
 reply can be collapsed along with the thread it belongs to (see
 `gp--comment-thread-resolved-p').
 
-Resolved-ness and collapsing are deliberately separate: only the
-comment the resolve action targeted is actually resolved -- Bitbucket
-cannot resolve or unresolve a reply -- so a reply keeps its own
-\(unresolved) status and glyph while still folding away with its
-thread."
+Resolved-ness and collapsing are separate: a reply keeps its own
+\(unresolved) status and glyph while still folding away with its thread."
   (let* ((depth (or depth 0))
          (ind (make-string (* depth 4) ?\s))
          (pending (gp-comment-pending-p comment))
@@ -520,11 +478,8 @@ thread."
          (collapse (if by-id
                        (gp--comment-thread-resolved-p comment by-id)
                      resolved))
-         ;; gp--detail-diff is the diff-membership fallback: Bitbucket's own
-         ;; `inline.outdated' flag (see gp-comment-outdated-p) is never
-         ;; populated here because bitbucket-pull-request-comments uses the
-         ;; list-comments endpoint, which omits it -- only the per-comment
-         ;; endpoint has it, and fetching that per comment would be an N+1.
+         ;; diff-membership fallback: Bitbucket's list-comments endpoint
+         ;; omits `inline.outdated' (only the per-comment endpoint has it)
          (outdated (gp-comment-outdated-p comment gp--detail-diff))
          (marked (and pr (gp--detail-comment-marked-p comment)))
          ;; prefix every line of STR with the thread indent
@@ -533,7 +488,6 @@ thread."
     (magit-insert-section (gp-comment-section comment collapse)
       (let ((start (point)))
         (let-alist comment
-          (progn
           (magit-insert-heading
             (concat
              ind
@@ -568,10 +522,7 @@ thread."
                        (gp--render-markdown (or .content.raw "")))))
             (insert (funcall pad (replace-regexp-in-string "^" "  " body)) "\n"))
           (when (and pr pending)
-            ;; Nobody but the author can see a pending comment, so reply,
-            ;; react, resolve and the AI-terminal actions are all
-            ;; meaningless here -- only editing its text and pulling it
-            ;; back out of the batch make sense.
+            ;; only the author can see a pending comment: edit/remove only
             (insert ind "  ")
             (gp--insert-action-button
              "edit [e]" "Edit this comment"
@@ -582,9 +533,7 @@ thread."
              (lambda () (gp-ui-delete-comment pr comment)))
             (insert "\n"))
           (when (and pr (not pending))
-            ;; the reactions line indents itself: emitting the indent here
-            ;; left stray whitespace on the action row when a comment had no
-            ;; reactions to draw
+            ;; indents itself, so it draws nothing when there are no reactions
             (gp--insert-reactions pr comment (concat ind "  "))
             (insert ind "  ")
             (gp--insert-action-button
@@ -594,10 +543,8 @@ thread."
               (insert " ")
               (let ((liked (and (member "+1" (alist-get 'reaction-mine comment)) t)))
                 (gp--insert-action-button
-                 ;; The label names the KEY, which is `+' in both directions
-                 ;; (`-' is `negative-argument' globally, so binding it here
-                 ;; would fight Emacs).  `+' toggles; the help text is what
-                 ;; says which way it will go.
+                 ;; `+' toggles both ways (`-' is `negative-argument');
+                 ;; the help text says which way it will go
                  "👍 [+]"
                  (if liked "Remove your 👍 from this comment"
                    "Add your 👍 to this comment")
@@ -644,7 +591,7 @@ thread."
                  "delete [K]" "Delete this comment"
                  (lambda () (gp-ui-delete-comment pr comment)))))
             (insert "\n"))
-          (insert "\n"))
+          (insert "\n")
           (when marked
             (add-face-text-property start (point) 'gp-comment-marked-face t)))))))
 
@@ -653,16 +600,13 @@ thread."
     ("heart" . "❤️") ("hooray" . "🎉") ("rocket" . "🚀") ("eyes" . "👀"))
   "Display emoji for each platform reaction token.
 The tokens are the platform's own (GitHub sends \"+1\", not
-\"thumbs_up\"); anything unmapped falls back to showing the token, so a
-platform adding a ninth reaction degrades to readable text rather than
-breaking.")
+\"thumbs_up\"); an unmapped token is shown as-is.")
 
 (defun gp-reaction-emoji (content)
   "Return the display emoji for reaction CONTENT, or CONTENT itself."
   (or (cdr (assoc content gp-reaction-emoji-alist)) content))
 
-;; help-at-pt.el is loaded on demand in `gp-detail-mode'; declare its vars so
-;; a cold byte-compile doesn't treat them as free.
+;; help-at-pt.el is loaded on demand in `gp-detail-mode'.
 (defvar help-at-pt-display-when-idle)
 (defvar help-at-pt-timer-delay)
 
@@ -676,17 +620,15 @@ this package's -- set nil to leave that global alone."
 
 (defcustom gp-reaction-names-max 5
   "How many reactor names to name in a reaction's tooltip.
-Beyond this the rest are summarised as \"+N more\", so a widely-liked
-comment does not produce an echo-area line too long to read."
+Beyond this the rest are summarised as \"+N more\"."
   :type 'integer :group 'bitbucket)
 
 (defun gp--reaction-summary (reactions uuid)
   "Summarise REACTIONS as ((CONTENT COUNT MINE-P NAMES) …), platform order kept.
 UUID identifies the current user so its own reactions can be marked, and
-NAMES lists who reacted (in arrival order) for the tooltip.  Grouping
-happens here rather than in each backend: the APIs return one row per
-(user, reaction), which is what makes the count, the \"did I react\" test
-and the name list all possible from a single fetch."
+NAMES lists who reacted (in arrival order) for the tooltip.  The APIs
+return one row per (user, reaction); grouping happens here, not per
+backend."
   (let (out)
     (dolist (r reactions)
       (let* ((content (alist-get 'content r))
@@ -704,8 +646,7 @@ and the name list all possible from a single fetch."
 
 (defun gp--reaction-tooltip (content count names mine)
   "Describe a reaction for the echo area: who reacted, and what a click does.
-NAMES is abbreviated at `gp-reaction-names-max' so a popular comment
-does not produce an unreadable line."
+NAMES is abbreviated at `gp-reaction-names-max'."
   (let* ((shown (seq-take names gp-reaction-names-max))
          (extra (- (length names) (length shown))))
     (format "%s %s by %s%s -- click to %s yours"
@@ -713,23 +654,6 @@ does not produce an unreadable line."
             (mapconcat #'identity shown ", ")
             (if (> extra 0) (format " +%d more" extra) "")
             (if mine "remove" "add"))))
-
-(defun gp--reaction-names (pr comment content)
-  "Return the display names of whoever reacted CONTENT to COMMENT of PR.
-Fetched on demand -- when the tooltip is actually shown -- because the
-counts come free with the comment while the names cost a request per
-comment.  Doing that eagerly during a render meant a network call per
-comment mid-redisplay, which re-entered the renderer and drew the
-comment several times over."
-  (let ((uuid (gp-user-uuid)))
-    (mapcar (lambda (cell) (car (nth 3 cell)))
-            (seq-filter (lambda (cell) (equal (car cell) content))
-                        (gp--reaction-summary
-                         (seq-filter
-                          (lambda (r) (equal (alist-get 'content r) content))
-                          (ignore-errors
-                            (gp-comment-reactions (gp-pr-full-name pr) comment)))
-                         uuid)))))
 
 (defun gp--reaction-help-echo (pr comment content count mine)
   "Build a lazy `help-echo' for a reaction button.
@@ -743,9 +667,7 @@ when the tooltip is actually displayed."
            (names (mapcar (lambda (r) (or (let-alist r .user.display_name)
                                           (let-alist r .user.uuid)))
                           rows))
-           ;; whether it is mine is only knowable from these rows -- the
-           ;; comment payload carries counts, not who reacted -- so decide it
-           ;; here rather than trusting the caller's guess
+           ;; the rows say who reacted; the caller's MINE may be a guess
            (mine (or mine
                      (and uuid (seq-some (lambda (r) (equal (let-alist r .user.uuid) uuid))
                                          rows)
@@ -757,12 +679,9 @@ when the tooltip is actually displayed."
 
 (defun gp--insert-reactions (pr comment &optional indent)
   "Insert COMMENT's reaction summary for PR, if the platform has any.
-INDENT is prefixed only when something is actually drawn, so a comment
-with no reactions leaves no stray whitespace behind.
-Each reaction is a button that toggles the current user's own -- so a
-click adds yours, and a second click takes it away.  Nothing is inserted
-on a platform without reactions, or on a comment nobody has reacted to
-yet (`+' / `!' are how you add the first one).
+INDENT is prefixed only when something is actually drawn.  Each
+reaction is a button toggling the current user's own.  Nothing is
+inserted on a platform without reactions or on a comment with none.
 
 Counts come from the comment itself (`reaction-counts', filled in by the
 backend), never from a fetch: rendering must not touch the network."
@@ -774,17 +693,12 @@ backend), never from a fetch: rendering must not touch the network."
         (dolist (cell counts)
           (let* ((content (car cell))
                  (count (cdr cell))
-                 ;; REST ships counts but never says whether *you* reacted;
-                 ;; the backend fills `reaction-mine' from one GraphQL
-                 ;; prefetch (`viewerHasReacted') so this stays fetch-free.
+                 ;; filled by the backend's GraphQL prefetch
+                 ;; (`viewerHasReacted'), so this stays fetch-free
                  (mine (and (member content mine-set) t)))
             (gp--insert-action-button
-             ;; The count always shows, in brackets, so a reaction never
-             ;; looks like a single anonymous mark.  Whether it is yours is
-             ;; deliberately NOT marked on the pill: a glyph here reads as
-             ;; "resolved"/"done" rather than "me".  The quick action's
-             ;; [+]/[-] label carries that, and the tooltip names the
-             ;; reactors.
+             ;; "yours" is deliberately not marked on the pill (a glyph
+             ;; reads as "done"); the tooltip says it and names reactors
              (format "%s (%d)" (gp-reaction-emoji content) count)
              (gp--reaction-help-echo pr comment content count mine)
              (lambda () (gp-ui-toggle-reaction pr comment content)))
@@ -810,27 +724,20 @@ backend), never from a fetch: rendering must not touch the network."
 
 (defun gp--insert-action-button/spinner (tag label help fn)
   "Insert a button, or a spinner in its place while TAG is pending.
-Same slot, same width class as a plain `gp--insert-action-button' --
-just enough to avoid the layout shifting when the mutation this
-button fires (via `gp--detail-run-action') is in flight.  TAG
-identifies this button -- a symbol for a PR-level action (`draft',
-`approve', …), or a compound value like (resolution . COMMENT-ID)
-for a per-comment action, since several comments render in the same
-buffer and each needs its own independent pending state.  Compared
-with `equal' against `gp--detail-pending-action', not `eq': a
-compound tag is a fresh cons on every render, so `eq' would never
-match across the render that sets the flag and the one reading it."
+LABEL, HELP and FN are as for `gp--insert-action-button'.  TAG is a
+symbol for a PR-level action (`draft', `approve', ...) or a cons like
+\(resolution . COMMENT-ID) for a per-comment one.  Compared with
+`equal' against `gp--detail-pending-action', since a compound tag is a
+fresh cons on every render."
   (if (equal gp--detail-pending-action tag)
       (insert (propertize "⏳" 'face 'shadow))
     (gp--insert-action-button label help fn)))
 
 (defun gp--detail-run-action (buf tag thunk)
   "Run THUNK with BUF's button TAG showing a spinner meanwhile.
-Redraws BUF once immediately so the spinner appears before the
-\(blocking\) THUNK runs, then clears the pending flag once THUNK
-returns \(or signals\) -- the caller is expected to trigger the real
-post-mutation redraw itself right after \(e.g. via `gp-detail-refresh'
-or `gp-invalidate-pr-caches' + a manual rerender\), same as today."
+Redraws BUF once so the spinner appears before the blocking THUNK
+runs, and clears the pending flag when THUNK returns or signals.  The
+caller triggers the real post-mutation redraw itself."
   (with-current-buffer buf
     (setq gp--detail-pending-action tag)
     (gp--detail-rerender buf))
@@ -844,10 +751,9 @@ or `gp-invalidate-pr-caches' + a manual rerender\), same as today."
   '("Pipfile.lock" "poetry.lock" "uv.lock" "package-lock.json" "yarn.lock"
     "pnpm-lock.yaml" "go.sum" "Cargo.lock" "Gemfile.lock" "composer.lock")
   "File names whose lines are left out of a PR's +N -M count.
-Generated files such as lockfiles swamp the count: a one-line change
-reads as +4000 when a lockfile moved.  Each entry is a shell glob
-matched against the file's base name; matching files stay in the
-changed-files list, marked as not counted."
+Generated files such as lockfiles would swamp the count.  Each entry is
+a shell glob matched against the file's base name; matching files stay
+in the changed-files list, marked as not counted."
   :type '(repeat string) :group 'bitbucket)
 
 (defun gp--uncounted-file-p (path)
@@ -858,9 +764,9 @@ changed-files list, marked as not counted."
 
 (defun gp--counted-lines (stats)
   "Return (ADDED REMOVED UNCOUNTED) for STATS minus `gp-uncounted-files'.
-UNCOUNTED is how many listed files were left out.  The excluded lines
-are subtracted from the totals rather than the rest summed up, so a
-file list cut short by the forge still yields the right count."
+UNCOUNTED is how many listed files were left out.  Excluded lines are
+subtracted from the totals, so a file list truncated by the forge still
+yields the right count."
   (let ((added (or (plist-get stats :added) 0))
         (removed (or (plist-get stats :removed) 0))
         (uncounted 0))
@@ -916,29 +822,18 @@ says how many files that skipped."
   :type 'boolean :group 'bitbucket)
 
 (defun gp--insert-description (pr)
-  "Insert a collapsable description section for PR, if it has one.
-Rendered through `gp--render-markdown' so it gets the same emoji,
-mention and link handling as comment bodies.  Backends disagree on
-the field name (Bitbucket `description', GitHub `body'), so the value
-comes from `gp-pr-description' rather than the alist directly.
-
-On an open PR the heading carries an edit button, the same way the
-reviewers and labels lines do, and the section appears even with no
-description yet -- that empty state is exactly when you need a way to
-write the first one, and it is where `E' would otherwise be invisible.
-A closed PR with no description still renders nothing at all: there is
-nothing to read and, since the forges only allow mutating an open PR,
-nothing to do either."
+  "Insert a collapsible description section for PR.
+Rendered through `gp--render-markdown', like comment bodies.  On an
+open PR the heading carries an edit button and the section appears
+even with no description yet, so the first one can be written; a
+closed PR without a description renders nothing."
   (let* ((desc (ignore-errors (gp-pr-description pr)))
          (editable (gp-pr-open-p pr)))
     (when (or desc editable)
       (magit-insert-section (gp-description nil gp-detail-description-collapsed)
-        ;; The button has to be inserted into THIS buffer: `insert-button'
-        ;; puts its properties in an overlay, and an overlay does not
-        ;; survive `buffer-string', so building the heading as a string
-        ;; first would silently yield plain text that merely looks like a
-        ;; button.  Insert the pieces, then close the heading with a bare
-        ;; `magit-insert-heading' (which just marks where the body starts).
+        ;; `insert-button' uses an overlay, which does not survive
+        ;; `buffer-string': insert the pieces directly, then close the
+        ;; heading with a bare `magit-insert-heading'.
         (insert (propertize "Description" 'face 'magit-section-heading))
         (when editable
           (insert "   ")
@@ -952,7 +847,6 @@ nothing to do either."
                       (gp--render-markdown desc)
                     (propertize "(no description yet)\n" 'face 'shadow)))
           (unless (bolp) (insert "\n"))
-          ;; indent the body so it reads as belonging to the heading
           (indent-rigidly start (point) 2))
         (insert "\n")))))
 
@@ -968,10 +862,8 @@ nothing to do either."
 
 (defun gp--insert-outcome-banner (pr)
   "Insert a prominent outcome banner for a PR that is no longer open.
-An open PR gets nothing: its state is the whole detail view.  A closed
-one gets a single loud line, since that outcome is the first thing worth
-knowing -- and for a decline, the reason where the backend has one
-\(Bitbucket keeps a free-text `reason'; GitHub does not)."
+An open PR gets nothing.  A declined PR also shows the reason where the
+backend has one (Bitbucket keeps a free-text `reason'; GitHub does not)."
   (unless (ignore-errors (gp-pr-open-p pr))
     (let ((merged (ignore-errors (gp-pr-merged-p pr))))
       (insert (propertize (if merged "  MERGED  " "  DECLINED  ")
@@ -989,14 +881,8 @@ knowing -- and for a decline, the reason where the backend has one
 (defun gp--insert-local-dirty-warning ()
   "Insert a notice when the PR's local checkout has uncommitted changes.
 Reads `gp--detail-local-dirty' rather than shelling out to git, so this
-costs nothing during a render (same rule as the conflict warning).
-
-Sits near the top because the buttons a few lines above it -- checkout,
-show-diff -- are exactly the ones that move the working tree, and
-knowing there is unsaved work HERE is what stops you pressing them
-blind.  It says the branch the work is sitting on: dirty work on the
-PR's own source branch is a different situation from dirty work on some
-unrelated branch, and only the second is a surprise."
+costs nothing during a render.  Names the branch the work sits on, since
+dirty work on an unrelated branch is the surprising case."
   (when-let* ((state gp--detail-local-dirty)
               (count (plist-get state :count)))
     (insert (propertize "⚠ Uncommitted local changes" 'face 'gp-dirty-tree-face))
@@ -1016,9 +902,7 @@ unrelated branch, and only the second is a surprise."
   "Insert a conflict warning for PR when the forge reports one.
 Reads `gp--detail-mergeability' rather than asking the forge, so this
 costs nothing during a render.  Nothing is drawn when the answer is
-`unknown' (GitHub has not judged yet) or nil (Bitbucket cannot say) --
-only a stated conflict is worth a warning, since a false one would send
-you looking for a problem that is not there."
+`unknown' (GitHub has not judged yet) or nil (Bitbucket cannot say)."
   (when (and gp--detail-mergeability
              (null (car gp--detail-mergeability)))
     (let ((dest (or (ignore-errors (gp-pr-destination-branch pr)) "the target branch"))
@@ -1028,8 +912,7 @@ you looking for a problem that is not there."
                'face 'gp-pipeline-failed-face))
       (insert (propertize
                (format "  (%s%s)\n" (or (cdr gp--detail-mergeability) "conflicting")
-                       ;; how far behind is the actionable part: it says how
-                       ;; much target-branch history the rebase has to cross
+                       ;; how much target history a rebase has to cross
                        (if (and gp--detail-divergence
                                 (> (cdr gp--detail-divergence) 0))
                            (format ", %d commit%s behind" (cdr gp--detail-divergence)
@@ -1050,26 +933,22 @@ you looking for a problem that is not there."
 
 (defun gp--insert-merge-pipelines (pr)
   "Insert the destination-branch pipeline of a merged PR, if any.
-After a merge the interesting run is the one on the merge commit -- that
-is what deploys -- so it is shown here rather than making you leave the
-editor to find it.  Reuses `gp--insert-pipelines', so the same step
-actions apply (logs on `l', manual gates on `T')."
+That run, on the merge commit, is the one that deploys.  Reuses
+`gp--insert-pipelines', so the same step actions apply."
   (when (and gp--detail-merge-pipelines (gp-pr-merged-p pr))
     (let ((dest (or (ignore-errors (gp-pr-destination-branch pr)) "destination")))
       (insert (propertize (format "After merge (on %s)\n" dest)
                           'face 'magit-section-heading))
-      ;; Only the merge commit's own run belongs here.  `:recent' is the
-      ;; destination branch's other commits -- everything else that landed on
-      ;; main -- which has nothing to do with this PR.
+      ;; only the merge commit's run; `:recent' is unrelated branch history
       (gp--insert-pipelines
        (list :current (plist-get gp--detail-merge-pipelines :current)
              :recent nil))
       (insert "\n"))))
 
 (defun gp--insert-changed-files ()
-  "Insert a collapsable changed-files section for the detail buffer's PR.
-Each file is a single line inside the section so `p' and `n' can skip the whole
-block at once.  The file name remains clickable and opens the checkout."
+  "Insert a collapsible changed-files section for the detail buffer's PR.
+One line per file, so `p' and `n' skip the whole block; each file name
+opens the checkout."
   (let ((files (plist-get gp--detail-stats :file-list)))
     (when files
       (magit-insert-section (gp-files nil gp-detail-files-collapsed)
@@ -1102,23 +981,17 @@ block at once.  The file name remains clickable and opens the checkout."
 
 (defcustom gp-detail-max-commits 50
   "Maximum number of PR commits to fetch for the detail view.
-A long-running branch can carry hundreds; the section is a
-navigation aid, not a full history (that is what `l' in the magit
-checkout is for).  Set to nil for no cap."
+The section is a navigation aid, not a full history.  Set to nil for
+no cap."
   :type '(choice (integer :tag "At most this many")
                  (const :tag "No limit" nil))
   :group 'bitbucket)
 
 (defun gp--commit-pipelines-by-hash (pipelines)
-  "Return a hash table mapping commit hash -> list of (PIPELINE . STEPS)
-from PIPELINES (a plist :current :recent, see `gp-pipeline-fetch-for-pr').
-:current already carries real STEPS, fetched for free as part of the
-main load; :recent pairs a pipeline with a commit summary instead (no
-steps fetched there) -- passed through as STEPS = nil, meaning
-\"unknown, not `no steps'\" to the renderer (see
-`gp--insert-commit-pipeline-status', which tells this apart from a
-genuinely empty step list by checking the cache/fetch state, not this
-nil)."
+  "Return a hash table of commit hash -> list of (PIPELINE . STEPS).
+PIPELINES is a plist (:current :recent), see `gp-pipeline-fetch-for-pr'.
+:current entries carry real STEPS; :recent ones get STEPS = nil, meaning
+\"unknown\", not \"no steps\" (see `gp--insert-commit-pipeline-status')."
   (let ((table (make-hash-table :test 'equal)))
     (dolist (entry (plist-get pipelines :current))
       (let* ((p (car entry)) (hash (gp-pipeline-commit p)))
@@ -1130,18 +1003,13 @@ nil)."
 
 (defcustom gp-detail-recent-pipeline-steps-cache-ttl 3600
   "Seconds to cache an older commit's fetched pipeline steps.
-Only applies to `:recent' pipelines (see `gp--commit-pipelines-by-hash')
--- an unfinished one has its steps fetched so the Commits section can
-show a \"N/total succeeded\" count, same as the head commit already
-gets for free.  An older run settles slowly if at all, so this can
-sit far longer than the ordinary `gp-cache-ttl' without going stale;
-set to 0 to disable caching (always refetch)."
+Applies to unfinished `:recent' pipelines, whose steps are fetched for
+the Commits section's \"N/total\" count.  Set to 0 to disable caching."
   :type 'integer :group 'bitbucket)
 
 (defvar gp--recent-pipeline-steps-cache (make-hash-table :test 'equal)
-  "pipeline-uuid -> (EXPIRY . STEPS).  Global (not buffer-local): a
-pipeline's steps don't depend on which detail buffer is asking, see
-`gp-detail-recent-pipeline-steps-cache-ttl'.")
+  "Hash table of pipeline-uuid -> (EXPIRY . STEPS).
+Global, since a pipeline's steps do not depend on the buffer asking.")
 
 (defun gp--recent-pipeline-steps-cached (pipeline)
   "Return PIPELINE's cached steps, or `miss' if absent/expired."
@@ -1152,10 +1020,7 @@ pipeline's steps don't depend on which detail buffer is asking, see
 (defun gp--fetch-recent-pipeline-steps-async (full-name pipeline buf)
   "Fetch and cache PIPELINE's steps, then rerender BUF if still live.
 Only called for an unfinished `:recent' pipeline with no cached steps
-yet (see `gp--insert-commit-pipeline-status') -- a finished run's
-glyph alone is already the whole story, and re-triggering this on
-every render would refetch on each poll tick for nothing, since the
-cache key (pipeline uuid) doesn't change render to render."
+yet (see `gp--insert-commit-pipeline-status')."
   (let ((id (gp-pipeline-id pipeline)))
     (when id
       (gp-pipeline-steps-async
@@ -1173,16 +1038,11 @@ cache key (pipeline uuid) doesn't change render to render."
             (length steps))))
 
 (defun gp--insert-commit-pipeline-status (pipelines-by-hash hash full-name buf)
-  "Insert a status glyph + number (linked to the web UI) for each
-pipeline at HASH, if any.  Multiple pipelines can target one commit
-\(e.g. two workflows); each gets its own glyph so none is silently
-dropped.  An unfinished pipeline also gets a \"N/total\" step-progress
-count once its steps are known (FULL-NAME/BUF are for the fetch a
-`:recent' pipeline needs, see `gp--fetch-recent-pipeline-steps-async')
--- the head commit's own pipeline already carries its steps for free
-\(passed straight through here); an older commit's does not, so this
-is what discovers e.g. \"stopped at a manual gate after 3 of 4 steps\"
-instead of just an opaque ⏸ ."
+  "Insert a linked status glyph and number for each pipeline at HASH.
+PIPELINES-BY-HASH is from `gp--commit-pipelines-by-hash'; several
+pipelines on one commit each get a glyph.  An unfinished pipeline also
+gets a \"N/total\" step count once its steps are known; FULL-NAME and
+BUF are for fetching them (`gp--fetch-recent-pipeline-steps-async')."
   (dolist (entry (reverse (gethash hash pipelines-by-hash)))
     (let* ((p (car entry))
            (known-steps (cdr entry))
@@ -1201,25 +1061,16 @@ instead of just an opaque ⏸ ."
       (insert (if url
                   (propertize (format "#%s" number) 'face (cdr g)
                               'mouse-face 'highlight 'follow-link t 'help-echo url
-                              'keymap (let ((m (make-sparse-keymap)))
-                                        (define-key m [mouse-1] (lambda () (interactive) (browse-url url)))
-                                        (define-key m [mouse-2] (lambda () (interactive) (browse-url url)))
-                                        (define-key m (kbd "RET") (lambda () (interactive) (browse-url url)))
-                                        m))
+                              'keymap (gp--url-keymap url))
                 (propertize (format "#%s" number) 'face (cdr g))))
       (when progress
         (insert (propertize (format " (%s)" progress) 'face 'shadow))))))
 
 (defun gp--insert-commits ()
-  "Insert a collapsable commits section for the detail buffer's PR.
+  "Insert a collapsible commits section for the detail buffer's PR.
 Each commit is one line -- short hash, summary, author, relative date,
 pipeline status -- carrying its plist as the section value so `RET'
-can open just that commit in Magit (see `gp-detail-show-commit').
-The pipeline status folds in what used to be its own \"Recent runs on
-this branch\" block under Pipelines (see `gp--insert-pipelines') --
-that block repeated the same commit summary a second time with a
-status beside it and nothing there was actionable, so the status now
-sits directly on the commit it belongs to instead."
+can open just that commit in Magit (see `gp-detail-show-commit')."
   (let ((commits gp--detail-commits)
         (pipelines-by-hash (gp--commit-pipelines-by-hash gp--detail-pipelines))
         (full-name (ignore-errors (gp-pr-full-name gp--pr)))
@@ -1252,11 +1103,8 @@ sits directly on the commit it belongs to instead."
 
 (defun gp-detail-show-commit ()
   "Show the commit at point in Magit, in the PR's local checkout.
-Opens a single-commit revision buffer -- the commit's own diff and
-message -- rather than the whole-PR diff `d' gives.  Needs the branch
-checked out locally, and the commit to exist there: a freshly-pushed
-commit that the local clone has not fetched yet is reported rather
-than silently showing nothing."
+Needs a local checkout; a commit missing there is fetched once, and
+reported if still absent."
   (interactive)
   (let* ((sec (magit-current-section))
          (commit (and sec (object-of-class-p sec 'gp-commit-section)
@@ -1287,11 +1135,8 @@ than silently showing nothing."
 
 (defun gp--file-path-at-line ()
   "Return the changed-file path for the line point is on, or nil.
-A file line is \"  NAME  +N -M\" with only NAME buttonised, so requiring
-point to sit on the button itself makes RET miss from the indentation,
-the stat columns or end of line.  Scanning the whole line instead means
-anywhere on it works; only lines carrying a `gp-file-path' button match,
-so other sections are unaffected."
+Scans the whole line for a `gp-file-path' button, so RET works anywhere
+on a file line, not only on the buttonised name."
   (let* ((bol (line-beginning-position))
          (eol (line-end-position))
          (button (or (button-at bol) (next-button bol)))
@@ -1321,9 +1166,8 @@ STATE is `approved', `changes', or `pending' (see `gp-pr-reviewers-async')."
 (defun gp--insert-reviewers-line (reviewers &optional pr)
   "Insert a line listing REVIEWERS and their approval state.
 REVIEWERS is the list of plists from `gp-pr-reviewers-async'
-\(cached in `gp--detail-reviewers').  With PR and an open PR, an
-edit button follows -- shown even when REVIEWERS is empty, since
-that is exactly when you need a way to add the first one."
+\(cached in `gp--detail-reviewers').  When PR is given and open, an
+edit button follows, even when REVIEWERS is empty."
   (let ((editable (and pr (gp-pr-open-p pr))))
     (when (or reviewers editable)
       (insert "👥 ")
@@ -1345,12 +1189,8 @@ that is exactly when you need a way to add the first one."
 
 (defun gp--insert-labels-line (pr)
   "Insert PR's labels as a line in the detail buffer's top section.
-Nothing at all is inserted on a platform without labels: Bitbucket
-users get no empty \"no labels\" slot that could never fill, which is
-why this asks `gp-labels-supported-p' rather than just checking
-whether PR happens to carry any.  Where they are supported an edit
-button follows on open PRs -- shown even with no labels yet, since
-that is when you need a way to add the first one."
+Nothing is inserted unless `gp-labels-supported-p'.  On an open PR an
+edit button follows, even with no labels yet."
   (when (gp-labels-supported-p)
     (let ((labels (gp-pr-labels pr))
           (editable (gp-pr-open-p pr)))
@@ -1391,16 +1231,9 @@ that is when you need a way to add the first one."
          "✎ [N]" "Edit this pull request's title"
          (lambda () (gp-ui-edit-title pr))))
       (insert "\n")
-      ;; The repo, on its own line above the branches.  A detail buffer is
-      ;; often reached from a workspace-wide list where consecutive PRs come
-      ;; from different repos, and "#42 fix the toggle" says nothing about
-      ;; which one -- the branch line below answers "from where to where",
-      ;; not "in what".  Full name rather than the bare slug, since the
-      ;; owner is what tells two same-named repos apart.
+      ;; full name, not slug: the owner tells same-named repos apart.
+      ;; 📁 because the checkout button below already uses 📦.
       (when-let* ((repo (ignore-errors (gp-pr-full-name pr))))
-        ;; 📁 not 📦: the checkout button below already uses 📦, and two
-        ;; different things wearing one glyph in the same header defeats the
-        ;; scanning the emoji is there for.
         (insert "📁 " (propertize repo 'face 'gp-repo-face) "\n"))
       (insert "🔀 "
               (propertize (format "%s → %s"
@@ -1449,7 +1282,6 @@ that is when you need a way to add the first one."
        "🔍 Show diff in Magit [d]" "Checkout the branch and show its diff in Magit"
        (lambda () (gp-ui-show-diff-in-magit pr)))
       (insert "   ")
-      ;; User-pluggable actions (`gp-pr-actions'), one button each.
       (dolist (action gp-pr-actions)
         (gp--insert-action-button
          (gp-pr-action-button-label action)
@@ -1490,11 +1322,8 @@ that is when you need a way to add the first one."
              'draft "📝 Convert to draft [D]" "Convert this PR back to a draft"
              (lambda () (gp--detail-run-action
                          buf 'draft (lambda () (gp-ui-set-draft pr t))))))))
-      ;; merge, on any open PR that can actually merge.  A conflict simply
-      ;; removes the action: the warning under the description already says
-      ;; why, and repeating it here was noise.  Mergeability comes from
-      ;; `gp--detail-mergeability' (filled by the async load) -- this must
-      ;; never fetch during a render.
+      ;; merge, unless the forge reports a conflict (the warning says why).
+      ;; Uses `gp--detail-mergeability' -- must never fetch during a render.
       (when (and (gp-pr-open-p pr)
                  (not (and gp--detail-mergeability
                            (null (car gp--detail-mergeability)))))
@@ -1592,9 +1421,9 @@ that is when you need a way to add the first one."
   "t"   #'gp-detail-send-to-terminal
   "X"   #'gp-detail-resolve
   "e"   #'gp-detail-edit
-  "E"   #'gp-detail-edit-description  ;; edit the PR's own description
-  "N"   #'gp-detail-edit-title        ;; rename: edit the PR's title
-  "C"   #'gp-detail-add-general-comment ;; new general (non-inline) comment
+  "E"   #'gp-detail-edit-description
+  "N"   #'gp-detail-edit-title
+  "C"   #'gp-detail-add-general-comment
   "M"   #'gp-detail-merge               ;; merge (C-u picks the strategy)
   "+"   #'gp-detail-like-comment        ;; quick 👍 toggle on the comment at point
   "!"   #'gp-detail-react-to-comment    ;; pick any reaction (where supported)
@@ -1617,8 +1446,8 @@ that is when you need a way to add the first one."
   "C-c A" #'gp-deploy-watch-list-show     ;; every armed watcher
   "m"   #'gp-detail-toggle-mark
   "l"   #'gp-detail-pipeline-step-log
-  "S"     #'gp-detail-submit-review-batch  ;; submit pending review-batch comments
-  "C-c C-k" #'gp-detail-discard-review-batch) ;; discard the review batch
+  "S"     #'gp-detail-submit-review-batch
+  "C-c C-k" #'gp-detail-discard-review-batch)
 
 ;; `gp-pr-actions' keys, rebound whenever that option changes.
 (gp-pr-actions-install-keys gp-detail-mode-map)
@@ -1776,25 +1605,20 @@ pipeline section it points at the pipeline."
      (t (call-interactively #'magit-section-toggle)))))
 
 (define-derived-mode gp-detail-mode magit-section-mode "PR"
-  "Major mode for a single Bitbucket pull request."
+  "Major mode for a single pull request."
   ;; Re-sync `gp-pr-actions' keys: a plain `setq'/`add-to-list' of that
   ;; option bypasses its :set, so the map is brought up to date here.
   (gp-pr-actions-install-keys gp-detail-mode-map)
-  ;; We apply all faces ourselves (links, markdown, etc.).  Any font-lock
-  ;; activation clears those manual `face' text properties on redisplay, and
-  ;; magit's current-section highlight overrides them -- disable both.
+  ;; Faces are applied manually; font-lock would clear them on redisplay
+  ;; and magit's current-section highlight would override them.
   (setq-local magit-section-highlight-current nil)
   (setq-local font-lock-defaults nil)
   (font-lock-mode -1)
   (when (fboundp 'jit-lock-mode) (jit-lock-mode nil))
-  ;; magit-section-mode turns on `truncate-lines'; soft-wrap instead so
-  ;; long comment bodies stay fully readable without horizontal scroll.
+  ;; soft-wrap long comment bodies (magit-section-mode truncates)
   (setq-local truncate-lines nil)
-  ;; `help-echo' fires for the mouse only; `help-at-pt' echoes it when POINT
-  ;; lands on a button too, which is how a reaction's reactor names become
-  ;; visible without reaching for the mouse.  Both are global and only take
-  ;; effect once the timer is (re)armed, so `setq-local' would silently do
-  ;; nothing -- see `gp-detail-help-at-point'.
+  ;; echo `help-echo' at point, not only on hover.  These are global and
+  ;; act via the timer, so `setq-local' would do nothing.
   (when gp-detail-help-at-point
     (require 'help-at-pt)
     (setq help-at-pt-display-when-idle '(help-echo)
@@ -1817,10 +1641,7 @@ pipeline section it points at the pipeline."
   (unless (require 'magit nil t)
     (user-error "Magit is not available"))
   (let* ((full-name (gp-pr-full-name gp--pr))
-         ;; `default-directory' is already anchored to the checkout by
-         ;; `gp-show-pr', but re-resolve: it falls back to an inherited
-         ;; directory when no clone existed at paint time, and one may
-         ;; have appeared since.
+         ;; re-resolve: a clone may have appeared since `gp-show-pr'
          (dir (gp-local-find-checkout full-name)))
     (unless dir
       (user-error "No local checkout of %s under %s"
@@ -1856,10 +1677,7 @@ pipeline section it points at the pipeline."
                              (gp-detail-refresh))))))))
 
 (defun gp-ui-add-general-comment (pr)
-  "Open a compose buffer for a new general (non-inline) comment on PR.
-No path or line is involved, so this is the one comment kind that
-cannot fail the way an inline one can when the target line is outside
-the PR's diff (see `gp-github-check-inline-target')."
+  "Open a compose buffer for a new general (non-inline) comment on PR."
   (require 'gp-compose)
   (let ((buf (gp--detail-buffer-name pr)))
     (gp-compose
@@ -1899,16 +1717,9 @@ without a second fetch."
 
 (defun gp-ui-edit-labels (pr)
   "Set PR's labels from the minibuffer, then refresh the detail buffer.
-Prompts with the repo's whole label pool for completion and the PR's
-current labels pre-filled, so the edit reads as \"adjust this set\":
-leaving the default untouched is a no-op, deleting a name drops that
-label, and typing one adds it.  Only names in the pool are accepted --
-GitHub would silently *create* an unknown label on the repo, which is
-never what a typo means.
-
-`completing-read-multiple' rather than the checkbox form
-`gp-ui-edit-reviewers' opens, because labels are short plain strings
-with no per-item state to display or lock."
+Completes over the repo's label pool with the current labels
+pre-filled.  Only names in the pool are accepted: GitHub would silently
+create an unknown label on the repo."
   (unless (gp-labels-supported-p)
     (user-error "%s pull requests do not support labels" (gp-backend-name)))
   (unless (gp-pr-open-p pr)
@@ -1976,9 +1787,7 @@ with no per-item state to display or lock."
 
 (defun gp-ui-toggle-reaction (pr comment content)
   "Toggle the current user's CONTENT reaction on COMMENT of PR.
-Reads the comment's reactions first to decide the direction, so the
-same entry point serves both adding and removing -- which is what lets
-a rendered reaction button be a toggle."
+Reads the comment's reactions first to decide the direction."
   (let* ((full-name (gp-pr-full-name pr))
          (uuid (gp-user-uuid))
          (mine (seq-find (lambda (r)
@@ -1994,8 +1803,7 @@ a rendered reaction button be a toggle."
 
 (defun gp-ui-react-to-comment (pr comment)
   "Pick a reaction for COMMENT of PR and toggle it.
-Offers the platform's own set (`gp-reaction-choices'), each shown as
-emoji plus its token so the completing-read is searchable by either."
+Offers `gp-reaction-choices', each shown as emoji plus token."
   (let* ((choices (gp-reaction-choices))
          (table (mapcar (lambda (c)
                           (cons (format "%s  %s" (gp-reaction-emoji c) c) c))
@@ -2007,8 +1815,7 @@ emoji plus its token so the completing-read is searchable by either."
 
 (defun gp-ui-delete-comment (pr comment)
   "Delete COMMENT on PR after confirmation, then refresh.
-Someone else's comment names its author in the prompt -- deleting
-those is a privilege, and a misfire is not undoable."
+For someone else's comment the prompt names its author."
   (when (yes-or-no-p
          (if (gp-comment-own-p comment (gp-user-uuid))
              "Delete this comment? "
@@ -2048,10 +1855,8 @@ those is a privilege, and a misfire is not undoable."
 
 (defun gp-ui-edit-title (pr)
   "Edit PR's title in the minibuffer, saving it back on RET.
-A title is one line, so this is a `read-string' rather than a compose
-buffer -- the editor `E' opens would be the wrong shape for it.  The
-current title is pre-filled and editable in place; leaving it unchanged,
-or blank, does nothing."
+The current title is pre-filled; leaving it unchanged does nothing, and
+a blank title is refused."
   (let* ((full-name (gp-pr-full-name pr))
          (id (alist-get 'id pr))
          (current (or (alist-get 'title pr) ""))
@@ -2067,27 +1872,22 @@ or blank, does nothing."
 
 (defun gp-ui-edit-description (pr)
   "Edit PR's description in a compose buffer, saving it back on submit.
-Reuses `gp-compose' (Markdown, emoji completion, C-c C-p preview) with
-the current description as the starting text, so this is the same
-editor comments get.  Hard-break munging is disabled: a description is
-a document rather than a chat message, and rewriting its newlines on
-every save would slowly mangle tables and lists."
+Reuses `gp-compose' with the current description as starting text.
+Hard-break munging is disabled, since rewriting newlines on every save
+would mangle tables and lists."
   (let* ((full-name (gp-pr-full-name pr))
          (id (alist-get 'id pr))
          (title (alist-get 'title pr))
          (current (or (ignore-errors (gp-pr-description pr)) ""))
-         ;; `:on-success' runs in the *compose* buffer, where `gp--pr' is
-         ;; nil and `gp-detail-refresh' would no-op.  Capture the detail
-         ;; buffer by name now and redraw inside it, as `gp-ui-edit-comment'
-         ;; does.
+         ;; `:on-success' runs in the compose buffer, where
+         ;; `gp-detail-refresh' would no-op: redraw the detail buffer
          (buf (gp--detail-buffer-name pr)))
     (gp-compose
      (list :full-name full-name
            :id id
            :initial-text current
            :what "description"
-           ;; `gp-compose-submit' applies hard breaks before handing the
-           ;; text over, so the opt-out has to travel with the target.
+           ;; `gp-compose-submit' applies hard breaks before submitting
            :no-hard-breaks t
            :allow-empty t          ;; clearing a description is a real edit
            :submit-function
@@ -2117,10 +1917,9 @@ value has no effect."
 (defun gp--merge-strategy-choice (full-name id arg)
   "Return (STRATEGY . SOURCE) to merge PR FULL-NAME/ID with.
 With ARG non-nil, prompt among the strategies the forge permits;
-otherwise take its default.  SOURCE is a word naming where the strategy
-came from, so the confirmation can say whether it was chosen or
-inherited.  A backend that cannot answer yields (nil . \"the forge's
-default\"), which merges without naming a strategy at all."
+otherwise take its default.  SOURCE describes where the strategy came
+from, for the confirmation prompt.  A backend that cannot answer yields
+\(nil . \"the forge's default\")."
   (let* ((info (ignore-errors (gp-pull-request-merge-strategies full-name id)))
          (strategies (car info))
          (default (cdr info)))
@@ -2135,18 +1934,15 @@ default\"), which merges without naming a strategy at all."
 
 (defun gp--merge-delete-local-branch (pr branch)
   "Delete BRANCH from PR's local checkout, if there is one.
-Never touches the remote: the forge deletes that itself.  Switches off
-BRANCH first when it is checked out, since git refuses to delete the
-current branch.  Every failure is reported, not signalled -- the merge
-has already happened by this point, so aborting here would misreport a
-completed merge as a failure."
+Never touches the remote.  Switches off BRANCH first when it is checked
+out, since git refuses to delete the current branch.  Returns a status string or nil; failures are reported, not
+signalled, since the merge has already happened."
   (let ((dir (ignore-errors (gp-local-find-checkout (gp-pr-full-name pr)))))
     (cond
      ((not (and dir branch)) nil)
      ((not (file-directory-p dir)) nil)
      (t
       (when (equal (gp-checkout-current-branch dir) branch)
-        ;; park on the destination branch so the delete is allowed
         (let ((dest (or (ignore-errors (gp-pr-destination-branch pr)) "main")))
           (gp-checkout--git dir "checkout" dest)))
       (let ((res (gp-checkout--git dir "branch" "-D" branch)))
@@ -2175,11 +1971,8 @@ which removes it itself when `gp-merge-close-source-branch' asked it to."
                                  full-name (ignore-errors (gp-pr-source-commit pr))))))
     (unless (gp-pr-open-p pr)
       (user-error "PR #%s is not open" id))
-    ;; Conflicts are a hard stop: the forge would reject the merge anyway,
-    ;; and nothing local can resolve them.  `unknown' (GitHub computes
-    ;; mergeability lazily and answers null until it has) and nil (Bitbucket
-    ;; has no such field) must NOT block -- refusing on those would make the
-    ;; action unusable on a PR the forge simply had not judged yet.
+    ;; Only a stated conflict blocks: `unknown' (GitHub not judged yet)
+    ;; and nil (Bitbucket has no such field) must not.
     (let ((m (ignore-errors (gp-pull-request-mergeability full-name id))))
       (when (and m (null (car m)))
         (user-error "PR #%s has conflicts with %s (%s) -- resolve them first"
@@ -2218,9 +2011,8 @@ which removes it itself when `gp-merge-close-source-branch' asked it to."
   "Set your review on PR.
 KIND is `approved' or `changes'; RETRACT non-nil withdraws it.
 When withdrawing and `gp-review-retraction-kind' reports `dismiss'
-\(GitHub: the withdrawal is a visible timeline event, not a silent
-retraction), prompts for a dismissal reason first.  Refreshes the
-detail buffer afterwards."
+\(GitHub), prompts for a dismissal reason first.  Refreshes the detail
+buffer afterwards."
   (let* ((full-name (gp-pr-full-name pr))
          (id (alist-get 'id pr))
          (dismiss (and retract (eq (gp-review-retraction-kind) 'dismiss)))
@@ -2334,21 +2126,11 @@ Refreshes the detail buffer afterwards."
 
 (defun gp-ui-show-diff-in-magit (pr)
   "Show PR's diff vs the base in Magit, opening immediately.
-
-Shows the diff against the current local refs right away (no
-network wait), then fetches source+base in the background and
-refreshes the diff buffer so it converges on the server's view.
-
-Diffs the remote-tracking refs (`origin/dest...origin/src'), not
-`HEAD' -- a `git fetch' only moves remote-tracking refs, never the
-local branch, so a `HEAD'-based range would keep showing the diff
-as of the last checkout/pull no matter how many times it refetches
-and refreshes.  This does not change what visiting a file from the
-diff opens: that always jumps into the worktree file on disk,
-regardless of which refs the diff range names."
+Diffs the current remote-tracking refs right away, then fetches source
+and base in the background and refreshes the diff buffer.  Visiting a
+file from the diff still opens the worktree file."
   (unless (require 'magit nil t)
     (user-error "Magit is not available"))
-  ;; fast: ensure we're on the branch (no fetch if already there)
   (let* ((dir (gp-local-ensure-checkout pr))
          (dest (gp-pr-destination-branch pr))
          (src (gp-pr-source-branch pr))
@@ -2370,10 +2152,9 @@ regardless of which refs the diff range names."
 
 (defun gp-ui--magit-pr-diff (dest src)
   "Run the magit diff for the PR's DEST...SRC branches in `default-directory'.
-Diffs remote-tracking refs, not local ones, so it matches the
-server's diff regardless of local branch staleness, and so a
-background `git fetch' (which only moves remote-tracking refs) is
-enough to bring a redraw up to date -- see `gp-ui-show-diff-in-magit'."
+Diffs remote-tracking refs, not local ones, so a background `git
+fetch' (which only moves remote-tracking refs) brings a redraw up to
+date."
   (magit-diff-range (format "%s/%s...%s/%s"
                              gp-checkout-remote dest
                              gp-checkout-remote src)))
@@ -2387,7 +2168,8 @@ enough to bring a redraw up to date -- see `gp-ui-show-diff-in-magit'."
 
 ;;;; Commands ----------------------------------------------------------------
 
-(defconst gp-list-buffer-name (gp--buffer-name "PRs"))
+(defconst gp-list-buffer-name (gp--buffer-name "PRs")
+  "Name of the pull-request list buffer.")
 
 (defcustom gp-detail-buffer-title-width 40
   "Max characters of the PR title shown in the detail buffer name."
@@ -2415,16 +2197,12 @@ Includes the title and repo so buffers are easy to tell apart, e.g.
 ;;;###autoload
 (defun gp-list ()
   "Open (or refresh) the pull-request list.
-The buffer is displayed BEFORE the refresh is kicked off, so the
-⏳ spinner and any previously fetched PRs are on screen while the
-new list is fetched in the background (see `gp-refresh')."
+The buffer is displayed before the background refresh starts (see
+`gp-refresh')."
   (interactive)
   (let ((buf (get-buffer-create gp-list-buffer-name)))
     (with-current-buffer buf
-      ;; Only (re)initialise the mode on a fresh buffer: `gp-list-mode' is a
-      ;; `define-derived-mode', so re-running it on an open buffer would wipe
-      ;; the buffer-local `gp--prs'/refresh token and lose the list that is
-      ;; keeping the view useful during the refresh.
+      ;; re-running the mode would wipe `gp--prs' and the refresh token
       (unless (derived-mode-p 'gp-list-mode)
         (gp-list-mode)))
     (pop-to-buffer buf)
@@ -2434,9 +2212,7 @@ new list is fetched in the background (see `gp-refresh')."
 
 (defun gp--list-show-loading ()
   "Mark the current list buffer as loading with a ⏳ near the top.
-Leaves existing content intact so a refresh keeps showing the old PRs
-while the new ones are in flight; only a fresh buffer is blank, and
-gets a single minimal line rather than a full-screen banner.
+Existing content stays visible; an empty buffer gets a single line.
 Mirrors `gp--detail-show-loading'."
   (when gp--list-loading
     (delete-overlay gp--list-loading))
@@ -2473,29 +2249,19 @@ Point returns to the last-visited PR when it is still in the list."
 
 (defun gp-refresh ()
   "Fetch and redraw the PR list asynchronously, never freezing the buffer.
-
-A ⏳ spinner is painted FIRST -- before any network call -- and the PR
-list is then fetched in the background, so the buffer stays responsive
-and any previously shown PRs remain readable and navigable while the
-fetch is in flight.  A monotonic token (`gp--list-refresh-token')
-guards against a slow earlier refresh redrawing over a newer one.
-
-On failure the buffer keeps whatever it was already showing rather
-than blanking, and the error is logged."
+A ⏳ spinner is painted before any network call; the old PRs stay
+usable meanwhile.  `gp--list-refresh-token' stops a slow earlier
+refresh redrawing over a newer one.  On failure the buffer keeps what
+it showed and the error is logged."
   (interactive)
   (let ((buf (current-buffer)))
     (cl-incf gp--list-refresh-token)
     (let ((token gp--list-refresh-token))
       (gp--list-show-loading)
-      ;; Force the spinner onto the screen before anything can block.  The
-      ;; identity lookup below is cached after the first call, so `g' on an
-      ;; open buffer never blocks -- but a cold buffer (or a `G' that just
-      ;; cleared the cache) does one identity request, and without this the
-      ;; freeze would happen before the paint the user is meant to see.
+      ;; paint the spinner before the (possibly uncached) identity request
       (redisplay)
-      ;; Resolve the identity before handing off: passing it in keeps the
-      ;; async fetch from blocking on an identity request of its own (see
-      ;; `bitbucket-workspace-pull-requests-async').
+      ;; passing the identity in keeps the async fetch from blocking on
+      ;; its own identity request
       (let ((uuid (gp-user-uuid)))
         (gp-workspace-pull-requests-async
          (lambda (ok prs)
@@ -2511,37 +2277,18 @@ than blanking, and the error is logged."
 (defun gp-reset-caches ()
   "Clear every cache across the API, watch, helm, overlay and local layers.
 Use this when a repo or PR is missing from the list because a stale
-cache (e.g. the 24h repo-list cache used for \"needs my review\"
-scans) predates it.  Callers that are not loaded are skipped via
-`fboundp'/`boundp' checks, so this is safe to call regardless of
-which optional layers (gp-watch, gp-helm) are in use."
+cache (e.g. the 24h repo-list cache) predates it.  Layers that are not
+loaded are skipped."
   (interactive)
-  (when (fboundp 'bitbucket-cache-clear)
-    (bitbucket-cache-clear))
-  (when (fboundp 'bitbucket-clear-cache)
-    (bitbucket-clear-cache))
-  (when (fboundp 'github-clear-cache)
-    (github-clear-cache))
-  (when (fboundp 'gp-watch-clear-cache)
-    (gp-watch-clear-cache))
-  (when (fboundp 'gp-local-clear-cache)
-    (gp-local-clear-cache))
-  (when (boundp 'gp-overlay--avatar-cache)
-    (clrhash gp-overlay--avatar-cache))
-  (when (boundp 'gp--diff-lines-cache)
-    (clrhash gp--diff-lines-cache))
-  (when (boundp 'gp--comment-outdated-cache)
-    (clrhash gp--comment-outdated-cache))
-  (when (boundp 'gp-helm--pipeline-cache)
-    (clrhash gp-helm--pipeline-cache))
-  (when (boundp 'gp-helm--deploy-cache)
-    (clrhash gp-helm--deploy-cache))
-  (when (boundp 'gp-helm--live-deploy-cache)
-    (clrhash gp-helm--live-deploy-cache))
-  (when (boundp 'gp-helm--reviewing-cache)
-    (setq gp-helm--reviewing-cache nil))
-  (when (boundp 'gp-helm--others-cache)
-    (setq gp-helm--others-cache nil))
+  (dolist (fn '(bitbucket-cache-clear bitbucket-clear-cache github-clear-cache
+                gp-watch-clear-cache gp-local-clear-cache))
+    (when (fboundp fn) (funcall fn)))
+  (dolist (var '(gp-overlay--avatar-cache gp--diff-lines-cache
+                 gp--comment-outdated-cache gp-helm--pipeline-cache
+                 gp-helm--deploy-cache gp-helm--live-deploy-cache))
+    (when (boundp var) (clrhash (symbol-value var))))
+  (dolist (var '(gp-helm--reviewing-cache gp-helm--others-cache))
+    (when (boundp var) (set var nil)))
   (message "gp: all caches cleared"))
 
 (defun gp-refresh-full ()
@@ -2569,17 +2316,10 @@ which optional layers (gp-watch, gp-helm) are in use."
 
 (defun gp-filter-by-label (&optional event)
   "Show the pull requests carrying the label at point.
-Bound on the label text itself (`gp-label-map'), so it fires for a
-click or `C-c C-c' on a label in either the list or the detail
-buffer and nowhere else.  EVENT is the mouse event when clicked;
-point is moved to it first, since a click does not move point on its
-own and the label under the *pointer* is the one meant.
-
-Hands off to Helm where it is available, opening the overview with
-`label:NAME' already in the search box -- a starting pattern the
-user can widen or extend, not a hidden filter.  Without Helm there is
-nothing to type into, so the current buffer's PRs are filtered into
-a list buffer of their own instead."
+Bound on the label text (`gp-label-map').  EVENT is the mouse event
+when clicked; point moves to it first.  Opens Helm with `label:NAME'
+pre-filled where available, else filters the loaded PRs into a list
+buffer of their own."
   (interactive (list last-nonmenu-event))
   (when (and event (listp event))
     (let ((pos (event-start event)))
@@ -2595,9 +2335,7 @@ a list buffer of their own instead."
 (defun gp--list-labelled (name)
   "Render the PRs labelled NAME into a dedicated list buffer.
 The Helm-less fallback for `gp-filter-by-label'.  Filters the PRs
-already loaded rather than refetching: the label came off one of
-them, so the set is in hand, and a fetch here would block redisplay
-on the click."
+already loaded rather than refetching."
   (let* ((prs (or gp--prs
                   (buffer-local-value
                    'gp--prs (or (get-buffer gp-list-buffer-name)
@@ -2635,18 +2373,16 @@ steps; set to nil to skip it."
 
 (defcustom gp-detail-pipeline-poll-interval 6
   "Seconds between pipeline re-fetches while a current run is unfinished.
-The detail buffer auto-polls so a freshly triggered deployment's
-state updates without a manual refresh; polling stops once every
-current-commit pipeline has finished.  Set to 0 to disable."
+Polling stops once every current-commit pipeline has finished.  Set to
+0 to disable."
   :type 'integer :group 'bitbucket)
 
 (defcustom gp-detail-pipeline-watch-interval 1
   "Seconds between pipeline re-fetches while the head commit has NO run yet.
-After pushing a commit there is a window where the PR's new head has
-no pipeline; a visible detail buffer keeps watching (re-fetching the
-PR head and its pipelines) until the fresh run appears, then hands
-over to `gp-detail-pipeline-poll-interval'.  Only branches that
-already have pipeline history are watched.  Set to 0 to disable."
+A visible detail buffer re-fetches the PR head and its pipelines until
+a fresh run appears, then hands over to
+`gp-detail-pipeline-poll-interval'.  Only branches with pipeline
+history are watched.  Set to 0 to disable."
   :type 'integer :group 'bitbucket)
 
 (defun gp--detail-pipelines-running-p (data)
@@ -2656,29 +2392,18 @@ already have pipeline history are watched.  Set to 0 to disable."
            (plist-get data :current)))
 
 (defun gp--detail-buffer-visible-p (buf)
-  "Return non-nil when BUF has a window on ANY tab-bar tab, not just
-the currently selected one.
-
-`get-buffer-window' alone only sees the SELECTED tab's window tree --
-a buffer split into a window on a background tab has no live window
-under that check at all (tab-bar stores each tab's window state
-separately and only the selected tab's is materialised), so polling
-would stop silently the moment the user switched away from that PR's
-tab, even though the buffer is still genuinely on screen, just on
-another tab.  `tab-bar-mode' may not be loaded/enabled at all (this
-package has no dependency on it), so the tab-bar branch is guarded
-and simply contributes nothing when unavailable."
+  "Return non-nil when BUF has a window on any tab-bar tab.
+`get-buffer-window' only sees the selected tab's window tree, so a
+buffer on a background tab would otherwise count as hidden."
   (or (get-buffer-window buf 'visible)
       (and (fboundp 'tab-bar-get-buffer-tab)
            (tab-bar-get-buffer-tab buf t))))
 
 (defun gp--detail-pipeline-poll-mode (data visible)
   "Decide what to schedule after a pipelines load of DATA.
-Both modes require a VISIBLE buffer: polling an off-screen buffer
-burns an N+1 fetch (and blocks Emacs for it) for output nobody is
-looking at.  Return `poll' while a current-commit run is unfinished,
-`watch' when the head commit has no run yet (but the branch has
-pipeline history), else nil."
+Return `poll' while a current-commit run is unfinished, `watch' when
+the head commit has no run yet (but the branch has pipeline history),
+else nil.  Both require VISIBLE, so off-screen buffers never poll."
   (cond
    ((and (> gp-detail-pipeline-poll-interval 0)
          visible
@@ -2702,8 +2427,7 @@ pipeline history), else nil."
 
 (defun gp--detail-maybe-resume-pipelines (&optional _frame-or-window)
   "Resume pipeline polling when a detail buffer becomes selected again.
-Polling only runs while the buffer is displayed, so re-entering it has
-to pick the tracking back up."
+Polling only runs while the buffer is displayed."
   (when (and (derived-mode-p 'gp-detail-mode)
              gp-detail-show-pipelines
              (not gp--detail-pipeline-timer)
@@ -2720,10 +2444,8 @@ to pick the tracking back up."
     (let ((inhibit-read-only t)
           (pos (point)))
       (erase-buffer)
-      ;; Only the *first* render forces resolved threads shut.  After that the
-      ;; user's own collapse/expand state is authoritative and magit's
-      ;; visibility cache restores it (see `magit-section-ident-value' above),
-      ;; so re-collapsing here would fight a deliberately expanded thread.
+      ;; Only the first render forces resolved threads shut; later the
+      ;; user's own state wins (restored via `magit-section-ident-value').
       (let ((first-render (not gp--detail-rendered-once)))
         (gp--render-detail pr comments)
         (when first-render
@@ -2734,20 +2456,12 @@ to pick the tracking back up."
 
 (defun gp--apply-section-visibility ()
   "Make the buffer's text match its sections' `hidden' slots.
-
-`magit-section-hide' hides a body with an overlay marked `evaporate',
-so `erase-buffer' at the top of a redraw destroys every one of them.
-The rebuilt sections do get their `hidden' slot back (from the
-visibility cache / the previous tree), but nothing recreates the
-overlay -- leaving sections that are collapsed as far as the model is
-concerned while the buffer shows their bodies in full.  That is what
-made every collapsed section look re-expanded after `g'.
-
-`magit-section-show' on the root walks the tree and re-hides each child
-whose slot says hidden, which rebuilds the overlays; magit's own
-refresh does exactly this (see `magit--refresh-buffer').  The
-`magit-section-cache-visibility' binding keeps that walk from writing
-the state it is only supposed to be reapplying."
+`magit-section-hide' uses `evaporate' overlays, which `erase-buffer'
+destroys on redraw while the rebuilt sections keep `hidden' set.
+`magit-section-show' on the root re-hides each such child, rebuilding
+the overlays, as `magit--refresh-buffer' does.  Binding
+`magit-section-cache-visibility' to nil stops the walk from writing
+the state it is only reapplying."
   (when magit-root-section
     (let ((magit-section-cache-visibility nil))
       (magit-section-show magit-root-section))))
@@ -2764,18 +2478,15 @@ Used to fold in pipeline data that arrives after the first render."
 
 (defun gp--collapse-resolved-sections ()
   "Hide every comment in a resolved thread, in the current detail buffer.
-Replies fold away with their thread even though they are not
-themselves resolved: Bitbucket sets `resolution' only on the comment
-the resolve action targeted and cannot resolve a reply at all, so a
-reply tested on its own would stay expanded under a collapsed root."
+Replies fold away with their thread (see
+`gp--comment-thread-resolved-p')."
   (when (slot-boundp magit-root-section 'children)
     (let ((by-id (gp--comments-by-id gp--detail-comments)))
       (dolist (sec (oref magit-root-section children))
         (gp--collapse-resolved-walk sec by-id)))))
 
 (defun gp--collapse-resolved-walk (section &optional by-id)
-  "Collapse SECTION if its comment THREAD is resolved; recurse into children.
-Collapsing only -- the comment's own resolved status is untouched.
+  "Collapse SECTION if its comment's thread is resolved; recurse into children.
 BY-ID maps comment id -> comment for the thread walk; without it the
 comment is tested on its own."
   (when (and (object-of-class-p section 'gp-comment-section)
@@ -2799,13 +2510,11 @@ Leaves existing content intact (only fresh buffers are blank)."
   (save-excursion
     (goto-char (point-min))
     (if (= (point-min) (point-max))
-        ;; fresh buffer: a single minimal line, not a full-screen banner
         (let ((inhibit-read-only t))
           (insert (propertize
                    (format "⏳ #%s %s\n" (alist-get 'id gp--pr)
                            (or (alist-get 'title gp--pr) ""))
                    'face 'gp-detail-title-face)))
-      ;; existing content: hang a ⏳ at end of the first line
       (end-of-line)
       (let ((ov (make-overlay (point) (point))))
         (overlay-put ov 'after-string (propertize "  ⏳ refreshing…" 'face 'shadow))
@@ -2819,42 +2528,28 @@ Leaves existing content intact (only fresh buffers are blank)."
 
 (defun gp--detail-buffer-shows-p (buf pr)
   "Return non-nil if BUF is still showing PR (same id).
-Used by deferred loaders to decide whether their fetched data is
-still relevant, regardless of how many refreshes have happened
-since -- the PR id, not a refresh token, is the real invariant."
+Deferred loaders use this, not a refresh token, to decide whether
+their data is still relevant."
   (and (buffer-live-p buf)
        (let ((cur (buffer-local-value 'gp--pr buf)))
          (and cur (equal (alist-get 'id cur) (alist-get 'id pr))))))
 
 (defun gp-show-pr (pr)
   "Display PR's detail buffer; load it asynchronously, never freezing.
-
-A skeleton (title, branches, author, action buttons) is painted
-IMMEDIATELY from the overview PR object, so navigating in never
-shows a blank or frozen page.  The full PR object and comments are
-then fetched in the background (cached where it makes sense), and
-the heavier stats/diff and pipelines fold in afterwards.  A ⏳
-spinner near the title marks the in-flight load."
+A skeleton is painted immediately from the overview PR object; the
+full PR and comments are fetched in the background, and stats, diff
+and pipelines fold in afterwards.  A ⏳ near the title marks the load."
   (when (boundp 'gp-helm--last-visited-pr-id)
     (setq gp-helm--last-visited-pr-id (alist-get 'id pr)))
   (let ((buf (get-buffer-create (gp--detail-buffer-name pr))))
     (with-current-buffer buf
-      ;; Only (re)initialise the mode on a fresh buffer.  `gp-detail-mode' is a
-      ;; `define-derived-mode', so calling it runs `kill-all-local-variables'
-      ;; and wipes the cached `gp--detail-pipelines' (etc.) -- re-running it on
-      ;; an already-open buffer is what made pipelines vanish on reopen.
+      ;; re-running the mode would wipe the cached buffer-locals
       (unless (derived-mode-p 'gp-detail-mode)
         (gp-detail-mode))
       (setq gp--pr pr)
-      ;; Anchor the buffer to the PR's repo so `find-file' and friends
-      ;; default there.  After the mode call: `define-derived-mode' runs
-      ;; `kill-all-local-variables', and while `default-directory' survives
-      ;; that as a permanent-local, setting it afterwards keeps the
-      ;; ordering obvious rather than relying on the exemption.
+      ;; After the mode call: `kill-all-local-variables' would reset it.
       (gp-local-anchor-to-checkout pr)
-      ;; Paint a skeleton from the overview PR right away, then hang the
-      ;; spinner on it.  This is the instant first paint -- no network yet.
-      ;; Reuse any cached comments so a revisit shows them without a flash.
+      ;; instant skeleton, no network; cached comments avoid a flash
       (gp--render-detail-into buf pr gp--detail-comments
                               gp--detail-stats gp--detail-diff
                               gp--detail-pipelines)
@@ -2867,12 +2562,9 @@ spinner near the title marks the in-flight load."
 
 (defun gp--detail-load-async (buf pr)
   "Load BUF's PR detail off the main thread, folding results in as they arrive.
-Fetches the PR object and comments asynchronously, then defers the
-heavier stats/diff and pipelines so the visible render is never
-blocked.  A monotonic token (`gp--detail-refresh-token') guards
-against stale callbacks from a previously-shown PR rendering into
-this buffer.  Cached fetches make a revisit cheap; callers wanting
-fresh data bind `gp-cache-ttl' to 0 around the call."
+Fetches the PR object and comments, then the heavier data.
+`gp--detail-refresh-token' guards against stale callbacks.  Callers
+wanting fresh data bind `gp-cache-ttl' to 0 around the call."
   (with-current-buffer buf
     (cl-incf gp--detail-refresh-token)
     (let ((token gp--detail-refresh-token)
@@ -2927,9 +2619,8 @@ fresh data bind `gp-cache-ttl' to 0 around the call."
 
 (defun gp--detail-load-merge-pipelines (buf pr)
   "Fetch the destination-branch pipeline of a merged PR into BUF.
-Only for a merged PR, and only when the backend can name the merge
-commit: that run is the one that deploys, and it lives on the
-destination branch, so the PR-branch fetch never sees it."
+Only when the backend can name the merge commit; that run lives on
+the destination branch, so the PR-branch fetch never sees it."
   (when (and (ignore-errors (gp-pr-merged-p pr))
              gp-detail-show-pipelines)
     (let ((full-name (gp-pr-full-name pr))
@@ -2953,10 +2644,9 @@ destination branch, so the PR-branch fetch never sees it."
 
 (defun gp--detail-load-mergeability (buf pr)
   "Fetch PR's mergeability and fold it into BUF, redrawing if it changed.
-Deferred like the other heavy data: the answer costs a request, so it
-must not be asked for during a render.  A backend that cannot answer
-\(Bitbucket) leaves the value nil, which the renderer treats as \"no
-warning\" rather than \"conflicted\"."
+Deferred, since it costs a request and must not run during a render.
+Also fetches the divergence.  A backend that cannot answer (Bitbucket)
+leaves the value nil, which the renderer treats as \"no warning\"."
   (let ((full-name (gp-pr-full-name pr))
         (id (alist-get 'id pr)))
     (run-with-idle-timer
@@ -2979,20 +2669,11 @@ warning\" rather than \"conflicted\"."
 
 (defun gp--detail-load-stats-diff (buf pr ttl)
   "Fetch PR's stats and diff asynchronously and fold them into BUF.
-Kept out of the visible-render path: stats/diff are cached by source
-commit, so a revisit is instant, while a cold fetch is two round-trips.
-Both are fetched with the async ops, so a cold fetch never blocks
-Emacs -- the synchronous twins froze the UI for the whole round-trip
-(~1.2s) shortly after every `g'.
-
-Relevance is checked by PR id (see `gp--detail-buffer-shows-p'), not a
-refresh token: a rapid series of refreshes starts several fetches and
-only the last-started token would match, so a strict token check could
-drop the only result that ever arrives and leave stats/diff empty
-forever.  Keying on the PR id is the real invariant -- same PR, so the
-fetched stats/diff are valid whichever refresh asked for them.
-
-TTL carries the caller's cache policy (0 forces fresh on `g')."
+Both are cached by source commit and fetched with the async ops, so
+they never block Emacs.  Relevance is checked by PR id
+\(`gp--detail-buffer-shows-p'), not a refresh token: after rapid
+refreshes a strict token check could drop the only result that ever
+arrives.  TTL carries the caller's cache policy (0 forces fresh)."
   (when (or gp-detail-show-stats gp-detail-show-file-diffs)
     (let ((commit (gp-pr-source-commit pr))
           (full-name (gp-pr-full-name pr))
@@ -3001,11 +2682,7 @@ TTL carries the caller's cache policy (0 forces fresh on `g')."
           ((still-relevant-p ()
              (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr)))
            (fold-in (setter value)
-             ;; Each result lands on its own; render what we have so far.
-             ;; A nil value means the fetch failed -- keep whatever is already
-             ;; displayed rather than blanking the section, since the two
-             ;; fetches land independently and a failure should not throw away
-             ;; a good previous result.
+             ;; nil means the fetch failed: keep what is already shown
              (when (and value (still-relevant-p))
                (with-current-buffer buf
                  (funcall setter value)
@@ -3026,9 +2703,8 @@ TTL carries the caller's cache policy (0 forces fresh on `g')."
 
 (defun gp--detail-load-commits (buf pr)
   "Fetch PR's commits asynchronously and fold them into BUF.
-Deferred like stats/diff and reviewers so the visible render never
-waits on it.  A wall-clock timer, NOT `run-with-idle-timer' -- see
-`gp--detail-load-stats-diff'."
+Deferred so the visible render never waits on it.  A wall-clock timer,
+not `run-with-idle-timer' -- see `gp--detail-load-pipelines'."
   (run-at-time
    0.1 nil
    (lambda ()
@@ -3039,8 +2715,7 @@ waits on it.  A wall-clock timer, NOT `run-with-idle-timer' -- see
             (lambda (commits)
               (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
                 (with-current-buffer buf
-                  ;; nil means the fetch failed; keep whatever we already show
-                  ;; rather than blanking the section (same rule as pipelines)
+                  ;; nil means the fetch failed: keep what is already shown
                   (when commits
                     (setq gp--detail-commits commits)
                     (gp--detail-rerender buf)))))
@@ -3050,19 +2725,10 @@ waits on it.  A wall-clock timer, NOT `run-with-idle-timer' -- see
 
 (defun gp--detail-load-local-dirty (buf pr)
   "Check PR's local checkout for uncommitted work and fold it into BUF.
-Deferred like the other heavy data.  Git here is a subprocess rather
-than a request, but `call-process' blocks Emacs just as flatly as a
-socket read does, so it stays off the visible-render path for the same
-reason -- and a `git status' on a large tree is not reliably fast.
-
-Local resolution only (`gp-local-find-checkout'), never
-`gp-local-ensure-checkout': drawing a warning must not clone a repo or
-switch a branch as a side effect.  No clone means nothing to warn
-about, and the value stays nil.
-
-Re-read on every refresh rather than cached: the whole point is to
-reflect the tree as it is right now, and it goes stale the moment you
-save a file outside Emacs."
+Deferred off the render path, since `git status' blocks Emacs.  Uses
+`gp-local-find-checkout', never `gp-local-ensure-checkout': drawing a
+warning must not clone or switch branches.  Re-read on every refresh,
+never cached."
   (run-at-time
    0.1 nil
    (lambda ()
@@ -3078,9 +2744,7 @@ save a file outside Emacs."
                                  :count count))))
              (when (and (buffer-live-p buf) (gp--detail-buffer-shows-p buf pr))
                (with-current-buffer buf
-                 ;; redraw only on a real change: a clean tree is the common
-                 ;; case, and re-rendering the whole buffer to draw nothing
-                 ;; would throw away point and section visibility for free
+                 ;; redraw only on a real change
                  (unless (equal state gp--detail-local-dirty)
                    (setq gp--detail-local-dirty state)
                    (gp--detail-rerender buf)))))
@@ -3089,10 +2753,9 @@ save a file outside Emacs."
 
 (defun gp--detail-load-reviewers (buf pr)
   "Fetch PR's individual reviewers asynchronously and fold them into BUF.
-Bitbucket answers this for free (embedded in PR already); GitHub
-needs a real fetch (`gp-pr-reviewers-async'), so this stays off the
-visible-render path the same way stats/diff do.  A wall-clock timer,
-NOT `run-with-idle-timer' -- see `gp--detail-load-stats-diff'."
+GitHub needs a real fetch (`gp-pr-reviewers-async'), so this stays off
+the render path.  A wall-clock timer, not `run-with-idle-timer' -- see
+`gp--detail-load-pipelines'."
   (run-at-time
    0.1 nil
    (lambda ()
@@ -3110,12 +2773,9 @@ NOT `run-with-idle-timer' -- see `gp--detail-load-stats-diff'."
 
 (defun gp--detail-load-review-batch (buf pr)
   "Merge the caller's pending review-batch comments into BUF's comment list.
-Bitbucket's ordinary comment fetch already includes the caller's
-pending comments, so this is a no-op there in practice (the dedup
-below simply finds nothing new); GitHub's REST comment fetch never
-surfaces a comment still sitting in a PENDING review, so its batch
-only ever arrives through this GraphQL-backed call.  Deferred off the
-visible-render path like the other enrichment loads."
+GitHub's REST comment fetch omits comments in a PENDING review, so they
+arrive only through this GraphQL-backed call; on Bitbucket the dedup
+finds nothing new."
   (run-at-time
    0.1 nil
    (lambda ()
@@ -3136,20 +2796,16 @@ visible-render path like the other enrichment loads."
           (gp-log-error "review batch load failed: %s" (error-message-string e))))))))
 
 (defun gp--detail-load-pipelines (buf pr)
-  "Fetch PR's pipelines on a separate idle timer and fold them into BUF.
-Kept separate from the main load so the N+1 pipeline calls never
-block or delay the comments/diff view.  While any current-commit
-pipeline is still running, schedules a poll so the buffer tracks a
-live deployment without a manual refresh."
+  "Fetch PR's pipelines on a separate timer and fold them into BUF.
+Kept separate so the N+1 pipeline calls never delay the main view.
+Schedules a poll or watch per `gp--detail-pipeline-poll-mode'."
   (gp-log 'info "pipelines: load scheduled for %s" (buffer-name buf))
-  ;; Drop any pending load first: entry points other than the reschedule path
-  ;; used to stack, and each pending timer re-arms itself.
+  ;; drop any pending load first: each pending timer re-arms itself
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (gp--detail-cancel-pipeline-timer)))
   ;; A wall-clock timer, NOT `run-with-idle-timer': an idle timer scheduled
-  ;; from a url sentinel while Emacs is already idle can silently never fire
-  ;; (observed live; the sibling stats loader got lucky with ordering).
+  ;; from a url sentinel while Emacs is already idle can silently never fire.
   (let ((timer
          (run-at-time
           0.2 nil
@@ -3157,10 +2813,7 @@ live deployment without a manual refresh."
             (if (not (buffer-live-p buf))
                 (gp-log 'info "pipelines: buffer gone before load timer fired")
               (condition-case e
-                  ;; Async: a synchronous fetch here blocks Emacs's main thread
-                  ;; for the branch fetch plus one step fetch per current run --
-                  ;; once every `gp-detail-pipeline-poll-interval' seconds, which
-                  ;; is exactly the periodic freeze this replaced.
+                  ;; must be async: this runs on every poll tick
                   (gp-pipeline-fetch-for-pr-async
                    pr
                    (lambda (data)
@@ -3170,13 +2823,8 @@ live deployment without a manual refresh."
                                  (length (plist-get data :current))
                                  (length (plist-get data :recent))))
                        (with-current-buffer buf
-                         ;; The fetch reports nil on ANY error (it can't tell a
-                         ;; transient API hiccup from a genuinely pipeline-less
-                         ;; PR).  So an empty result must NOT clobber pipelines we
-                         ;; already have -- otherwise a flaky refetch/poll blanks
-                         ;; the section until the next successful fetch.  Keep the
-                         ;; old data instead; only adopt an empty result on a
-                         ;; first-ever load.
+                         ;; The fetch reports nil on ANY error, so an empty
+                         ;; result must not clobber pipelines we already have.
                          (let ((keep (and (gp--detail-pipelines-empty-p data)
                                           (not (gp--detail-pipelines-empty-p
                                                 gp--detail-pipelines))))
@@ -3186,15 +2834,9 @@ live deployment without a manual refresh."
                            (unless keep
                              (setq gp--detail-pipelines data)
                              (when changed (gp--detail-rerender buf)))
-                           ;; Re-arm the animation from STATE, not from the
-                           ;; render.  `gp-pipeline--spinner-ensure' otherwise
-                           ;; only runs while drawing a glyph, and the
-                           ;; `changed' guard above deliberately skips the
-                           ;; redraw whenever a poll returns identical data --
-                           ;; the steady state of a long-running pipeline.  A
-                           ;; spinner timer that retired in the meantime would
-                           ;; then never come back and the glyph would sit
-                           ;; frozen while the run was still going.
+                           ;; Re-arm the spinner from state, not the render:
+                           ;; the `changed' guard skips redraws on identical
+                           ;; polls, and a retired spinner would stay frozen.
                            (when (gp--detail-pipelines-running-p
                                   gp--detail-pipelines)
                              (gp-pipeline--spinner-ensure))
@@ -3223,11 +2865,9 @@ live deployment without a manual refresh."
 
 (defun gp--detail-pipeline-watch-tick (buf)
   "One watch cycle: re-fetch BUF's PR head, then reload its pipelines.
-Re-fetching the PR first means a just-pushed commit's fresh run shows
-up as the CURRENT run (the head hash moved), not as a recent one.
-Stops silently when BUF is gone or no longer displayed (on any
-tab-bar tab, not just the selected one); the next manual refresh
-restarts the watch."
+Re-fetching the PR first makes a just-pushed commit's run show as the
+current run.  Stops when BUF is gone or no longer displayed; the next
+manual refresh restarts the watch."
   (when (and (buffer-live-p buf) (gp--detail-buffer-visible-p buf))
     (let ((pr (buffer-local-value 'gp--pr buf)))
       (gp-pull-request-async
@@ -3243,20 +2883,16 @@ restarts the watch."
 
 (defun gp--detail-refresh-async (buf pr)
   "Refresh BUF's PR detail asynchronously, bypassing the result cache.
-Existing content stays visible while a fresh PR object, comments,
-stats, diff and pipelines are fetched.  Binding `gp-cache-ttl'
-to 0 makes the shared loader (`gp--detail-load-async') and its
-deferred stats/diff fetch ignore the cache, so `g' always re-fetches."
+Existing content stays visible meanwhile.  Binds `gp-cache-ttl' to 0
+around `gp--detail-load-async'."
   (let ((gp-cache-ttl 0))
     (gp--detail-load-async buf pr)))
 
 (defun gp-detail-refresh ()
   "Re-fetch and redraw the current detail buffer (non-blocking, force-fresh).
 Also busts the overview's cached deploy verdict for this PR's commit
-(see `gp-helm--deploy-cache'): every pipeline-mutating command here
-(trigger, stop, run/rerun a step) calls this on completion, which is
-exactly when a deploy step could have newly succeeded or a previously
-successful run could have been superseded by a new one."
+\(see `gp-helm--deploy-cache'), since every pipeline-mutating command
+calls this on completion."
   (interactive)
   (when (and gp--pr (fboundp 'gp-helm--deploy-cache-bust))
     (gp-helm--deploy-cache-bust gp--pr))
@@ -3293,7 +2929,7 @@ successful run could have been superseded by a new one."
 
 ;;;###autoload (autoload 'gp-dispatch "gp-ui" nil t)
 (transient-define-prefix gp-dispatch ()
-  "Bitbucket pull-request actions."
+  "Pull-request actions."
   ["Pull request"
    ("RET" "Visit (comments)" gp-visit-pr)
    ("w"   "Browse on web"     gp-browse-pr)]

@@ -5,8 +5,8 @@
 ;; The Bitbucket Cloud implementation of the `git-platform' protocol.  Each
 ;; method delegates to the corresponding endpoint function in
 ;; `bitbucket-api.el', which remains the single network choke-point (and the
-;; thing the test-suite mocks).  Credentials/workspace are read through the
-;; existing `bitbucket-*' customs/env, so no extra configuration is needed.
+;; thing the test-suite mocks).  Credentials/workspace come from the
+;; `bitbucket-*' customs/env.
 
 ;;; Code:
 
@@ -76,20 +76,13 @@
   (bitbucket-request-changes-pr full-name id unrequest))
 (cl-defmethod gp--review-retraction-kind ((_ git-platform-bitbucket))
   'retract)
-;; Bitbucket Cloud PRs have no labels: no field on the PR, no repo-level
-;; label pool, nothing to set.  Reporting that here (rather than returning an
-;; empty list from `gp--pr-labels' alone) is what lets the UI drop the label
-;; affordances entirely instead of showing a slot that can never fill.
+;; Bitbucket Cloud PRs have no labels; saying so lets the UI drop the label
+;; affordances instead of showing a slot that can never fill.
 (cl-defmethod gp--labels-supported-p ((_ git-platform-bitbucket)) nil)
-;; The web UI has a single binary Like, but the public v2.0 API exposes no
-;; route for it and emoji reactions are only a feature request
-;; (BCLOUD-21346, "Gathering Interest" since 2021).  Bitbucket *Server/DC*
-;; does have a documented comment-likes API -- a different product; a
-;; Server backend could implement these four with a one-element
-;; `reaction-choices'.
-;; Bitbucket accepts a comment on any line of any file, so there is nothing
-;; to pre-check.
+;; Bitbucket accepts a comment on any line of any file: nothing to pre-check.
 (cl-defmethod gp--inline-target-problem ((_ git-platform-bitbucket) _fn _id _path _line) nil)
+;; The web UI's Like has no public v2.0 API route, and emoji reactions are
+;; only a feature request (BCLOUD-21346).  Server/DC has a comment-likes API.
 (cl-defmethod gp--reactions-supported-p ((_ git-platform-bitbucket)) nil)
 (cl-defmethod gp--reaction-choices ((_ git-platform-bitbucket)) nil)
 (cl-defmethod gp--comment-reactions ((_ git-platform-bitbucket) _full-name _comment) nil)
@@ -179,8 +172,6 @@
 
 ;;;; Field accessors ----------------------------------------------------------
 
-;; The JSON-shape logic lives in bitbucket-api.el; methods delegate to it so
-;; there is a single Bitbucket implementation.
 (cl-defmethod gp--pr-full-name ((_ git-platform-bitbucket) pr)
   (let-alist pr .destination.repository.full_name))
 (cl-defmethod gp--pr-source-branch ((_ git-platform-bitbucket) pr)

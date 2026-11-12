@@ -13,11 +13,11 @@
 ;; step shows its status and duration.
 ;;
 ;; Actions on the pipeline/step at point:
-;;   s   stop the running pipeline       (pipeline-level; the platform has
-;;   T   trigger / re-run the pipeline    no per-step stop or trigger)
-;;   m   run a waiting *manual* step
-;;   l   open the step's log in a buffer (polled live while it runs,
-;;       historical once finished)
+;;   s   stop the running pipeline
+;;   T   trigger the pipeline, or run/redeploy the manual step at point
+;;   P   re-run the finished step at point (where the backend allows it)
+;;   A   arm/disarm a deploy watcher on the manual step at point
+;;   l   open the step's log in a buffer (polled live while it runs)
 ;;
 ;; These are wired into `gp-detail-mode-map' from gp-ui.el.
 
@@ -38,9 +38,10 @@
 (declare-function gp-pipeline-steps-async "git-platform")
 (declare-function gp-commit-message-async "git-platform")
 (declare-function gp-pipeline-step-log-classify-line "git-platform")
+(declare-function gp-pipelines-match-commit "git-platform")
 
 (defvar gp--pr)                         ;; the detail buffer's PR (gp-ui.el)
-(defvar gp-pipeline-deploy-script)      ;; defcustom, defined later in this file
+(defvar gp-pipeline-deploy-script)      ;; defcustom, defined below
 (declare-function gp-detail-refresh "gp-ui")
 (declare-function gp--detail-rerender "gp-ui")
 (declare-function gp-deploy-watch-step-marker "gp-deploy-watch")
@@ -56,8 +57,8 @@
     (((class color) (background light)) :foreground "#1f6feb")
     (t :inherit font-lock-keyword-face))
   "Face for the animated spinner of a running or queued pipeline/step.
-Blue in both light and dark themes: a theme's keyword face, used
-before, is red or teal in many themes, which reads as an error."
+Blue in both light and dark themes; keyword faces are often red, which
+reads as an error."
   :group 'bitbucket-faces)
 (defface gp-pipeline-success-face '((t :inherit success))
   "Face for a successful pipeline/step." :group 'bitbucket-faces)
@@ -68,12 +69,11 @@ before, is red or teal in many themes, which reads as an error."
 (defface gp-pipeline-paused-face '((t :inherit warning :weight bold))
   "Face for a pipeline paused at an open manual gate." :group 'bitbucket-faces)
 (defface gp-pipeline-log-command-face '((t :inherit font-lock-comment-face :weight bold))
-  "Face for a step-log line that echoes the command being run
-\(e.g. Bitbucket's leading \"+ \"\), so it stands out from the
-command's own output." :group 'bitbucket-faces)
+  "Face for a step-log line echoing the command being run.
+E.g. Bitbucket's leading \"+ \"." :group 'bitbucket-faces)
 (defface gp-pipeline-log-group-face '((t :inherit magit-section-heading))
-  "Face for a step-log line that marks a named section
-\(e.g. GitHub's \"##[group]\"/\"##[endgroup]\")." :group 'bitbucket-faces)
+  "Face for a step-log line marking a named section.
+E.g. GitHub's \"##[group]\"/\"##[endgroup]\"." :group 'bitbucket-faces)
 
 (defcustom gp-pipeline-max 20
   "How many recent branch pipelines to fetch before partitioning by commit."
@@ -94,29 +94,19 @@ command's own output." :group 'bitbucket-faces)
 
 ;;;; Spinner -------------------------------------------------------------------
 
-;; An in-progress pipeline/step renders as a one-character animated spinner
-;; instead of a static glyph.  The frames orbit a Braille dot around the cell:
-;; a step is RUNNING, not loading toward a known finish, so the animation has
-;; to read as indeterminate motion.  A bar that fills and empties (the earlier
-;; default) implied measurable progress and, worse, appeared to reset to zero
-;; on every cycle.  All frames are single-width characters from the same
-;; Braille block, so the animation never reflows the line: the timer only
-;; swaps the character in place, it never inserts or deletes.
+;; An in-progress pipeline/step renders as a one-character animated spinner.
+;; All frames are single-width, so the timer swaps the character in place
+;; and never reflows the line.
 
 (defcustom gp-pipeline-spinner-frames
   ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Frames of the in-progress spinner.
-The default orbits a Braille dot, the conventional indeterminate
-spinner: a running job has no measurable percentage, so the motion
-must not suggest one.  Every frame must be a single character of the
-same display width, or the animation will shift the rest of the line."
+Every frame must be a single character of the same display width, or
+the animation will shift the rest of the line."
   :type '(vector string) :group 'bitbucket)
 
 (defcustom gp-pipeline-spinner-interval 0.08
-  "Seconds between in-progress spinner frames.
-With the 10-frame default this is one rotation every 0.8s -- the
-usual pace for an indeterminate spinner.  The previous 0.12s was
-tuned for a 12-frame bar and reads sluggishly as a rotation."
+  "Seconds between in-progress spinner frames."
   :type 'number :group 'bitbucket)
 
 (defvar gp-pipeline--spinner-index 0
@@ -127,15 +117,9 @@ tuned for a 12-frame bar and reads sluggishly as a rotation."
 
 (defvar gp-pipeline--deploy-running (make-hash-table :test 'equal)
   "Step id -> start time (`float-time') for an in-flight deploy script.
-Bitbucket's own step `state'/`result' never reflect
-`gp-pipeline--deploy-run': that process runs entirely on this side
-\(browser automation, a script, whatever `gp-pipeline-deploy-script'
-does\), so the forge keeps reporting the step's PRE-run state
-\(typically the SUCCESSFUL result from its last real run, for a
-redeploy\) for the whole time our script is working.  This registry is
-the only source of truth for \"is a script running against this step
-right now\", checked by `gp-pipeline--insert-step' before falling back
-to the forge-reported glyph.")
+The forge keeps reporting the step's pre-run state while the local
+`gp-pipeline--deploy-run' process works, so this registry is the only
+source of truth for it; `gp-pipeline--insert-step' checks it first.")
 
 (defun gp-pipeline--deploy-running-p (step)
   "Non-nil when a deploy script is currently running for STEP."
@@ -148,16 +132,14 @@ to the forge-reported glyph.")
 
 (defun gp-pipeline--spinner-glyph ()
   "Return a propertized spinner character for an in-progress entry.
-The `gp-pipeline-spinner' text property marks it for repainting by
-`gp-pipeline--spinner-tick'."
+Tagged `gp-pipeline-spinner' for `gp-pipeline--spinner-tick'."
   (propertize (gp-pipeline--spinner-frame)
               'face 'gp-pipeline-spinner-face
               'gp-pipeline-spinner t))
 
 (defun gp-pipeline--spinner-repaint-buffer (frame)
   "Replace every spinner character in the current buffer with FRAME.
-Rewrites the single marked character in place, so no text is inserted
-or removed and point, marks and window scroll all stay put.  Returns
+Rewrites in place, so point, marks and scroll stay put.  Returns
 non-nil when the buffer contained at least one spinner."
   (let ((inhibit-read-only t)
         (buffer-undo-list t)
@@ -181,35 +163,22 @@ non-nil when the buffer contained at least one spinner."
 
 (defconst gp-pipeline--spinner-grace-ticks 25
   "Empty ticks tolerated before the spinner timer stops itself.
-
-A detail buffer is erased and rebuilt wholesale on every rerender, so
-a tick landing inside that window sees no spinner even though one is
-about to reappear.  Stopping on the FIRST empty tick made the spinner
-freeze: only `gp-pipeline--status-glyph' restarts the timer, and the
-pipeline poll deliberately skips the rerender while fetched data is
-unchanged -- exactly the steady state of a long-running pipeline.  So
-nothing repainted the glyph until the next unrelated redraw.
-
-At the default 0.08s interval this grace spans ~2s of genuine absence
-before the timer retires, which idle buffers reach in well under a
-second of wall-clock cost.")
+A tick landing mid-rerender sees no spinner, and only a rerender
+restarts the timer (which the poll skips while data is unchanged), so
+stopping on the first empty tick would freeze the spinner.")
 
 (defvar gp-pipeline--spinner-misses 0
   "Consecutive `gp-pipeline--spinner-tick' runs that found no spinner.")
 
 (defvar gp-pipeline--elapsed-last-second nil
   "Wall-clock second at which elapsed times were last reticked.
-Throttles the elapsed repaint to once a second: the spinner ticks
-about twelve times as often, and a seconds display cannot change
-faster than the clock.")
+Throttles the elapsed repaint to once a second.")
 
 (defun gp-pipeline--elapsed-repaint-buffer ()
   "Retick every running step's elapsed-time text in the current buffer.
-The duration is derived from `started_on', so it only advances when
-something redraws it -- and the pipeline poll skips the redraw while a
-running step's JSON is unchanged, which is the whole time it runs.
-Rewrites just the tagged text, so point, marks and folding stay put.
-Returns non-nil when at least one duration was found."
+Needed because the poll skips the redraw while a running step's JSON
+is unchanged.  Rewrites just the tagged text, so point, marks and
+folding stay put.  Returns non-nil when at least one duration was found."
   (let ((inhibit-read-only t)
         (buffer-undo-list t)
         (found nil)
@@ -253,10 +222,6 @@ Stops the timer once no live buffer has contained a spinner for
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (derived-mode-p 'magit-section-mode)
-            ;; Retick elapsed times on the same clock as the spinner: a step
-            ;; that is running is exactly a step whose duration must advance.
-            ;; Only once a second though -- the seconds display cannot change
-            ;; faster than that, and the spinner ticks ~12x more often.
             (when (and tick-elapsed (gp-pipeline--elapsed-repaint-buffer))
               (setq any t))
             (when (gp-pipeline--spinner-repaint-buffer frame)
@@ -276,8 +241,7 @@ Stops the timer once no live buffer has contained a spinner for
 
 (defun gp-pipeline--spinner-ensure ()
   "Start the spinner timer unless it is already running.
-Also clears the miss counter, so a buffer that draws a spinner again
-resets the grace window rather than inheriting a nearly-expired one."
+Also resets the miss counter, restarting the grace window."
   (setq gp-pipeline--spinner-misses 0)
   (unless (timerp gp-pipeline--spinner-timer)
     (setq gp-pipeline--spinner-timer
@@ -298,13 +262,10 @@ or manual step), so it is only queued when STEP is nil."
 
 (defun gp-pipeline--status-glyph (state result &optional step)
   "Return (GLYPH . FACE) for a pipeline/step STATE and RESULT string.
-A pipeline paused at an open manual gate (stage PAUSED) gets its own
-⏸ glyph instead of the running one.  An in-progress entry gets the
-animated spinner glyph (see `gp-pipeline--spinner-glyph'), which
-already carries its own face -- FACE is `gp-pipeline-spinner-face' in
-that case.  STEP is accepted for backward compatibility and no longer
-changes the glyph.  A queued entry (see `gp-pipeline--queued-p')
-spins too: it is waiting for a runner, not idle."
+A pipeline paused at an open manual gate (result PAUSED) gets ⏸.  An
+in-progress or queued entry gets the animated spinner glyph (see
+`gp-pipeline--spinner-glyph').  STEP non-nil means STATE is a step's,
+as `gp-pipeline--queued-p' reads it."
   (cond
    ((equal result "PAUSED") (cons "⏸" 'gp-pipeline-paused-face))
    ((or (equal state "IN_PROGRESS") (gp-pipeline--queued-p state step))
@@ -313,8 +274,7 @@ spins too: it is waiting for a runner, not idle."
    ((member state '("PENDING" "READY" "BUILDING" nil))
     (cons "…" 'gp-pipeline-running-face))
    ((equal result "SUCCESSFUL") (cons "✔" 'gp-pipeline-success-face))
-   ((equal result "FAILED")     (cons "✘" 'gp-pipeline-failed-face))
-   ((equal result "ERROR")      (cons "✘" 'gp-pipeline-failed-face))
+   ((member result '("FAILED" "ERROR")) (cons "✘" 'gp-pipeline-failed-face))
    ((member result '("STOPPED" "HALTED" "SKIPPED"))
     (cons "■" 'gp-pipeline-stopped-face))
    (t (cons "•" 'shadow))))
@@ -352,15 +312,9 @@ step is startable."
 (defun gp-pipeline-step-redeployable-p (step)
   "Non-nil when STEP already succeeded and can be redeployed on demand.
 Distinct from `gp-pipeline-step-runnable-manual-p' (a manual step still
-WAITING to run for the first time): this is for a manual step whose
-result is already SUCCESSFUL, e.g. re-pushing the same build to an
-environment after a rollback, or simply wanting it to run again.
-
-Only meaningful with `gp-pipeline-deploy-script' configured: that
-script is the only route that can re-run this step's action at all
-\(Bitbucket's API cannot resume or restart an individual step in
-place, see `gp-detail-pipeline-run-manual'\), so with no script
-configured there is nothing to offer."
+waiting for its first run).  Requires `gp-pipeline-deploy-script': it
+is the only route that can re-run the step (see
+`gp-detail-pipeline-run-manual')."
   (and gp-pipeline-deploy-script
        (gp-pipeline-step-manual-p step)
        (equal (gp-pipeline-step-result step) "SUCCESSFUL")))
@@ -391,10 +345,8 @@ the indistinguishable running state."
   (let* ((deploy-started (gethash (gp-pipeline-step-id step) gp-pipeline--deploy-running))
          (state (gp-pipeline-step-state step))
          (result (gp-pipeline-step-result step))
-         ;; A locally-running deploy script overrides the forge-reported
-         ;; glyph: Bitbucket's own state/result for this step do not change
-         ;; while our script runs (see `gp-pipeline--deploy-running'), so
-         ;; without this a redeploy would still show ✔ SUCCESSFUL throughout.
+         ;; A local deploy script overrides the forge-reported glyph,
+         ;; which does not change while it runs.
          (g (if deploy-started
                 (progn (gp-pipeline--spinner-ensure)
                        (cons (gp-pipeline--spinner-glyph) 'gp-pipeline-spinner-face))
@@ -429,9 +381,7 @@ the indistinguishable running state."
                         step (gp-pr-full-name gp--pr)
                         (gp-pr-source-branch gp--pr))))
                 (cond
-                 ;; Same tag-with-timestamp trick as a forge-reported running
-                 ;; step below: `gp-pipeline--spinner-tick' reticks this in
-                 ;; place every second without a rerender.
+                 ;; Tagged so `gp-pipeline--spinner-tick' reticks it in place.
                  (deploy-started
                   (propertize
                    (format "  %s" (gp-pipeline--format-secs
@@ -440,12 +390,8 @@ the indistinguishable running state."
                    'gp-pipeline-elapsed
                    (format-time-string "%Y-%m-%dT%H:%M:%S+00:00" deploy-started t)))
                  ((not (string-empty-p dur))
-                  ;; A running step's duration is computed from `started_on'
-                  ;; at RENDER time, so it is a snapshot, not a clock.  The
-                  ;; poll deliberately skips the rerender while fetched data
-                  ;; is unchanged, which is exactly what a still-running step
-                  ;; returns -- so tag the text with its start timestamp and
-                  ;; let `gp-pipeline--spinner-tick' retick it in place.
+                  ;; A render-time snapshot; tag a running step's text with
+                  ;; its start so `gp-pipeline--spinner-tick' reticks it.
                   (apply #'propertize (format "  %s" dur) 'face 'shadow
                          (when (gp-pipeline-step-running-p step)
                            (list 'gp-pipeline-elapsed
@@ -455,18 +401,11 @@ the indistinguishable running state."
 (defun gp--insert-pipelines (data)
   "Insert the Pipelines section from DATA (plist :current :recent).
 :current is a sorted alist of (PIPELINE . STEPS) for the PR's head
-commit, rendered in full (finished ones collapsed).  :recent (prior
-commits' pipelines on the same branch) is not rendered here at all --
-see `gp--insert-commits', which shows each one beside the commit it
-belongs to instead: a dedicated \"Recent runs\" block here used to
-repeat the same commit summary a second time with a status beside it,
-and nothing there was actionable."
+commit, rendered in full (finished ones collapsed).  :recent is not
+rendered here but beside each commit by `gp--insert-commits'; it only
+keeps this section (with its \"no pipeline\" fallback) visible."
   (let* ((current (plist-get data :current))
          (recent (plist-get data :recent)))
-    ;; still shown (with the "no pipeline" fallback) when only :recent has
-    ;; anything, so a PR whose head commit has no run of its own doesn't
-    ;; silently lose this section -- :recent itself renders in the Commits
-    ;; section instead (see `gp--insert-commits'), not here.
     (when (or current recent)
       (magit-insert-section (magit-section 'pipelines)
         (magit-insert-heading
@@ -491,13 +430,13 @@ and nothing there was actionable."
 (defun gp-pipeline--partition (all commit)
   "Split ALL pipelines into (CURRENT . RECENT) around head COMMIT.
 Paged fetches can duplicate a run when a new pipeline starts
-mid-pagination (the pages shift) -- dedupe by uuid first."
+mid-pagination (the pages shift) -- dedupe by id first."
   (let* ((all (cl-remove-duplicates all
-                                    :key (lambda (p) (gp-pipeline-id p))
+                                    :key #'gp-pipeline-id
                                     :test #'equal
                                     :from-end t))
          (current (gp-pipelines-match-commit all commit))
-         (current-uuids (mapcar (lambda (p) (gp-pipeline-id p)) current)))
+         (current-uuids (mapcar #'gp-pipeline-id current)))
     (cons current
           (cl-remove-if (lambda (p) (member (gp-pipeline-id p) current-uuids))
                         all))))
@@ -524,19 +463,15 @@ hash to its commit message."
 (defun gp-pipeline-fetch-for-pr (pr)
   "Return pipeline data for PR as a plist (:current ALIST :recent LIST).
 
-:current is a sorted alist of (PIPELINE . STEPS) for the PR's
-current head commit -- the runs that matter -- most steps first,
-with each pipeline's steps fetched.
-
-:recent is a short list of (PIPELINE . COMMIT-SUMMARY) conses for
-the branch's other recent commits (newest first, no steps fetched)
--- a lightweight status summary.  Both may be nil.  Returns nil on
-any error (the detail view degrades gracefully; the error is logged)."
+:current is a sorted alist of (PIPELINE . STEPS) for the PR's head
+commit, most steps first.  :recent is a short list of
+\(PIPELINE . COMMIT-SUMMARY) for the branch's other recent commits,
+newest first, without steps.  Both may be nil.  Returns nil (and logs)
+on any error."
   (condition-case e
     (let* ((full-name (gp-pr-full-name pr))
            (branch (gp-pr-source-branch pr))
            (commit (gp-pr-source-commit pr))
-           ;; one branch fetch; partition into current-commit vs the rest
            (split (gp-pipeline--partition
                    (gp-pipelines-for-branch full-name branch gp-pipeline-max)
                    commit))
@@ -547,8 +482,7 @@ any error (the detail view degrades gracefully; the error is logged)."
       (dolist (p current)
         (let ((uuid (gp-pipeline-id p)))
           (puthash uuid (gp-pipeline-steps full-name uuid) steps-of)))
-      ;; attach each run's commit summary (one extra lookup per run,
-      ;; cached) so the renderer needs no network access
+      ;; so the renderer needs no network access
       (dolist (p recent)
         (let ((hash (gp-pipeline-commit p)))
           (puthash hash (gp-commit-message full-name hash) summaries)))
@@ -559,90 +493,69 @@ any error (the detail view degrades gracefully; the error is logged)."
 
 (defun gp-pipeline-fetch-for-pr-async (pr callback)
   "Fetch PR's pipeline data asynchronously; CALLBACK gets the plist.
-Non-blocking twin of `gp-pipeline-fetch-for-pr', producing the exact
-same (:current … :recent …) shape.  This is what the detail view
-polls: the synchronous version blocks Emacs's main thread for the
-whole branch fetch + one step fetch per current-commit run, which
-froze the UI once per poll interval.
-
-The fan-outs (steps per current run, commit message per recent run)
-run concurrently and a shared counter fires CALLBACK once the last
-one lands.  CALLBACK gets nil if the branch fetch itself failed --
-the caller treats that like the synchronous nil (keeps stale data)."
+Non-blocking twin of `gp-pipeline-fetch-for-pr' with the same shape;
+this is what the detail view polls.  The per-run fan-outs run
+concurrently and CALLBACK fires once the last one lands.  CALLBACK gets
+nil if the branch fetch failed or found no runs."
   (gp-pipeline-fetch-for-branch-async
    (gp-pr-full-name pr) (gp-pr-source-branch pr) (gp-pr-source-commit pr) callback))
 
 (defun gp-pipeline-fetch-for-branch-async (full-name branch commit callback)
   "Fetch BRANCH's pipeline data in FULL-NAME; CALLBACK gets the plist.
-COMMIT is the commit whose runs count as `:current'.  Split out of
-`gp-pipeline-fetch-for-pr-async' so a merged PR can ask the same
-question about its DESTINATION branch and merge commit -- the run that
-actually deploys."
-  (let ((full-name full-name)
-        (branch branch)
-        (commit commit))
-    (gp-pipelines-for-branch-async
-     full-name branch gp-pipeline-max nil
-     (lambda (all)
-       (condition-case e
-           (if (null all)
-               ;; nil means the fetch failed OR the branch genuinely has no
-               ;; runs; both are reported as an empty result, exactly as the
-               ;; synchronous path did.
-               (funcall callback nil)
-             (let* ((split (gp-pipeline--partition all commit))
-                    (current (car split))
-                    (recent (seq-take (cdr split) gp-pipeline-recent-max))
-                    (steps-of (make-hash-table :test 'equal))
-                    (summaries (make-hash-table :test 'equal))
-                    ;; one tick per step fetch and per commit-message lookup
-                    (pending (+ (length current) (length recent)))
-                    (done nil))
-               (cl-flet ((settle ()
-                           (setq pending (1- pending))
-                           (when (and (<= pending 0) (not done))
-                             (setq done t)
-                             (funcall callback
-                                      (gp-pipeline--assemble
-                                       current steps-of recent summaries)))))
-                 (if (zerop pending)
-                     ;; runs exist but none current and none recent
-                     (funcall callback (gp-pipeline--assemble
-                                        current steps-of recent summaries))
-                   (dolist (p current)
-                     (let ((uuid (gp-pipeline-id p)))
-                       (gp-pipeline-steps-async
-                        full-name uuid
-                        (lambda (steps)
-                          (puthash uuid steps steps-of)
-                          (settle)))))
-                   (dolist (p recent)
-                     (let ((hash (gp-pipeline-commit p)))
-                       (gp-commit-message-async
-                        full-name hash
-                        (lambda (msg)
-                          (puthash hash msg summaries)
-                          (settle)))))))))
-         (error
-          (gp-log-error "pipeline fetch failed: %s" (error-message-string e))
-          (funcall callback nil)))))))
-
-(defun gp-pipelines-match-commit (pipelines commit)
-  "Return PIPELINES whose target commit matches COMMIT (delegates to backend)."
-  (gp--pipelines-match-commit (git-platform-backend) pipelines commit))
+COMMIT is the commit whose runs count as `:current'.  Lets a merged PR
+ask about its destination branch and merge commit -- the run that
+deploys."
+  (gp-pipelines-for-branch-async
+   full-name branch gp-pipeline-max nil
+   (lambda (all)
+     (condition-case e
+         (if (null all)
+             ;; fetch failed OR the branch has no runs
+             (funcall callback nil)
+           (let* ((split (gp-pipeline--partition all commit))
+                  (current (car split))
+                  (recent (seq-take (cdr split) gp-pipeline-recent-max))
+                  (steps-of (make-hash-table :test 'equal))
+                  (summaries (make-hash-table :test 'equal))
+                  ;; one tick per step fetch and per commit-message lookup
+                  (pending (+ (length current) (length recent)))
+                  (done nil))
+             (cl-flet ((settle ()
+                         (setq pending (1- pending))
+                         (when (and (<= pending 0) (not done))
+                           (setq done t)
+                           (funcall callback
+                                    (gp-pipeline--assemble
+                                     current steps-of recent summaries)))))
+               (if (zerop pending)
+                   ;; runs exist but none current and none recent
+                   (funcall callback (gp-pipeline--assemble
+                                      current steps-of recent summaries))
+                 (dolist (p current)
+                   (let ((uuid (gp-pipeline-id p)))
+                     (gp-pipeline-steps-async
+                      full-name uuid
+                      (lambda (steps)
+                        (puthash uuid steps steps-of)
+                        (settle)))))
+                 (dolist (p recent)
+                   (let ((hash (gp-pipeline-commit p)))
+                     (gp-commit-message-async
+                      full-name hash
+                      (lambda (msg)
+                        (puthash hash msg summaries)
+                        (settle)))))))))
+       (error
+        (gp-log-error "pipeline fetch failed: %s" (error-message-string e))
+        (funcall callback nil))))))
 
 ;;;; Manual-step trigger hook (external script) --------------------------------
 
-;; Bitbucket Cloud has no public REST endpoint that advances an individual
-;; halted manual step (BCLOUD-20050, open since 2020); only the web UI can.
-;; `gp-pipeline-run-manual-step' therefore re-triggers the whole pipeline,
-;; which re-runs everything up to the gate.  Users who have a working
-;; out-of-band way to click that gate -- typically a browser-automation
-;; script driving a logged-in session -- can plug it in here instead.
-;;
-;; The hook is deliberately backend-agnostic and lives outside the protocol
-;; layer: it is a user-supplied escape hatch, not a backend capability, so a
-;; backend gaining a real API later does not have to model it.
+;; Bitbucket Cloud has no REST endpoint that advances a halted manual step
+;; (BCLOUD-20050); `gp-pipeline-run-manual-step' re-triggers the whole
+;; pipeline instead.  A user script (e.g. browser automation) can click the
+;; gate out-of-band.  It is a user escape hatch, deliberately kept outside
+;; the protocol layer.
 
 (defcustom gp-pipeline-deploy-script nil
   "External command run to trigger a manual deploy step, or nil.
@@ -691,20 +604,13 @@ not popped up -- the result arrives as an OS notification (see
 
 (defcustom gp-pipeline-deploy-notify t
   "Whether a finished deploy script raises an OS notification.
-A browser-driven deploy runs long enough that the user has usually
-switched away from Emacs, so the echo-area message alone is missed.
-
-Reports that the step was TRIGGERED, not that the deployment finished:
-the script's job is to click the step, and Bitbucket runs the deploy
-afterwards.  Use `gp-deploy-watch' to be told the actual outcome.
-
-Narrows the package-wide `gp-notify': the notification is sent only
-when both are non-nil.  Set this to nil to keep just deploy results
-in the echo area and `gp-pipeline-deploy-buffer'."
+Reports that the step was TRIGGERED, not that the deployment finished;
+use `gp-deploy-watch' for the actual outcome.  Narrows the package-wide
+`gp-notify': the notification is sent only when both are non-nil."
   :type 'boolean :group 'bitbucket)
 
 (defun gp-pipeline--deploy-env (full-name branch pipeline step pr)
-  "Return an `process-environment' with GP_* context for the deploy script.
+  "Return a `process-environment' with GP_* context for the deploy script.
 FULL-NAME is \"workspace/slug\"; PIPELINE and STEP are the objects at
 point; PR supplies the pull request id.  Values that cannot be
 resolved are omitted rather than exported empty, so a script can tell
@@ -737,23 +643,14 @@ resolved are omitted rather than exported empty, so a script can tell
 
 (defun gp-pipeline--deploy-run (full-name branch pipeline step pr &optional on-exit)
   "Run `gp-pipeline-deploy-script' for STEP, streaming output to a buffer.
-Asynchronous: browser automation takes tens of seconds, and blocking
-Emacs on it is exactly what the async work in this package removed.
-Refreshes the detail view when the script exits successfully.
+Asynchronous.  Refreshes the detail view when the script exits.
 
-ON-EXIT, if given, is called with a single OK argument once the
-script's process exits -- non-nil for a clean exit, nil otherwise.
-Callers that need to know the script's real outcome (rather than
-merely that it was started) should use this instead of assuming
-success once `make-process' returns, since the process is still
-running at that point.
+ON-EXIT, if given, is called with OK once the process exits: non-nil
+for a clean exit, nil otherwise.  Use it to learn the real outcome;
+the process is still running when this function returns.
 
-While the process runs, STEP's id is registered in
-`gp-pipeline--deploy-running' so the step line shows a spinner and a
-live elapsed-time counter (see `gp-pipeline--insert-step') instead of
-whatever forge-reported glyph it had before the run started -- that
-glyph does not change on its own, since the forge has no idea this
-local process is running at all."
+While it runs, STEP's id is registered in `gp-pipeline--deploy-running'
+so the step line shows a spinner and elapsed time."
   (unless gp-pipeline-deploy-script
     (user-error "No `gp-pipeline-deploy-script' configured"))
   (let* ((cmd (copy-sequence gp-pipeline-deploy-script))
@@ -761,10 +658,8 @@ local process is running at all."
          (name (or (alist-get 'name step) "?"))
          (step-id (gp-pipeline-step-id step))
          (buf (get-buffer-create gp-pipeline-deploy-buffer))
-         ;; Captured HERE, not read in the sentinel: a process sentinel runs
-         ;; in whatever buffer is current when the process exits -- usually
-         ;; the process buffer -- where `gp--pr' is nil and
-         ;; `gp-detail-refresh' would refresh nothing.
+         ;; Captured here: the sentinel runs in an arbitrary buffer where
+         ;; `gp--pr' is nil.
          (detail-buf (current-buffer))
          (process-environment
           (gp-pipeline--deploy-env full-name branch pipeline step pr)))
@@ -776,17 +671,13 @@ local process is running at all."
         (insert (format "\n=== %s | %s | build %s ===\n"
                         full-name name
                         (or (gp-pipeline-number pipeline) "?")))))
-    ;; Deliberately NOT `display-buffer': the run is long and unattended,
-    ;; and stealing a window mid-review is worse than the notification and
-    ;; echo-area message that already report the result.  The buffer is
-    ;; there when wanted.
+    ;; Deliberately not displayed: the notification reports the result.
     (message "Deploy script started for %S; output in %s"
              name gp-pipeline-deploy-buffer)
     (gp-log 'info "deploy script: %S for %s/%s" cmd full-name name)
     (when step-id
       (puthash step-id (float-time) gp-pipeline--deploy-running)
-      ;; Paint the spinner immediately rather than waiting for the next
-      ;; unrelated redraw or the spinner timer's own tick to notice.
+      ;; Paint the spinner immediately.
       (when (and (buffer-live-p detail-buf) (fboundp 'gp--detail-rerender))
         (with-current-buffer detail-buf
           (when (bound-and-true-p gp--pr) (gp--detail-rerender detail-buf)))))
@@ -804,31 +695,22 @@ local process is running at all."
            (let ((inhibit-read-only t))
              (goto-char (point-max))
              (insert (format "=== %s ===\n" (string-trim event)))))
-         ;; OK means the trigger script exited 0 -- it clicked the step and
-         ;; Bitbucket accepted it.  The deploy itself then runs on Bitbucket
-         ;; for minutes afterwards, so this must not claim the DEPLOYMENT
-         ;; succeeded; only the watcher (`gp-deploy-watch') sees that verdict.
+         ;; OK means the step was triggered, NOT that the deployment
+         ;; succeeded; only `gp-deploy-watch' sees that verdict.
          (when gp-pipeline-deploy-notify
            (gp-notify (if ok "Deploy triggered" "Deploy trigger failed")
                       (format "%s — %s" name full-name)
                       (not ok)))
          (when ok
            (message "Deploy triggered for %S; Bitbucket is now running it" name)
-           ;; A deploy to a shared environment can supersede what an
-           ;; EARLIER pr's successful deploy step left behind; that pr's
-           ;; own commit never changes, so only a repo-wide bust (not
-           ;; a re-scan of this one commit) can catch it -- see
-           ;; `gp-helm--deploy-cache-bust-repo'.
+           ;; A deploy can supersede an earlier PR's, whose commit never
+           ;; changes, so bust repo-wide.
            (when (fboundp 'gp-helm--deploy-cache-bust-repo)
              (gp-helm--deploy-cache-bust-repo full-name)))
          (unless ok
            (message "Deploy script failed for %S (%s); see %s"
                     name (string-trim event) gp-pipeline-deploy-buffer))
-         ;; Refresh the detail buffer the run was started from either way --
-         ;; a failure needs the spinner cleared just as much as a success
-         ;; needs the new state shown.  Guarded on it still being a live
-         ;; detail buffer: the user may have killed or navigated it during
-         ;; the (long) run.
+         ;; Either way the spinner must clear; the buffer may be gone.
          (if ok
              (when (and (buffer-live-p detail-buf) (fboundp 'gp-detail-refresh))
                (with-current-buffer detail-buf
@@ -843,9 +725,7 @@ local process is running at all."
 ;;;; Actions -------------------------------------------------------------------
 
 (defun gp-pipeline--at-point ()
-  "Return the pipeline (and its steps) for the section at point.
-Looks at the step or pipeline section under point.  Signals if
-point is not within a pipeline."
+  "Return (PIPELINE . STEPS) for the section at point, or signal."
   (let ((sec (magit-current-section)))
     (while (and sec (not (object-of-class-p sec 'gp-pipeline-section)))
       (setq sec (and (slot-boundp sec 'parent) (oref sec parent))))
@@ -893,12 +773,9 @@ point is not within a pipeline."
 
 (defun gp-detail-pipeline-trigger-or-run-manual ()
   "Trigger the pipeline, run a waiting manual step, or redeploy at point.
-Dispatches on the step section under point: a manual step still
-waiting runs via `gp-detail-pipeline-run-manual'; a manual step that
-already succeeded redeploys via `gp-detail-pipeline-redeploy'
-\(only offered with `gp-pipeline-deploy-script' configured -- see
-`gp-pipeline-step-redeployable-p'\); anything else triggers a fresh
-pipeline run."
+A waiting manual step runs via `gp-detail-pipeline-run-manual'; a
+redeployable one (see `gp-pipeline-step-redeployable-p') via
+`gp-detail-pipeline-redeploy'; anything else triggers a new run."
   (interactive)
   (let* ((sec (magit-current-section))
          (step (and sec (object-of-class-p sec 'gp-pipeline-step-section)
@@ -912,16 +789,10 @@ pipeline run."
 
 (defun gp-detail-pipeline-run-manual ()
   "Run the waiting manual step at point.
-Bitbucket's public API cannot resume a step in place (BCLOUD-20050,
-open since 2020) -- only the web UI can.
-
-With `gp-pipeline-deploy-script' set, that script runs directly: it
-is the only route that advances THIS build's gate.  Without one, the
-choice is between opening the step's pipeline page in the browser
-(one click runs it in place) and spawning a NEW pipeline run, which
-re-executes everything up to the gate.
-
-Only offered on a manual step that is still waiting."
+Bitbucket's API cannot resume a step in place (BCLOUD-20050).  With
+`gp-pipeline-deploy-script' set, that script runs directly.  Otherwise
+choose between the browser (runs it in place) and a NEW pipeline run,
+which re-executes everything up to the gate."
   (interactive)
   (let* ((step (gp-pipeline--step-at-point))
          (pp (gp-pipeline--at-point))
@@ -935,10 +806,7 @@ Only offered on a manual step that is still waiting."
       (user-error "Manual step %S is not waiting (state: %s)"
                   name (or (gp-pipeline-step-state step) "?")))
     (pcase (if gp-pipeline-deploy-script
-               ;; A configured script is the only route that advances THIS
-               ;; build's gate rather than starting the pipeline over, so it
-               ;; is simply the answer -- no point asking.  Clear it to get
-               ;; the browser / new-run choice back.
+               ;; the script advances THIS build's gate, so don't ask
                ?s
              (car (read-multiple-choice
                    (format "Run manual step %S (API can't resume it in place):"
@@ -960,16 +828,9 @@ Only offered on a manual step that is still waiting."
 
 (defun gp-detail-pipeline-redeploy ()
   "Redeploy the already-successful manual step at point.
-Unlike `gp-detail-pipeline-run-manual' (a step still WAITING to run
-for the first time), this re-runs `gp-pipeline-deploy-script' for a
-step whose result is already SUCCESSFUL -- e.g. to push the same
-build again after a rollback, or because the target environment needs
-another pass.  Only offered when `gp-pipeline-step-redeployable-p'
-holds: the script is the only route that can act on this step at all,
-Bitbucket's API having no per-step re-run (BCLOUD-20050).
-
-Confirms first: unlike the first run of a gate, this is a deliberate
-repeat of something that already happened once."
+Re-runs `gp-pipeline-deploy-script' for a step whose result is already
+SUCCESSFUL, e.g. after a rollback.  Requires
+`gp-pipeline-step-redeployable-p'.  Asks for confirmation first."
   (interactive)
   (let* ((step (gp-pipeline--step-at-point))
          (pp (gp-pipeline--at-point))
@@ -988,20 +849,16 @@ and a SUCCESSFUL result; state: %s, result: %s)"
 (defun gp-detail-pipeline-arm-deploy ()
   "Arm the manual step at point to run as soon as the build reaches it.
 Pressing `A' again on an armed step cancels it.  The waiting itself
-lives in `gp-deploy-watch'; this is just the detail view's door into
-it, kept beside the other pipeline commands so the keymap has one
-place to point at."
+lives in `gp-deploy-watch'."
   (interactive)
   (require 'gp-deploy-watch)
   (gp-deploy-watch-toggle-at-point))
 
 (defun gp-detail-pipeline-rerun-step ()
   "Re-run the finished step at point in place.
-Distinct from `gp-detail-pipeline-run-manual': this restarts an
-already-finished (typically failed) step via the backend's own
-per-step rerun capability (GitHub Actions supports this; Bitbucket
-Pipelines does not, so `gp-pipeline-step-rerunnable-p' is always nil
-there).  Only offered when the backend reports the step rerunnable."
+Distinct from `gp-detail-pipeline-run-manual': this restarts a
+finished (typically failed) step.  Requires
+`gp-pipeline-step-rerunnable-p' (never true on Bitbucket)."
   (interactive)
   (let* ((step (gp-pipeline--step-at-point))
          (pp (gp-pipeline--at-point))
@@ -1036,14 +893,8 @@ there).  Only offered when the backend reports the step rerunnable."
     (setq gp-pipeline-log--timer nil)))
 
 (defun gp-pipeline-log--insert-classified (text)
-  "Insert TEXT into the current buffer, one line at a time, applying
-each line's platform classification (see
-`gp-pipeline-step-log-classify-line') as a face on top of whatever
-`ansi-color-apply-on-region' later derives from any SGR codes in it.
-Splitting per line -- rather than classifying the raw TEXT wholesale
--- is what lets a `group' marker line be replaced by its own (often
-empty) label while ordinary output lines around it pass through
-untouched."
+  "Insert TEXT line by line, faced by `gp-pipeline-step-log-classify-line'.
+Leaves no trailing newline."
   (dolist (line (split-string (or text "") "\n"))
     (pcase-let ((`(,kind . ,shown) (gp-pipeline-step-log-classify-line line)))
       (insert (pcase kind
@@ -1053,20 +904,13 @@ untouched."
                 ('warning (propertize shown 'face 'gp-pipeline-running-face))
                 (_ shown)))
       (insert "\n")))
-  ;; the loop always adds a trailing newline; undo it so callers appending
-  ;; after this (the "running" banner) don't get a blank line first
   (when (> (point) (point-min))
     (delete-char -1)))
 
 (defun gp-pipeline-log--render (text running)
   "Replace the log buffer's contents with TEXT; note RUNNING state.
-TEXT is the platform's raw captured log: real ANSI SGR escapes (colour,
-bold, dim, …) are decoded into faces via `ansi-color-apply-on-region'
-rather than shown as literal \"[90m\"-style codes, and each line gets
-its platform-specific classification (see
-`gp-pipeline-step-log-classify-line') -- e.g. Bitbucket's leading
-\"+ \" command echo, or GitHub's \"##[group]\"/timestamp convention --
-applied as a distinct face."
+TEXT is the raw log; ANSI SGR escapes are decoded into faces and each
+line is classified (see `gp-pipeline-log--insert-classified')."
   (let ((inhibit-read-only t)
         (at-end (eobp)))
     (erase-buffer)
@@ -1087,21 +931,20 @@ applied as a distinct face."
                                            (plist-get ctx :pipeline-uuid)
                                            (plist-get ctx :step-uuid)))))
         (gp-pipeline-log--render text running)
-        ;; the cached step won't flip to finished on its own; re-fetch the
-        ;; step's state cheaply by asking only while we believe it runs.
+        ;; NOTE: :step is the snapshot taken when the log was opened and is
+        ;; never re-fetched, so RUNNING does not change between polls.
         (unless running
           (gp-pipeline-log--cancel-timer))))))
 
 (defun gp-detail-pipeline-step-log ()
   "Open the log of the step at point in a buffer.
-If the step is still running, poll and append; otherwise show the
-captured historical log."
+A running step's log is re-polled every `gp-pipeline-log-poll-interval'
+seconds."
   (interactive)
   (let* ((step (gp-pipeline--step-at-point))
          (pp (gp-pipeline--at-point))
          (pipeline (car pp))
-         ;; captured before `with-current-buffer' -- `gp--pr' is
-         ;; buffer-local to the detail buffer we are leaving
+         ;; `gp--pr' is local to the detail buffer we are leaving
          (pr gp--pr)
          (full-name (gp-pr-full-name pr))
          (pipeline-uuid (gp-pipeline-id pipeline))

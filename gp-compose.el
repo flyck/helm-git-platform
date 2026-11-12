@@ -11,11 +11,9 @@
 ;;   C-c C-k   cancel
 ;;   C-c C-p   preview the rendered Markdown (local, instant)
 ;;
-;; The submit target (repo, PR id, optional inline anchor, optional parent
-;; for a reply) is captured in buffer-local `gp-compose--target'
-;; when the buffer is created, so the same buffer serves new comments,
-;; inline comments and replies.  The actual POST is delegated to a
-;; submit-function so callers (and tests) can intercept it.
+;; The submit target is captured in buffer-local `gp-compose--target', so
+;; one buffer type serves new comments, inline comments and replies.  The
+;; POST is delegated to a submit-function callers (and tests) can replace.
 
 ;;; Code:
 
@@ -28,20 +26,17 @@
 (declare-function markdown-standalone "markdown-mode")
 
 (defcustom gp-compose-preview-buffer (gp--buffer-name "comment preview")
-  "Name of the buffer used to render a Markdown preview.
-Defaults to the shared `gp-buffer-name-prefix' tag."
+  "Name of the buffer used to render a Markdown preview."
   :type 'string
   :group 'bitbucket)
 
 (defcustom gp-review-batch-default t
   "When non-nil, a new top-level inline comment defaults into the review batch.
-Both Bitbucket and GitHub have a native \"pending review\" mechanism:
-the comment is created for real but stays invisible to everyone else
-until the batch is submitted (see `gp-submit-review-batch').  Toggle
-a single comment's fate with `gp-compose-toggle-batch' (\\<gp-compose-mode-map>\\[gp-compose-toggle-batch]) while composing it.
-Only applies where the compose target says the comment is eligible
-\(a brand-new inline comment; see `gp-overlay-new-comment') -- replies
-and general comments always post immediately regardless of this."
+A batched comment stays invisible to others until the batch is
+submitted (see `gp-submit-review-batch').  Toggle one comment with
+`gp-compose-toggle-batch' while composing it.  Only brand-new inline
+comments are eligible; replies and general comments always post
+immediately."
   :type 'boolean
   :group 'bitbucket)
 
@@ -55,10 +50,9 @@ buffer-local `gp-compose--batch' toggle (see `gp-compose-toggle-batch')
 is on.")
 
 (defvar-local gp-compose--batch nil
-  "Whether this buffer's comment goes into the review batch instead of
-posting immediately.  Seeded from `gp-review-batch-default' when
-TARGET's :batchable is set; meaningless otherwise.  See
-`gp-compose-toggle-batch'.")
+  "Non-nil when this buffer's comment goes into the review batch.
+Seeded from `gp-review-batch-default' when the target is :batchable;
+meaningless otherwise.")
 
 (defvar-local gp-compose--return-window nil
   "Window configuration to restore after the compose buffer closes.")
@@ -67,14 +61,8 @@ TARGET's :batchable is set; meaningless otherwise.  See
 
 (defun gp-compose--base-mode ()
   "Enter the best available Markdown editing mode for the compose buffer.
-
-Wraps visually rather than by inserting newlines.  `gfm-mode' derives
-from `text-mode', so a `text-mode-hook' that calls `turn-on-auto-fill'
-\(a common default) hard-wraps the comment as it is typed -- and with
-`gp-compose-hard-line-breaks' on, those accidental newlines are posted
-as Markdown hard breaks, freezing the editor's wrap points into the
-published comment.  Soft wrap keeps a paragraph one logical line, so
-only breaks the user actually typed survive."
+Wraps visually: auto-fill newlines (from a `text-mode-hook') would be
+posted as hard breaks under `gp-compose-hard-line-breaks'."
   (cond ((require 'markdown-mode nil t) (gfm-mode))
         (t (text-mode)))
   (auto-fill-mode -1)
@@ -122,7 +110,6 @@ Triggers after a colon, e.g. typing \":think\" offers \":thinking:\"."
                 (when e (concat " " e))))
             :exit-function
             (lambda (cand status)
-              ;; on a full accept, replace the shortcode with the emoji glyph
               (when (eq status 'finished)
                 (let ((e (cdr (assoc cand (gp-compose--emoji-cands)))))
                   (when e
@@ -151,18 +138,9 @@ and adds :emoji: shortcode completion via `completion-at-point'."
 
 (defun gp-compose-render-markdown (text)
   "Render TEXT as Markdown into a fontified buffer, returning that buffer.
-Uses `markdown-mode' with `markdown-hide-markup' turned on when
-available (so `**bold**'/`# heading' actually LOOK bold/large, markup
-characters hidden, not just syntax-colored) else inserts TEXT
-verbatim.  Pure enough to test: it touches only its own
-temporary-ish buffer.
-
-Turns `view-mode' off before erasing: a stale preview buffer left in
-`view-mode' from a previous call can leave `buffer-read-only' set in
-a way `inhibit-read-only' around just the erase/insert doesn't
-reliably unwind before `view-mode' is re-enabled at the end, so the
-mode is explicitly toggled off first rather than relied upon to stay
-inert."
+Uses `gfm-mode' with `markdown-hide-markup' when available, else
+inserts TEXT verbatim.  A stale preview's `view-mode' is turned off
+first so its read-only state cannot block the erase."
   (let ((buf (get-buffer-create gp-compose-preview-buffer)))
     (with-current-buffer buf
       (when view-mode (view-mode -1))
@@ -171,9 +149,7 @@ inert."
         (insert (or text ""))
         (if (require 'markdown-mode nil t)
             (progn
-              ;; `gfm-mode' runs `kill-all-local-variables' on entry, so
-              ;; `markdown-hide-markup' must be set AFTER the mode is
-              ;; active, not before -- setting it first is silently wiped.
+              ;; Set AFTER the mode: `kill-all-local-variables' wipes it.
               (delay-mode-hooks (gfm-mode))
               (setq-local markdown-hide-markup t)
               (font-lock-ensure))
@@ -189,27 +165,21 @@ inert."
     (display-buffer (gp-compose-render-markdown text))))
 
 (defun gp-compose--kill-preview-buffer ()
-  "Kill the Markdown preview buffer, if one exists.
-Called on submit/cancel so a stray preview from this session doesn't
-linger (and doesn't carry stale content into the next compose)."
+  "Kill the Markdown preview buffer, if one exists."
   (when-let* ((buf (get-buffer gp-compose-preview-buffer)))
     (kill-buffer buf)))
 
 ;;;; Submit / cancel ---------------------------------------------------------
 
 (defun gp-compose--noun (target)
-  "Return what TARGET composes -- \"comment\" unless it says otherwise.
-Lets the buffer's prompts and messages read correctly when the same
-editor is reused for something that is not a comment (a PR
-description, say) via TARGET's `:what'."
+  "Return what TARGET composes: its :what, else \"comment\"."
   (or (plist-get target :what) "comment"))
 
 (defun gp-compose--do-submit (target text)
   "Send TEXT to the PR described by TARGET, returning the created comment.
-Honours TARGET's :submit-function; otherwise posts immediately via
-`gp-create-comment', unless TARGET is :batchable and the buffer's
-`gp-compose--batch' toggle is on, in which case it goes to the
-review batch via `gp-add-review-batch-comment' instead."
+Honours TARGET's :submit-function; otherwise uses
+`gp-add-review-batch-comment' when batching (see `gp-compose--batch'),
+else `gp-create-comment'."
   (let ((fn (or (plist-get target :submit-function)
                 (if (and (plist-get target :batchable) gp-compose--batch)
                     #'gp-add-review-batch-comment
@@ -223,8 +193,7 @@ review batch via `gp-add-review-batch-comment' instead."
 
 (defun gp-compose-toggle-batch ()
   "Toggle whether this buffer's comment joins the review batch.
-Only meaningful when the compose target is :batchable (a brand-new
-inline comment); a no-op with a clear message otherwise."
+Signals unless the compose target is :batchable."
   (interactive)
   (unless (plist-get gp-compose--target :batchable)
     (user-error "This comment cannot be batched into a review"))
@@ -236,12 +205,9 @@ inline comment); a no-op with a clear message otherwise."
 
 (defcustom gp-compose-hard-line-breaks t
   "When non-nil, preserve single newlines as hard breaks in posted comments.
-
-Bitbucket renders comments as Markdown, where a single newline is
-treated as a space (so your line breaks collapse).  With this on,
-single newlines get a trailing \"  \" (Markdown hard break) so the
-text renders the way you typed it.  Blank lines (paragraph breaks)
-and fenced code blocks are left untouched."
+In Markdown a single newline renders as a space; with this on, such
+newlines get a trailing \"  \" (hard break).  Blank lines and fenced
+code blocks are left untouched."
   :type 'boolean :group 'bitbucket)
 
 (defun gp-compose--apply-hard-breaks (text)
@@ -275,26 +241,20 @@ Lines that are blank, already end in two spaces, or sit inside a
         (target gp-compose--target)
         (winconf gp-compose--return-window))
     (when (string-empty-p text)
-      ;; Clearing a description is a legitimate edit; an empty comment is
-      ;; always a slip.  Refuse the latter, confirm the former.
+      ;; Clearing a description is legitimate; an empty comment is a slip.
       (if (plist-get target :allow-empty)
           (unless (yes-or-no-p
                    (format "%s is empty -- clear it? "
                            (capitalize (gp-compose--noun target))))
             (user-error "Aborted"))
         (user-error "%s is empty" (capitalize (gp-compose--noun target)))))
-    ;; A target can opt out: hard-break munging suits chat-like comments,
-    ;; but rewriting the newlines of a long-lived document (a PR
-    ;; description) on every save slowly mangles tables and lists.
+    ;; Opt-out for documents (PR descriptions): repeated munging on every
+    ;; save mangles tables and lists.
     (when (and gp-compose-hard-line-breaks
                (not (plist-get target :no-hard-breaks)))
       (setq text (gp-compose--apply-hard-breaks text)))
-    ;; For a NEW inline comment, check the target is one the platform will
-    ;; accept before posting.  GitHub answers an out-of-diff path/line with a
-    ;; bare 422 only after the request goes out, which loses nothing but tells
-    ;; the user nothing either; failing here keeps this buffer -- and the text
-    ;; just written -- intact.  A reply carries a parent, which needs no such
-    ;; check.
+    ;; Validate a NEW inline anchor first: GitHub answers an out-of-diff
+    ;; line with a bare 422, and failing here keeps the draft intact.
     (when-let* ((inline (and (not (plist-get target :parent))
                              (plist-get target :inline))))
       (when-let* ((problem (ignore-errors
@@ -310,7 +270,7 @@ Lines that are blank, already end in two spaces, or sit inside a
       (kill-buffer (current-buffer))
       (gp-compose--kill-preview-buffer)
       (when winconf (set-window-configuration winconf))
-      ;; a target with an :on-success of its own has already reported
+      ;; An :on-success target reports for itself.
       (unless (plist-get target :on-success)
         (message "%s %s" (capitalize (gp-compose--noun target))
                  (if batched "added to the review batch" "posted")))
@@ -336,9 +296,7 @@ Lines that are blank, already end in two spaces, or sit inside a
     (cond (what (format "%s of PR #%s"
                         (capitalize what) (plist-get target :id)))
           (parent (format "Reply on PR #%s" (plist-get target :id)))
-          ;; the filename alone, not the full relative path: a deep path
-          ;; combined with the batch state and every shortcut would overflow
-          ;; the header line's single (non-wrapping) display line
+          ;; Filename only: a deep path overflows the header line.
           (inline (format "Inline comment on %s:%s"
                           (file-name-nondirectory (car inline)) (cdr inline)))
           (t (format "Comment on PR #%s" (plist-get target :id))))))
@@ -364,9 +322,8 @@ TARGET keys: :full-name :id [:inline (PATH . LINE)] [:parent ID]
 See `gp-compose--target'.
 
 `:batchable' marks a new inline comment as eligible for the review
-batch (see `gp-review-batch-default'/`gp-compose-toggle-batch'); the
-other four let the same editor serve something that is not a
-comment: `:what' names it in the header, prompts and messages;
+batch (see `gp-review-batch-default').  For non-comments: `:what'
+names the thing in the header, prompts and messages;
 `:no-hard-breaks' keeps newlines verbatim; `:allow-empty' makes
 submitting nothing a confirmable clear rather than an error."
   (let ((buf (generate-new-buffer (gp--buffer-name (gp-compose--noun target))))

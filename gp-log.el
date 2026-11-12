@@ -56,7 +56,6 @@ Never signals; respects `gp-log-enabled'."
                               (gp-log--timestamp)
                               (upcase (symbol-name level))
                               (apply #'format fmt args)))
-              ;; trim if overgrown
               (when (> (count-lines (point-min) (point-max))
                        gp-log-max-lines)
                 (goto-char (point-min))

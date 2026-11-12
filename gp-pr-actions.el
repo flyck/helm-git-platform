@@ -31,7 +31,6 @@
 (defvar gp-detail-mode-map)
 (defvar gp--pr)
 
-;; The shipped actions live in their own files, loaded on first use.
 (autoload 'gp-helm-terminal-shell-action "gp-helm-terminal")
 (autoload 'gp-stealth-open-session "gp-stealth")
 

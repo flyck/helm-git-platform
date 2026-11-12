@@ -8,10 +8,9 @@
 ;; file directly and copies any matching `export NAME=VALUE' lines into the
 ;; Emacs environment.
 ;;
-;; It is intentionally narrow: by default it only imports variables whose
-;; names start with "BITBUCKET" or "GITHUB", and it parses the `export' lines
-;; (it does NOT run the shell), so a slow or interactive ~/.zshrc cannot
-;; hang Emacs and arbitrary rc code is never executed.
+;; It only imports names matching `bitbucket-env-prefix' and parses the
+;; lines without running the shell, so a slow ~/.zshrc cannot hang Emacs
+;; and rc code is never executed.
 ;;
 ;; Usage (e.g. in the use-package :init):
 ;;
@@ -25,7 +24,7 @@
 ;;; Code:
 
 (defgroup bitbucket-env nil
-  "Importing Bitbucket credentials from a shell rc file."
+  "Importing Bitbucket/GitHub credentials from a shell rc file."
   :group 'bitbucket)
 
 (defcustom bitbucket-env-rc-file "~/.zshrc"
@@ -36,12 +35,8 @@
 (defcustom bitbucket-env-prefix '("BITBUCKET" "GITHUB")
   "Prefixes of the environment variables to import.
 Either one prefix string or a list of them.  Both platforms' variables
-are imported by default: which backend is active is a separate setting
-\(`git-platform-default-backend'), and importing the other one's token
-costs nothing, so switching backends needs no change here.
-
-Kept deliberately narrow -- an rc file holds far more than credentials,
-and only names matching a prefix are ever copied into Emacs."
+are imported by default, so switching `git-platform-default-backend'
+needs no change here.  Only names matching a prefix are copied."
   :type '(choice (string :tag "One prefix")
                  (repeat :tag "Several prefixes" string))
   :group 'bitbucket-env)
@@ -80,7 +75,6 @@ inline `# comments' after an unquoted value are dropped."
       (when (string-match re line)
         (let* ((name (match-string 1 line))
                (raw (string-trim (match-string 2 line)))
-               ;; strip a trailing unquoted comment
                (raw (if (string-match-p "\\`[\"']" raw)
                         raw
                       (replace-regexp-in-string "[ \t]+#.*\\'" "" raw)))
@@ -91,10 +85,9 @@ inline `# comments' after an unquoted value are dropped."
 ;;;###autoload
 (defun bitbucket-env-load (&optional rc-file)
   "Import `bitbucket-env-prefix'-matching vars from RC-FILE.
-RC-FILE defaults to `bitbucket-env-rc-file'.
-Returns the list of variable names that were set.  Existing
-values are kept unless `bitbucket-env-overwrite' is non-nil.
-Missing rc file is a no-op (returns nil)."
+RC-FILE defaults to `bitbucket-env-rc-file'.  Returns the list of
+variable names set.  Existing values are kept unless
+`bitbucket-env-overwrite' is non-nil.  A missing rc file is a no-op."
   (interactive)
   (let ((file (expand-file-name (or rc-file bitbucket-env-rc-file)))
         (set-names '()))
@@ -107,10 +100,11 @@ Missing rc file is a no-op (returns nil)."
                     (null (getenv (car kv))))
             (setenv (car kv) (cdr kv))
             (push (car kv) set-names)))))
+    (setq set-names (nreverse set-names))
     (when (called-interactively-p 'interactive)
       (message "bitbucket-env: set %s"
-               (if set-names (string-join (nreverse set-names) ", ") "nothing")))
-    (nreverse set-names)))
+               (if set-names (string-join set-names ", ") "nothing")))
+    set-names))
 
 (provide 'bitbucket-env)
 ;;; bitbucket-env.el ends here

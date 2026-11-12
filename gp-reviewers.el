@@ -12,11 +12,8 @@
 ;; Three groups are rendered, in this order:
 ;;
 ;;   * Current   -- already on the PR, pre-checked.  Anyone who has
-;;                  actually submitted a review (approved / requested
-;;                  changes) is *locked*: unticking them is refused,
-;;                  because a submitted review stays attached to the PR
-;;                  and cannot be withdrawn by dropping the person from
-;;                  the reviewer list.
+;;                  submitted a review is *locked*: a submitted review
+;;                  cannot be withdrawn by dropping the reviewer.
 ;;   * Default   -- the repo's default reviewers not yet on the PR.
 ;;   * Suggested -- everyone else who could review.
 ;;
@@ -65,7 +62,6 @@
   "Face for section labels." :group 'gp-reviewers)
 
 (defun gp-reviewers--buffer-name (pr)
-  "Return the reviewer-form buffer name for PR."
   (gp--buffer-name (format "reviewers #%s" (alist-get 'id pr))))
 
 ;;;; Candidate assembly (pure) -------------------------------------------------
@@ -89,7 +85,6 @@ no person appears twice."
                           (when-let* ((id (plist-get r :id)))
                             (funcall row id (plist-get r :name)
                                      (plist-get r :state) t
-                                     ;; a submitted review cannot be undone here
                                      (memq (plist-get r :state)
                                            '(approved changes)))))
                         current)))
@@ -111,7 +106,6 @@ no person appears twice."
                   (cons "Suggested" rows))))))
 
 (defun gp-reviewers--state-badge (state)
-  "Return a short label for reviewer STATE."
   (pcase state
     ('approved (propertize "✓ approved" 'face 'success))
     ('changes (propertize "✗ changes requested" 'face 'error))
@@ -163,9 +157,8 @@ Returns the rows, each with its :widget filled in."
        (lambda (r)
          (let ((cb (widget-create 'checkbox
                                   :notify
-                                  ;; a locked row snaps straight back when
-                                  ;; toggled by mouse or RET, which the
-                                  ;; keymap's `user-error' cannot intercept
+                                  ;; Locked rows snap back on mouse/RET,
+                                  ;; which `gp-reviewers-toggle' never sees.
                                   (lambda (w &rest _)
                                     (when (and (plist-get r :locked)
                                                (not (widget-value w)))
@@ -215,11 +208,9 @@ Returns the rows, each with its :widget filled in."
 
 (defun gp-reviewers--selected-ids ()
   "Return the ids of every reviewer that should end up on the PR.
-A locked row (someone who already submitted a review) counts as
-selected however its checkbox currently reads: the widget can be
-unticked by paths that never reach `gp-reviewers-toggle' -- a mouse
-click, RET, `widget-value-set' -- so the rule is enforced here, where
-every save must pass, rather than only at the keystroke."
+A locked row counts as selected however its checkbox reads: it can
+be unticked by paths that bypass `gp-reviewers-toggle', so every save
+enforces the rule here."
   (delq nil (mapcar (lambda (r)
                       (and (or (plist-get r :locked)
                                (widget-value (plist-get r :widget)))
@@ -230,6 +221,12 @@ every save must pass, rather than only at the keystroke."
   "Return the ids the PR already had when the form opened."
   (delq nil (mapcar (lambda (r) (and (plist-get r :on) (plist-get r :id)))
                     gp-reviewers--widgets)))
+
+(defun gp-reviewers--close (winconf buf msg &rest args)
+  "Restore WINCONF, kill BUF and show MSG formatted with ARGS."
+  (when winconf (set-window-configuration winconf))
+  (when (buffer-live-p buf) (kill-buffer buf))
+  (apply #'message msg args))
 
 (defun gp-reviewers-save ()
   "Send the ticked reviewers as the PR's complete reviewer list."
@@ -243,17 +240,12 @@ every save must pass, rather than only at the keystroke."
     (unless pr (user-error "No PR associated with this form"))
     (if (equal (sort (copy-sequence wanted) #'string<)
                (sort (copy-sequence current) #'string<))
-        (progn
-          (when winconf (set-window-configuration winconf))
-          (when (buffer-live-p buf) (kill-buffer buf))
-          (message "Reviewers unchanged"))
+        (gp-reviewers--close winconf buf "Reviewers unchanged")
       (message "Updating reviewers…")
       (gp-set-pull-request-reviewers (gp-pr-full-name pr) (alist-get 'id pr)
                                      wanted current)
       (gp-invalidate-pr-caches pr)
-      (when winconf (set-window-configuration winconf))
-      (when (buffer-live-p buf) (kill-buffer buf))
-      (message "Reviewers updated (%d)" (length wanted))
+      (gp-reviewers--close winconf buf "Reviewers updated (%d)" (length wanted))
       (when (buffer-live-p origin)
         (with-current-buffer origin
           (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))))))
@@ -261,11 +253,8 @@ every save must pass, rather than only at the keystroke."
 (defun gp-reviewers-cancel ()
   "Discard the form without touching the PR."
   (interactive)
-  (let ((winconf gp-reviewers--return-window)
-        (buf (current-buffer)))
-    (when winconf (set-window-configuration winconf))
-    (when (buffer-live-p buf) (kill-buffer buf))
-    (message "Reviewer edit cancelled")))
+  (gp-reviewers--close gp-reviewers--return-window (current-buffer)
+                       "Reviewer edit cancelled"))
 
 (defun gp-reviewers--open (pr current origin winconf)
   "Render the reviewer form for PR with CURRENT reviewers and show it.
@@ -294,11 +283,10 @@ configuration to restore on close."
 (defun gp-reviewers-edit (pr &optional current)
   "Open the reviewer-editing form for PR.
 CURRENT is the PR's existing reviewer plists when the caller already
-has them -- the detail buffer caches them in `gp--detail-reviewers'.
-Without them the list is fetched first: `gp-pr-reviewers-async' is
-genuinely asynchronous on GitHub, so the form is built in its
-callback rather than from a synchronous read that would render an
-empty \"Current\" group and then offer to save it."
+has them (the detail buffer caches them in `gp--detail-reviewers').
+Otherwise they are fetched first and the form is built in the
+callback: on GitHub the fetch is truly async, and a synchronous read
+would render an empty \"Current\" group and offer to save it."
   (let ((origin (current-buffer))
         (winconf (current-window-configuration)))
     (if current

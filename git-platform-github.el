@@ -37,9 +37,6 @@
 (cl-defmethod gp--pull-request-stats-async ((_ git-platform-github) full-name id pr callback)
   (github-pull-request-stats-async full-name id pr callback))
 (cl-defmethod gp--pull-request-diff-async ((_ git-platform-github) full-name id commit pr callback)
-  ;; GitHub serves the diff off the PR resource via content negotiation, so
-  ;; it needs neither the commit hash nor the PR object -- both still
-  ;; accepted (and ignored) to match the protocol op's arity.
   (github-pull-request-diff-async full-name id commit pr callback))
 (cl-defmethod gp--reviewing-pull-requests ((_ git-platform-github) &optional uuid limit states)
   (github-reviewing-pull-requests uuid limit states))
@@ -147,10 +144,8 @@
 (cl-defmethod gp--pull-request-commits-async ((_ git-platform-github) full-name id callback &optional max-items)
   (github-pull-request-commits-async full-name id callback max-items))
 (cl-defmethod gp--commit-build-states-async ((_ git-platform-github) full-name hash callback)
-  ;; github-api.el has no async combined-status fetcher (Bitbucket's
-  ;; version exists only because gp-helm.el used to call its async GET
-  ;; primitive directly); an idle timer gives the same non-blocking
-  ;; contract without duplicating a whole async client path for one call.
+  ;; github-api.el has no async combined-status fetcher; an idle timer gives
+  ;; the same non-blocking contract without a whole async client path.
   (run-with-idle-timer
    0 nil
    (lambda ()
@@ -219,9 +214,7 @@
 (cl-defmethod gp--pr-merged-p ((_ git-platform-github) pr)
   (and (alist-get 'merged pr) t))
 (cl-defmethod gp--pr-repo-slug ((_ git-platform-github) pr)
-  ;; Prefer .base.repo.name when present, but don't depend on it -- some
-  ;; response shapes (and this project's own PR-list search fetches)
-  ;; only guarantee full_name, so fall back to its slug half.
+  ;; Some response shapes (e.g. PR-list search) only guarantee full_name.
   (let-alist pr
     (or .base.repo.name
         (when .base.repo.full_name

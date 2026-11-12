@@ -11,21 +11,16 @@
 ;; module does the sitting: `A' on a manual step ARMS it, and a background
 ;; watcher fires it the moment it is genuinely runnable.
 ;;
-;; The watcher is deliberately a *client-side* wait.  Nothing here asks a
-;; backend to queue anything: the pipeline runs exactly as it always did,
-;; and the watcher only presses the button, at the same moment a human
-;; would have.  That keeps step ordering the pipeline's business -- we
-;; never model or second-guess the dependency graph, we just refuse to act
-;; until the backend itself reports the step waiting (see
+;; The watcher is deliberately a *client-side* wait: it only presses the
+;; button, at the moment a human would, and never models the dependency
+;; graph -- it acts only once the backend reports the step waiting (see
 ;; `gp-pipeline-step-runnable-manual-p').
 ;;
 ;; Watchers live in a global registry rather than in the PR's detail
-;; buffer, so closing the buffer -- or wandering off to another PR -- does
-;; not silently cancel a deploy you are waiting on.  Each keeps an
-;; in-memory event ring readable at any time (`gp-deploy-watch-show-log'),
-;; and can be cancelled (`gp-deploy-watch-cancel').  Nothing is persisted:
-;; a watcher does not survive Emacs exiting, which is the honest lifetime
-;; for an in-memory timer.
+;; buffer, so closing the buffer does not cancel a deploy you are waiting
+;; on.  Each keeps an in-memory event log (`gp-deploy-watch-show-log') and
+;; can be cancelled (`gp-deploy-watch-cancel-watcher').  Nothing is
+;; persisted across Emacs sessions.
 ;;
 ;; Keys, on a manual step in the detail view:
 ;;
@@ -59,30 +54,24 @@
 
 (defcustom gp-deploy-watch-interval 15
   "Seconds between polls while a deploy watcher waits for its step.
-The wait is usually minutes of earlier build steps, so this is
-deliberately slower than the detail buffer's own poll: a watcher may
-outlive the buffer and keep running unattended, and there is nothing
-to gain from asking the API twice as often as the build changes."
+Deliberately slower than the detail buffer's poll: a watcher may run
+unattended for a long time."
   :type 'integer :group 'bitbucket)
 
 (defcustom gp-deploy-watch-timeout 7200
   "Seconds a watcher waits before giving up, or nil for no limit.
 A build that never reaches the gate would otherwise leave a timer
-polling until Emacs exits.  Two hours is past any normal build."
+polling until Emacs exits."
   :type '(choice (const :tag "No limit" nil) integer)
   :group 'bitbucket)
 
 (defcustom gp-deploy-watch-log-max 200
-  "How many events one watcher keeps in memory.
-Oldest are dropped past this; a watcher is a long-lived object and
-its log must not grow without bound."
+  "How many events one watcher keeps in memory; older ones are dropped."
   :type 'integer :group 'bitbucket)
 
 (defcustom gp-deploy-watch-confirm t
   "When non-nil, arming a watcher asks first.
-Arming schedules something that will change a deployment without a
-further keypress, possibly long after you have stopped looking at
-it, so it confirms by default."
+Arming schedules a deployment that fires without a further keypress."
   :type 'boolean :group 'bitbucket)
 
 ;;;; Faces ---------------------------------------------------------------------
@@ -121,9 +110,7 @@ read; `gp-deploy-watch-clear-finished' reaps them.")
 
 (defun gp-deploy-watch--key (full-name branch step-name)
   "Return the registry key for STEP-NAME on BRANCH of FULL-NAME.
-Keyed by step *name* rather than id: a watcher outlives the pipeline
-run it was armed from -- when the trigger starts a new run, every id
-changes but the name is what the user armed."
+Keyed by step name rather than id, since ids change when a new run starts."
   (format "%s@%s#%s" (or full-name "?") (or branch "?") (or step-name "?")))
 
 (defun gp-deploy-watch-get (full-name branch step-name)
@@ -140,31 +127,19 @@ changes but the name is what the user armed."
 
 (defun gp-deploy-watch-schedulable-p (step)
   "Return non-nil when STEP is one a watcher could actually fire.
-
-Only a *triggerable* step can be scheduled.  Waiting is only worth
-anything if there is a button at the end of it, so the precondition is
-not \"does this look like a deploy\" but \"can this backend start this
-step on demand\" -- which today means a manual gate
-\(`gp-pipeline-step-manual-p\').  Everything else runs when the
-pipeline decides to run it, and scheduling it would be scheduling
-nothing.
-
-Asked of the step through the backend rather than branching on which
-forge is in use, so a backend that grows a triggerable-step concept
-\(GitHub environment approvals, say) becomes schedulable here by
-answering this question, with no change to the watcher."
+Only a triggerable step qualifies -- today a manual gate
+\(`gp-pipeline-step-manual-p').  Asked through the backend rather than
+branching on the forge, so a backend gaining triggerable steps needs
+no change here."
   (and step (gp-pipeline-step-manual-p step)))
 
 (defun gp-deploy-watch-backend-supports-p ()
   "Return non-nil when this backend has triggerable steps at all.
 Distinguishes \"this step is not a gate\" from \"this forge has no
-gates\", so arming can say which.  GitHub Actions has no per-job gate
-in this model -- nothing there is schedulable -- while Bitbucket
-gates steps explicitly."
+gates\", so arming can say which."
   (ignore-errors
     (gp-deploy-watch-schedulable-p
-     ;; A synthetic step shaped like a gated one, asked of the live backend
-     ;; rather than hardcoding which backends have gates.
+     ;; a synthetic gated step, asked of the live backend
      '((name . "probe") (trigger (type . "pipeline_step_trigger_manual"))))))
 
 (defun gp-deploy-watch-active-p (w)
@@ -175,10 +150,8 @@ gates steps explicitly."
 
 (defun gp-deploy-watch--log (w fmt &rest args)
   "Record an event on watcher W, built from FMT and ARGS.
-Kept in memory on the watcher itself rather than written to a buffer:
-a watcher usually has no buffer showing, and its history is worth
-reading afterwards.  Also mirrored into the package's diagnostic log,
-so an unattended fire is visible in the one place errors already go."
+Kept on the watcher itself and mirrored into the diagnostic log.
+Returns the formatted line."
   (let ((line (apply #'format fmt args)))
     (push (cons (current-time) line) (gp-deploy-watch-log w))
     (let ((log (gp-deploy-watch-log w)))
@@ -190,11 +163,8 @@ so an unattended fire is visible in the one place errors already go."
 
 (defun gp-deploy-watch--set-state (w state fmt &rest args)
   "Move watcher W to STATE, logging why (FMT and ARGS).
-Reaching a terminal state also notifies: a watcher runs unattended and
-usually has no buffer on screen, so an outcome nobody is told about --
-above all a build that failed on the way to the gate -- is an outcome
-nobody learns.  `cancelled\' is excluded: the user just did that, and
-does not need telling."
+Reaching `done' or `failed' also notifies, since a watcher runs
+unattended; `cancelled' does not, as the user just did that."
   (setf (gp-deploy-watch-state w) state)
   (setf (gp-deploy-watch-detail w) (apply #'format fmt args))
   (apply #'gp-deploy-watch--log w fmt args)
@@ -227,16 +197,11 @@ does not need telling."
   "Return (PIPELINE . STEPS) for the run watcher W is following in DATA.
 
 Once W has followed a run (`gp-deploy-watch-pipeline-id' is set), only
-that exact run counts as a hit: matching by step *name* alone against
-whatever the branch/commit fetch happens to return would let an
-unrelated later run on the same branch and commit -- e.g. one Bitbucket
-fires after the PR has already merged -- be silently mistaken for the
-build the watcher is meant to be walking, and fired against.  Before
-the first sighting (`pipeline-id' still nil), any run with a
-name-matching step is adopted and its id recorded as the run to follow
-from then on; `gp-deploy-watch--fire-blocking' updates it again each
-time pressing an earlier gate starts a new run, so the lineage moves
-forward only through runs the watcher itself has seen or caused."
+that exact run counts, so an unrelated later run on the same branch and
+commit is never fired against.  Before the first sighting, any run with
+a name-matching step is adopted and its id recorded;
+`gp-deploy-watch--fire-blocking' clears it when pressing an earlier gate
+starts a new run."
   (catch 'hit
     (pcase-dolist (`(,pipeline . ,steps) (plist-get data :current))
       (when (and (or (null (gp-deploy-watch-pipeline-id w))
@@ -251,9 +216,7 @@ forward only through runs the watcher itself has seen or caused."
 
 (defun gp-deploy-watch--steps-before (w steps)
   "Return the STEPS that come before watcher W's target, in run order.
-The list a backend returns is the pipeline's own order, which is the
-only ordering information available -- and the only one that matters,
-since a gate later in the list cannot be blocking an earlier target."
+Relies on the backend returning steps in pipeline order."
   (let ((seen nil) (before nil))
     (dolist (s steps (nreverse before))
       (cond (seen)
@@ -262,20 +225,14 @@ since a gate later in the list cannot be blocking an earlier target."
             (t (push s before))))))
 
 (defun gp-deploy-watch--step-failed-p (step)
-  "Return non-nil when STEP has finished badly.
-A failed or stopped step means the build will never reach the gate,
-so there is nothing left to wait for."
+  "Return non-nil when STEP failed or was stopped."
   (member (gp-pipeline-step-result step)
           '("FAILED" "ERROR" "STOPPED" "HALTED")))
 
 (defun gp-deploy-watch--blocking-gate (w steps)
   "Return the first open gate ahead of watcher W's target in STEPS, or nil.
-This is what makes \"deploy to live\" mean what it sounds like: live may
-sit behind a dev gate that also has to be pressed, and a watcher that
-only ever pressed its own step would wait out the whole timeout while
-the build parked on the earlier one.  Only *triggerable* steps qualify
-\(`gp-deploy-watch-schedulable-p\') -- an automatic step ahead of the
-target is simply work still to do, not something to press."
+E.g. a dev gate in front of a live target.  Only triggerable steps
+qualify (`gp-deploy-watch-schedulable-p')."
   (cl-find-if (lambda (s)
                 (and (gp-deploy-watch-schedulable-p s)
                      (gp-pipeline-step-runnable-manual-p s)))
@@ -285,17 +242,6 @@ target is simply work still to do, not something to press."
   "Return the first failed step ahead of watcher W's target in STEPS, or nil."
   (cl-find-if #'gp-deploy-watch--step-failed-p
               (gp-deploy-watch--steps-before w steps)))
-
-(defun gp-deploy-watch--find-step (w data)
-  "Return (PIPELINE . STEP) for watcher W's step in DATA, or nil.
-Matched by name within the runs for the watched commit, so a watcher
-armed on one run picks its step up again in the run that replaces it."
-  (catch 'hit
-    (pcase-dolist (`(,pipeline . ,steps) (plist-get data :current))
-      (dolist (s steps)
-        (when (equal (alist-get 'name s) (gp-deploy-watch-step-name w))
-          (throw 'hit (cons pipeline s)))))
-    nil))
 
 (defun gp-deploy-watch--tick (w)
   "Poll once for watcher W: fire the step if it is now runnable."
@@ -319,31 +265,27 @@ armed on one run picks its step up again in the run that replaces it."
 
 (defun gp-deploy-watch--consider (w data)
   "Decide what watcher W should do given freshly fetched DATA.
-
-The order of these clauses is the behaviour.  A build that has to
-reach `deploy-live\' may have to pass lint and build, then an open
-`deploy-dev\' gate, before the target gate opens at all; so each poll
-asks, in order: has anything ahead of the target failed \(give up --
-the target is unreachable), is a gate ahead of it open \(press that
-one and keep waiting), is the target itself open \(press it, done),
-has the build finished without ever opening it \(give up).  Otherwise
-there is still work in flight, so wait."
+The clause order is the behaviour.  Each poll asks, in order: has
+anything ahead of the target failed (give up), is the target itself
+open with every earlier step completed (fire it), is an earlier gate
+open (press it and keep waiting), has the build finished without
+opening it (give up).  Otherwise keep waiting."
   (when (gp-deploy-watch-active-p w)
     (let* ((run (and data (gp-deploy-watch--steps-of w data)))
            (pipeline (car run))
            (steps (cdr run))
            (step (cl-find (gp-deploy-watch-step-name w) steps
                           :key (lambda (s) (alist-get 'name s)) :test #'equal))
-           ;; An untouched manual step reports NOT_RUN, same as one Bitbucket
-           ;; simply hasn't reached yet (`gp-pipeline-step-runnable-manual-p'
-           ;; can't tell those apart) -- so only a step ahead of the target
-           ;; that has actually COMPLETED counts as clear. Excludes the
-           ;; target itself, whose own state is never "finished" while
-           ;; genuinely waiting.
+           ;; An untouched manual step and one not reached yet both report
+           ;; NOT_RUN, so only an earlier step that has COMPLETED counts as
+           ;; clear -- an unpressed earlier gate blocks as much as a running
+           ;; step does.
            (nothing-blocking-before-target
             (and step
                  (cl-every (lambda (s) (equal (gp-pipeline-step-state s) "COMPLETED"))
-                           (gp-deploy-watch--steps-before w steps)))))
+                           (gp-deploy-watch--steps-before w steps))))
+           (bad (gp-deploy-watch--failed-step-before w steps))
+           (gate (gp-deploy-watch--blocking-gate w steps)))
       (cond
        ;; A failed fetch reports nil exactly as a pipeline-less branch does,
        ;; so it cannot be read as "the run vanished" -- keep waiting.
@@ -354,38 +296,25 @@ there is still work in flight, so wait."
         (gp-deploy-watch--log w "step %S not in the current run yet"
                               (gp-deploy-watch-step-name w))
         (gp-deploy-watch--rearm w))
-       ;; Something ahead of the target failed: the gate will never open, so
-       ;; say which step broke rather than waiting out the timeout.
-       ((gp-deploy-watch--failed-step-before w steps)
-        (let ((bad (gp-deploy-watch--failed-step-before w steps)))
-          (gp-deploy-watch--cancel-timer w)
-          (gp-deploy-watch--set-state
-           w 'failed "step %S %s -- %S is unreachable"
-           (or (alist-get 'name bad) "?")
-           (downcase (or (gp-pipeline-step-result bad) "failed"))
-           (gp-deploy-watch-step-name w))))
-       ;; The target itself is open -- checked BEFORE the blocking-gate clause
-       ;; so a target that is ready is fired now, never deferred behind
-       ;; something that is no longer in its way.  `nothing-blocking-before-
-       ;; target' requiring every earlier step to be COMPLETED is what keeps
-       ;; this clause from firing the target while an earlier manual gate
-       ;; (e.g. `deploy-dev') is still sitting there paused and unpressed --
-       ;; NOT_RUN is ambiguous on the target's own step, but an untouched
-       ;; earlier gate is exactly as blocking as one still running.
+       ;; Something ahead of the target failed: the gate will never open.
+       (bad
+        (gp-deploy-watch--cancel-timer w)
+        (gp-deploy-watch--set-state
+         w 'failed "step %S %s -- %S is unreachable"
+         (or (alist-get 'name bad) "?")
+         (downcase (or (gp-pipeline-step-result bad) "failed"))
+         (gp-deploy-watch-step-name w)))
+       ;; Checked before the blocking-gate clause so a ready target is
+       ;; never deferred.
        ((and nothing-blocking-before-target (gp-pipeline-step-runnable-manual-p step))
         (gp-deploy-watch--cancel-timer w)
         (gp-deploy-watch--set-state w 'firing "gate open on build %s; triggering"
                                     (or (gp-pipeline-number pipeline) "?"))
         (gp-deploy-watch--fire w pipeline step))
-       ;; An earlier gate is open and in the way: press it, then keep
-       ;; waiting for the target.  This is what makes an armed `deploy-live\'
-       ;; walk the chain instead of parking on `deploy-dev\' forever.
-       ((gp-deploy-watch--blocking-gate w steps)
-        (gp-deploy-watch--fire-blocking w pipeline
-                                        (gp-deploy-watch--blocking-gate w steps)))
-       ;; Nothing left running and the gate never opened -- waiting on this
-       ;; run is pointless, and a later run would be a different build than
-       ;; the one that was armed.
+       ;; An earlier gate is in the way: press it, then keep waiting.
+       (gate
+        (gp-deploy-watch--fire-blocking w pipeline gate))
+       ;; A later run would be a different build than the one armed.
        ((gp-pipeline-finished-p pipeline)
         (gp-deploy-watch--cancel-timer w)
         (gp-deploy-watch--set-state
@@ -400,19 +329,10 @@ there is still work in flight, so wait."
 
 (defun gp-deploy-watch--fire-blocking (w pipeline gate)
   "Press GATE of PIPELINE, an open gate standing between W and its target.
-
-Unlike firing the target, this does NOT finish the watcher: pressing
-`deploy-dev\' is a step on the way to `deploy-live\', so the watcher
-keeps waiting afterwards.  Each gate is pressed once -- recorded on
-the watcher -- because a gate stays reported as open for a moment
-after it is triggered, and pressing it every poll would launch it
-repeatedly.
-
-Re-triggering (Bitbucket's only route to a per-step press) starts a
-NEW pipeline run with its own id, so W's lineage is cleared here: the
-next poll's fetch will not carry PIPELINE's id any more, and
-`gp-deploy-watch--steps-of' must be free to adopt whatever new run
-appears rather than waiting forever for an id that is now stale."
+Does not finish the watcher.  Each gate is pressed once (recorded on
+W), since a gate still reads as open for a moment after triggering.
+Re-triggering starts a NEW run with its own id, so W's followed run is
+cleared for `gp-deploy-watch--steps-of' to adopt the new one."
   (let ((name (or (alist-get 'name gate) "?")))
     (if (member name (gp-deploy-watch-fired-gates w))
         (progn
@@ -442,29 +362,14 @@ appears rather than waiting forever for an id that is now stale."
 ;;;; Firing ---------------------------------------------------------------------
 
 (defun gp-deploy-watch--fire (w pipeline step)
-  "Run watcher W's step, by whichever route this backend actually has.
+  "Run watcher W's STEP of PIPELINE, by whichever route is available.
 
-Two routes, in order of how faithfully they do what was asked:
-
-1. `gp-pipeline-deploy-script', when configured.  The only route that
-   advances THIS build's gate in place, which is precisely what
-   waiting for the gate was for.  Asynchronous, so W is left `firing'
-   here and only moves to `done'/`failed' once
-   `gp-pipeline--deploy-run's ON-EXIT callback reports the script's
-   real exit status -- spawning the process is not the same as the
-   deploy having happened, and a guardrail in the script (refusing a
-   production step, say) can fail it well after this call returns.
-2. Otherwise the backend's own manual-step API
-   \(`gp-pipeline-run-manual-step'), given PIPELINE and STEP.  On
-   Bitbucket that is the
-   documented workaround -- re-triggering the pipeline with the custom
-   selector -- because Cloud exposes no per-step run endpoint
-   \(BCLOUD-20050).  It does reach the step, but by re-running
-   everything before it.
-
-The difference matters enough that route 2 says so in the log and in
-the watcher's state rather than reporting a plain success: a build
-you waited twenty minutes for has just started over."
+1. `gp-pipeline-deploy-script', when configured: advances THIS build's
+   gate in place.  Asynchronous, so W stays `firing' until the script's
+   exit status arrives via `gp-pipeline--deploy-run's ON-EXIT.
+2. Otherwise `gp-pipeline-run-manual-step', which on Bitbucket
+   re-triggers the pipeline (BCLOUD-20050) and so re-runs everything
+   before the gate -- the watcher's state says so."
   (let ((full-name (gp-deploy-watch-full-name w))
         (branch (gp-deploy-watch-branch w)))
     (condition-case e
@@ -492,20 +397,10 @@ you waited twenty minutes for has just started over."
 
 (defun gp-deploy-watch--notify (w)
   "Report watcher W's outcome, and refresh any detail view showing it.
-Raises an OS notification as well as the echo-area line: the whole
-point of a watcher is that you stopped looking, so an outcome -- and
-especially a build that failed on the way to the gate -- has to reach
-you outside the frame you are no longer watching."
+Raises an OS notification as well as an echo-area message."
   (let ((failed (eq (gp-deploy-watch-state w) 'failed)))
-    ;; The glyph leads the title because that is the part a notification
-    ;; popup shows first and biggest -- outcome readable at a glance,
-    ;; without parsing the sentence.  Desktop notifiers give no colour
-    ;; control (`notifications-notify' urgency styles the popup itself on
-    ;; Linux; macOS offers nothing), so the emoji carries the status.
-    ;; "Triggered", not "Deployed": the watcher's job ends when it presses
-    ;; the gate, and Bitbucket then runs the deploy for minutes afterwards.
-    ;; Claiming the deployment succeeded here would be a verdict nothing in
-    ;; this package actually observed.
+    ;; The emoji carries the status (notifiers offer no colour control).
+    ;; "Triggered", not "Deployed": nothing here observes the deploy itself.
     (gp-notify (format "%s %s %s"
                        (if failed "🔴" "🟢")
                        (if failed "Deploy blocked:" "Deploy triggered:")
@@ -533,9 +428,8 @@ you outside the frame you are no longer watching."
 (defun gp-deploy-watch-arm (full-name branch commit step-name pr)
   "Arm a watcher for STEP-NAME on BRANCH of FULL-NAME and return it.
 COMMIT scopes which runs count as current; PR carries the context the
-deploy script is given.  Re-arming an already-active step is refused
-rather than silently doubling up -- two watchers on one gate would
-both fire."
+deploy script is given.  Re-arming an already-active step is refused,
+as two watchers on one gate would both fire."
   (let* ((key (gp-deploy-watch--key full-name branch step-name))
          (existing (gethash key gp-deploy-watch--registry)))
     (when (and existing (gp-deploy-watch-active-p existing))
@@ -548,9 +442,7 @@ both fire."
       (puthash key w gp-deploy-watch--registry)
       (gp-deploy-watch--log w "armed -- waiting for %S to become runnable"
                             step-name)
-      ;; Poll once straight away: the gate may already be open, and making
-      ;; the user wait a full interval for something that is ready now reads
-      ;; as the watcher not working.
+      ;; Poll once straight away: the gate may already be open.
       (gp-deploy-watch--tick w)
       w)))
 
@@ -586,8 +478,7 @@ both fire."
 
 (defun gp-deploy-watch--state-glyph (state)
   "Return the status glyph for a watcher in STATE.
-The same glyphs the OS notification uses, so an outcome looks the same
-wherever it is read -- popup, step line, or watcher list."
+Matches the glyphs of the OS notification."
   (pcase state
     ('waiting "⏳")
     ('firing "🚀")
@@ -599,14 +490,8 @@ wherever it is read -- popup, step line, or watcher list."
 (defun gp-deploy-watch-step-marker (step full-name branch)
   "Return a propertized marker for STEP's arm-on-reach state, or nil.
 STEP is matched by name against the watchers on BRANCH of FULL-NAME.
-
-An armed/finished watcher renders its state (matches the other
-pipeline commands' `label ▸ KEY' hints, e.g. `[manual ▸ T]',
-`[rerun ▸ P]') so it is visible from the PR itself, without opening
-the watcher list.  A schedulable step with no watcher yet ALSO gets a
-plain `▸ A' hint for the same reason those other commands' hints are
-unconditional -- without this, `A' had no visible sign it existed
-until you already knew to press it once."
+A step with a watcher shows its state; a schedulable step without one
+gets a plain `[▸ A]' hint, like the other pipeline key hints."
   (when-let* ((name (alist-get 'name step)))
     (if-let* ((w (gp-deploy-watch-get full-name branch name)))
         (propertize (format "  [%s %s ▸ A]"
@@ -693,8 +578,7 @@ until you already knew to press it once."
     (user-error "Not a watcher log buffer")))
 
 (defun gp-deploy-watch--refresh-buffers (w)
-  "Redraw whatever is showing watcher W: its log buffer, the list, and
-the global mode-line segment."
+  "Redraw W's log buffer, the watcher list and the mode-line segment."
   (ignore-errors
     (when-let* ((buf (get-buffer (gp-deploy-watch--log-buffer-name w))))
       (when (buffer-live-p buf)
@@ -728,8 +612,7 @@ the global mode-line segment."
     (if (null watchers)
         (insert "  (none armed)\n")
       (dolist (w watchers)
-        ;; %-9s pads a STRING; handed a symbol it prints unpadded and the
-        ;; columns collide, so format the symbol first and pad the result.
+        ;; `symbol-name' first: %-10s does not pad a symbol.
         (insert (propertize (format "  %s %-10s"
                                     (gp-deploy-watch--state-glyph
                                      (gp-deploy-watch-state w))
@@ -807,22 +690,10 @@ the global mode-line segment."
 
 (defun gp-deploy-watch-toggle-at-point ()
   "Arm a watcher for the manual step at point, or cancel the armed one.
-
-The step does not have to be runnable yet -- that is the whole point:
-arming one on a gate several steps away is how you say \"deploy when
-the build gets there\".  Arming it also auto-approves any earlier
-gates standing in the way: scheduling `deploy-live\' means getting to
-live, which includes pressing the `deploy-dev\' gate on the route.  It
-does have to be *triggerable* \(`gp-deploy-watch-schedulable-p\'): a
-step that runs on its own has no button for the watcher to press, so
-scheduling it would schedule nothing.
-
-A merged PR's source branch is typically gone (Bitbucket deletes it
-on merge by default) and its old pipeline has already finished one way
-or the other -- there is nothing left to watch there.  The run that
-actually deploys is the one the merge produced on the DESTINATION
-branch, for the merge commit, so a merged PR arms against those
-instead of the (dead) source branch and its now-historical commit."
+The step need not be runnable yet, but must be triggerable
+\(`gp-deploy-watch-schedulable-p').  Earlier gates in the way are
+approved automatically.  For a merged PR the watcher follows the
+destination branch and merge commit -- the run that deploys."
   (interactive)
   (unless (boundp 'gp--pr) (user-error "Not in a pull-request buffer"))
   (let* ((step (gp-pipeline--step-at-point))
@@ -839,11 +710,7 @@ instead of the (dead) source branch and its now-historical commit."
       (gp-deploy-watch-cancel-watcher existing)
       (message "gp: cancelled the watcher on %S" name)
       (when (fboundp 'gp-detail-refresh) (gp-detail-refresh)))
-     ;; Only a triggerable step can be scheduled: waiting for a step nobody
-     ;; can press is waiting for nothing.  On GitHub that is every step
-     ;; (Actions has no per-job gate here -- environment approvals are a
-     ;; separate concept this package does not read yet), so say which of
-     ;; the two reasons applies rather than refusing flatly.
+     ;; Say whether the step or the whole backend lacks gates.
      ((not (gp-deploy-watch-schedulable-p step))
       (user-error
        "Step %S cannot be scheduled: %s" name
@@ -889,8 +756,7 @@ instead of the (dead) source branch and its now-historical commit."
        'local-map gp-deploy-watch--modeline-map))))
 
 (defun gp-deploy-watch-mode-line-cancel ()
-  "Cancel the sole active watcher, or open the list when there is more
-than one to choose from."
+  "Cancel the sole active watcher, or open the list if there are several."
   (interactive)
   (let ((active (gp-deploy-watch--active-watchers)))
     (cond

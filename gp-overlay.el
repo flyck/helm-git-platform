@@ -15,9 +15,9 @@
 ;;     resolved state and the per-comment collapse set;
 ;;   * `gp-overlay-apply-to-buffer' lays the overlays down.
 ;;
-;; Each comment carries clickable [reply] [resolve] [-] [+ new] buttons and
-;; equivalent keybindings; resolve/reopen call the PR API so the state
-;; round-trips to Bitbucket.
+;; Each comment carries clickable [reply] [resolve] [delete] [-] buttons
+;; and equivalent keybindings; resolve/reopen/delete call the active
+;; backend so the state round-trips to the platform.
 
 ;;; Code:
 
@@ -30,10 +30,7 @@
 (declare-function gp-pr-full-name "gp-local")
 (declare-function gp-compose "gp-compose")
 
-;; Forward declaration: `gp-overlay-enabled' is a defcustom defined further
-;; down in this same file (after the toggle command that reads it), so the
-;; byte-compiler needs this to avoid a free-variable warning/error.
-(defvar gp-overlay-enabled)
+(defvar gp-overlay-enabled)             ; defcustom further down
 
 (defface gp-overlay-face
   '((t :inherit font-lock-comment-face :extend t))
@@ -84,26 +81,21 @@ side as `from'; prefer `to'."
 
 (defcustom gp-overlay-show-resolved nil
   "When non-nil, resolved comments are also drawn as overlays.
-Off by default: resolved threads are hidden to keep the code view
-focused on what still needs attention."
+Off by default, to keep the view on what still needs attention."
   :type 'boolean :group 'bitbucket)
 
 (defcustom gp-overlay-show-outdated nil
   "When non-nil, outdated comments are also drawn as overlays.
-Off by default: an outdated comment is anchored to a line no
-longer present in the PR's current diff, so its overlay would land
-on unrelated code.  Outdated-ness is computed from the diff (see
-`gp-comment-outdated-p'); with no diff available nothing is treated
-as outdated.  Hidden to keep the view accurate."
+Off by default: an outdated comment's line is no longer in the PR's
+current diff, so its overlay would land on unrelated code.  See
+`gp-comment-outdated-p'; with no diff nothing counts as outdated."
   :type 'boolean :group 'bitbucket)
 
 (defun gp-overlay--comment-thread-resolved-p (comment by-id)
   "Return non-nil if COMMENT or its thread root is resolved.
 BY-ID is a hash table of comment id -> comment, used to walk up
-`parent.id' links -- a reply's own `resolution' is often unset even
-when the thread it belongs to has been resolved, since Bitbucket
-only sets `resolution' on the comment the resolve action targeted
-\(usually the root)."
+`parent.id' links: Bitbucket sets `resolution' only on the comment
+the resolve targeted (usually the root), not on its replies."
   (let ((c comment) (seen (make-hash-table :test 'eql)))
     (catch 'done
       (while c
@@ -132,12 +124,9 @@ in ascending / insertion order."
         (when (and path line
                    (or gp-overlay-show-resolved
                        (not (gp-overlay--comment-thread-resolved-p c by-id)))
-                   ;; DIFF-BY-FILE drives the diff-membership fallback in
-                   ;; gp-comment-outdated-p -- Bitbucket's own `inline.outdated'
-                   ;; is undocumented (not in its OpenAPI spec) and, in
-                   ;; practice, only the per-comment GET returns it; the
-                   ;; list-comments endpoint used here never does, and
-                   ;; fetching per comment would be an N+1.
+                   ;; The diff is needed: Bitbucket's undocumented
+                   ;; `inline.outdated' is only returned by the per-comment
+                   ;; GET, never by the list endpoint (N+1 to fetch).
                    (or gp-overlay-show-outdated
                        (not (gp-comment-outdated-p c diff-by-file))))
           (let* ((file-entry (or (assoc path by-file)
@@ -165,8 +154,7 @@ in ascending / insertion order."
 Cached for `gp-overlay-avatar-ttl' seconds; never errors."
   (when (and url gp-overlay-show-avatars (display-graphic-p))
     (let* ((entry (gethash url gp-overlay--avatar-cache))
-           ;; entry is (EXPIRY . IMAGE-or-`none'); guard against any
-           ;; stale/foreign shape so a bad cache never throws.
+           ;; Guard against a foreign shape so a bad cache never throws.
            (fresh (and (consp entry) (numberp (car entry))
                        (< (float-time) (car entry)))))
       (if fresh
@@ -226,8 +214,7 @@ Overlay `after-string' text is not soft-wrapped by Emacs (neither
 hard-wrapped when rendered.
 
 An integer is a fixed column width.  The symbol `window' wraps to the
-width of the window showing the buffer.  nil disables wrapping and
-restores the old run-off-the-edge behaviour."
+width of the window showing the buffer.  nil disables wrapping."
   :type '(choice (const :tag "Fit the window" window)
                  (const :tag "Do not wrap" nil)
                  (integer :tag "Fixed columns"))
@@ -245,15 +232,12 @@ restores the old run-off-the-edge behaviour."
 
 (defun gp-overlay--fill (text prefix &optional first-indent)
   "Hard-wrap TEXT, indenting continuation lines with PREFIX.
-Text properties (link faces, buttons) survive the fill, so the
-result can be used directly in an overlay `after-string'.  Existing
-line breaks in TEXT are preserved: each line is wrapped on its own,
-so Markdown lists and code blocks keep their shape.
+Text properties (link faces, buttons) survive the fill.  Each line
+of TEXT is wrapped on its own, so Markdown lists and code blocks keep
+their shape.
 
 FIRST-INDENT is the width already occupied before TEXT starts (the
-\"    <avatar> Author: \" head).  It is charged against the very first
-output line only, so that line does not overflow the wrap column
-while the rest of the block still uses the full width."
+author head); it is charged against the first output line only."
   (let ((width (gp-overlay--wrap-width)))
     (if (not width)
         text
@@ -263,13 +247,11 @@ while the rest of the block still uses the full width."
              (out nil))
         (dolist (line (split-string text "\n"))
           (if (<= (length line) (if first first-limit limit))
-              ;; already fits: pass through verbatim so indentation inside
-              ;; code blocks and aligned text is not collapsed.
+              ;; Verbatim, so indentation in code blocks survives.
               (progn (push line out) (setq first nil))
           (let ((cur nil) (cur-len 0))
             (dolist (word (split-string line " " t))
-              ;; greedy word wrap; an over-long word is left intact rather
-              ;; than broken mid-token, so URLs stay clickable.
+              ;; Greedy; an over-long word stays intact so URLs work.
               (let* ((wl (length word))
                      (cap (if first first-limit limit)))
                 (cond
@@ -280,7 +262,6 @@ while the rest of the block still uses the full width."
                  (t (push (string-join (nreverse cur) " ") out)
                     (setq first nil)
                     (setq cur (list word) cur-len wl)))))
-            ;; a blank source line yields a blank output line
             (push (if cur (string-join (nreverse cur) " ") "") out)
             (setq first nil))))
         (string-join (nreverse out) (concat "\n" prefix))))))
@@ -290,12 +271,11 @@ while the rest of the block still uses the full width."
 Shows a one-line summary when collapsed or resolved, full text
 otherwise, followed by the action buttons.
 
-UUID is the current user's id, used only to decide whether the delete
-button applies.  Callers rendering several comments should resolve it
-once (`gp-user-uuid' is a network op) and pass it in; when omitted it
-is looked up lazily, and a lookup failure simply hides delete rather
-than aborting the render -- drawing comments must not depend on being
-authenticated."
+UUID is the current user's id, used only for the delete button.
+Callers rendering several comments should resolve it once
+\(`gp-user-uuid' is a network op); when omitted it is looked up here,
+and a lookup failure just hides delete: rendering must not depend on
+being authenticated."
   (let* ((pending (gp-comment-pending-p comment))
          (resolved (and (not pending) (gp-comment-resolved-p comment)))
          (collapsed (gp-overlay--collapsed-p comment))
@@ -317,8 +297,6 @@ authenticated."
                       (resolved "  ✓ resolved")
                       (collapsed "  …"))
                 ": "))
-         ;; Continuation lines line up under the comment text, past the
-         ;; "    <avatar> Author: " head, so wrapped prose reads as one block.
          (body (gp-overlay--face-body
                 (gp-overlay--fill
                  (gp-linkify-string (if collapsed first-line raw))
@@ -349,10 +327,8 @@ Keeps embedded link faces visible instead of overriding them."
 (defun gp-overlay--comment-buttons (comment resolved collapsed resolvable
                                             &optional deletable)
   "Return the action-button line for COMMENT given RESOLVED/COLLAPSED state.
-RESOLVABLE, when nil, hides the resolve/reopen action entirely (the
-backend has no resolve concept for this comment, e.g. a GitHub
-general/issue comment).  DELETABLE, when nil, hides the delete
-action -- see `gp-comment-delete-others'."
+RESOLVABLE nil hides resolve/reopen (e.g. a GitHub issue comment);
+DELETABLE nil hides delete (see `gp-comment-delete-others')."
   (string-join
    (delq nil
          (list "      "
@@ -374,11 +350,8 @@ action -- see `gp-comment-delete-others'."
 
 (defun gp-overlay--pending-comment-buttons (comment collapsed)
   "Return the action-button line for a pending (batched) COMMENT.
-Nobody but the author can see a pending comment, so reply and
-resolve don't apply here -- only removing it from the batch
-\(`gp-overlay-delete', which already routes a still-pending GitHub
-comment through the GraphQL fallback -- see
-`github-delete-review-batch-comment') and collapsing it do."
+Only the author sees a pending comment, so reply and resolve do not
+apply: only removing it from the batch and collapsing it."
   (string-join
    (delq nil
          (list "      "
@@ -391,8 +364,7 @@ comment through the GraphQL fallback -- see
 
 (defun gp-overlay--format (comments)
   "Render COMMENTS as the overlay after-string text.
-Resolves the current user once for the whole batch rather than per
-comment -- `gp-user-uuid' is a network call."
+Resolves the current user once (`gp-user-uuid' is a network call)."
   (let ((uuid (ignore-errors (gp-user-uuid))))
     (mapconcat (lambda (c) (gp-overlay--comment-string c uuid)) comments "")))
 
@@ -406,7 +378,7 @@ comment -- `gp-user-uuid' is a network call."
       (line-beginning-position))))
 
 (defun gp-overlay-clear (&optional buffer)
-  "Remove all bitbucket overlays from BUFFER (default current)."
+  "Remove all PR comment overlays from BUFFER (default current)."
   (with-current-buffer (or buffer (current-buffer))
     (mapc #'delete-overlay gp-overlay--list)
     (setq gp-overlay--list nil)))
@@ -417,27 +389,24 @@ Returns the number of overlays created.  Stores each line's
 comments on the overlay so per-line actions can find them."
   (with-current-buffer buffer
     (gp-overlay-clear buffer)
-    ;; remember the lines and re-apply them after a revert, which wipes
-    ;; buffer text (and thus the overlays)
+    ;; A revert wipes the overlays; keep the lines to re-apply them.
     (setq gp-overlay--lines line-alist)
     (add-hook 'after-revert-hook #'gp-overlay--reapply-after-revert nil t)
     (let ((n 0))
-      ;; honour the global toggle: keep the lines (for re-enable) but draw nothing
+      ;; When globally off, keep the lines (for re-enable) but draw nothing.
       (when gp-overlay-enabled
-      (pcase-dolist (`(,line . ,comments) line-alist)
-        (when-let* ((pos (gp-overlay--line-pos line)))
-          ;; Anchor at end of the commented line and render the comment
-          ;; block on the following line(s): the leading newline pushes the
-          ;; text below the code instead of trailing it on the same line.
-          (let* ((eol (save-excursion (goto-char pos) (line-end-position)))
-                 (ov (make-overlay eol eol)))
-            (overlay-put ov 'bitbucket t)
-            (overlay-put ov 'gp-line line)
-            (overlay-put ov 'gp-comments comments)
-            (overlay-put ov 'after-string
-                         (concat "\n" (gp-overlay--format comments)))
-            (push ov gp-overlay--list)
-            (cl-incf n)))))
+        (pcase-dolist (`(,line . ,comments) line-alist)
+          (when-let* ((pos (gp-overlay--line-pos line)))
+            ;; Anchored at eol; the leading newline puts the block below.
+            (let* ((eol (save-excursion (goto-char pos) (line-end-position)))
+                   (ov (make-overlay eol eol)))
+              (overlay-put ov 'bitbucket t)
+              (overlay-put ov 'gp-line line)
+              (overlay-put ov 'gp-comments comments)
+              (overlay-put ov 'after-string
+                           (concat "\n" (gp-overlay--format comments)))
+              (push ov gp-overlay--list)
+              (cl-incf n)))))
       n)))
 
 (defun gp-overlay--redraw ()
@@ -456,8 +425,7 @@ Used after a state change (collapse/resolve) without refetching."
 Prefers a button under point; otherwise the first comment of the
 overlay on the current line."
   (or (get-text-property (point) 'gp-comment)
-      ;; the overlay is anchored at end-of-line, so match any bitbucket
-      ;; overlay whose anchor sits on the current screen line
+      ;; Overlays are anchored at eol: match one on the current line.
       (let ((bol (line-beginning-position))
             (eol (line-end-position)))
         (cl-loop for ov in gp-overlay--list
@@ -495,9 +463,8 @@ INLINE is a (PATH . LINE) cons; PARENT a comment id."
 
 (defun gp-overlay-new-comment ()
   "Start a brand-new inline comment on the file line at point.
-Eligible for the review batch (see `gp-review-batch-default') --
-a reply (`gp-overlay-reply') always posts immediately, since a
-half-finished conversation thread is not something to hide."
+Eligible for the review batch (see `gp-review-batch-default');
+replies always post immediately."
   (interactive)
   (require 'gp-compose)
   (let ((pr gp-overlay--pr))
@@ -534,10 +501,8 @@ half-finished conversation thread is not something to hide."
     (if resolve
         (gp-resolve-comment full-name id cid)
       (gp-reopen-comment full-name id cid))
-    ;; reflect locally without a full refetch.  Mutate the existing cons
-    ;; cell destructively so the comment object held by the overlay sees
-    ;; the change (setf alist-get on a missing key would only rebind a
-    ;; local).
+    ;; Mutate C destructively so the object the overlay holds sees it
+    ;; (`setf' of `alist-get' on a missing key would only rebind a local).
     (let ((cell (assq 'resolution c)))
       (if cell
           (setcdr cell (and resolve '((user (display_name . "you")))))
@@ -566,8 +531,7 @@ grants it for the active backend."
       (gp-delete-comment (gp-pr-full-name pr) (alist-get 'id pr) (alist-get 'id c))
       (message "Comment deleted")
       (gp-invalidate-pr-caches pr)
-      ;; the comment is gone server-side, so a redraw from the stale local
-      ;; list would keep showing it -- refetch instead.
+      ;; Refetch: a redraw from the stale local list would still show it.
       (gp-overlay-refresh))))
 
 (defun gp-overlay-toggle-collapse (&optional comment)
@@ -577,7 +541,6 @@ grants it for the active backend."
                 (user-error "No comment here")))
          (id (alist-get 'id c))
          (tbl (gp-overlay--collapsed-table))
-         ;; flip the *current effective* state to its opposite, explicitly
          (now-collapsed (gp-overlay--collapsed-p c)))
     (puthash id (if now-collapsed 'expanded 'collapsed) tbl)
     (gp-overlay--redraw)))
@@ -590,12 +553,9 @@ Reuses the last-drawn lines, so no network fetch is needed."
 
 (defun gp-overlay-refresh ()
   "Refetch this buffer's PR (bypassing the TTL cache) and redraw overlays.
-`gp-overlay--pr' is a buffer-local snapshot that otherwise never changes
-on its own, so a source commit pushed after overlays were last drawn
-here would keep being checked against the old diff -- reusing the stale
-object could hide a comment's outdated status indefinitely.  Refetching
-here re-keys the diff cache (see `gp-comment-outdated-p') on the current
-source commit, same as `g' does in the PR detail buffer."
+`gp-overlay--pr' is a snapshot; refetching re-keys the diff cache
+\(see `gp-comment-outdated-p') on the current source commit, so a
+newly pushed commit cannot hide a comment's outdated status."
   (interactive)
   (when gp-overlay--pr
     (let* ((full-name (gp-pr-full-name gp-overlay--pr))
@@ -622,7 +582,7 @@ With a negative N, move to the previous one."
          (cmp (if (and n (< n 0)) #'< #'>))
          (target (cl-find-if (lambda (p) (funcall cmp p here)) positions)))
     (unless positions (user-error "No PR comments in this buffer"))
-    (goto-char (or target (car positions)))   ;; wrap around
+    (goto-char (or target (car positions)))
     (beginning-of-line)
     (when-let* ((c (gp-overlay-comment-at-point)))
       (message "%s: %s"
@@ -674,7 +634,6 @@ magit-diff buffer)."
       (cond
        ((not gp-overlay-enabled)
         (when gp-overlay--list (gp-overlay-clear buf)))
-       ;; turning on: redraw where we can
        ((and gp-overlay--pr gp-overlay--lines)
         (gp-overlay-apply-to-buffer buf gp-overlay--lines))
        ((and (derived-mode-p 'magit-diff-mode) (fboundp 'gp-magit-draw-comments))
@@ -691,17 +650,13 @@ comments.  Returns the total number of overlays drawn."
   (let* ((full-name (gp-pr-full-name pr))
          (id (alist-get 'id pr))
          (dir (gp-local-resolve-dir full-name t))
-         ;; Bitbucket's own comment fetch already includes the caller's
-         ;; pending (batched) comments; GitHub's REST endpoints never
-         ;; surface a comment still sitting in a PENDING review at all, so
-         ;; its batch has to be merged in from a second, GraphQL-backed
-         ;; fetch.  Deduping by id keeps this safe if that ever changes.
+         ;; GitHub's REST endpoints omit comments in a PENDING review, so
+         ;; the batch is merged in separately; Bitbucket's fetch already
+         ;; includes it, hence the (`equal'-based) dedupe.
          (comments (delete-dups
                     (append (gp-pull-request-comments full-name id)
                             (ignore-errors (gp-review-batch-comments full-name id)))))
-         ;; fetch the diff so outdated comments (anchored to lines no
-         ;; longer in the diff) can be filtered out; nil on any error
-         ;; just disables the outdated filter, never breaks overlays.
+         ;; For the outdated filter; nil on error just disables it.
          (diff-by-file (unless gp-overlay-show-outdated
                          (ignore-errors
                            (gp-split-diff-by-file

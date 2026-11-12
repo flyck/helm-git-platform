@@ -19,9 +19,8 @@
 ;; origin first if it is not there yet, never pushing a protected branch;
 ;; `q' (or "Cancel" / C-c C-k) discards it and falls back to `gp-helm'.
 ;;
-;; The pure pieces (title derivation, body building) are factored out so
-;; the tests drive them directly; only `gp-create-pr' and the create
-;; action touch git/network state.
+;; Title derivation and body building are pure; only `gp-create-pr' and
+;; the create action touch git/network state.
 
 ;;; Code:
 
@@ -39,8 +38,7 @@
   :group 'bitbucket)
 
 (defcustom gp-create-buffer (gp--buffer-name "create PR")
-  "Name of the PR-creation mask buffer.
-Defaults to the shared `gp-buffer-name-prefix' tag."
+  "Name of the PR-creation mask buffer."
   :type 'string :group 'gp-create)
 
 ;;;; Pure title / body derivation --------------------------------------------
@@ -81,7 +79,6 @@ shared prefix) if there is a meaningful one, else BRANCH humanised."
            (words (string-trim (replace-regexp-in-string "[-_/]+" " " base))))
       (if (string-empty-p words)
           "New pull request"
-        ;; sentence case: capitalise only the first letter
         (concat (upcase (substring words 0 1)) (substring words 1))))))
 
 (defun gp-create--body (summaries)
@@ -93,10 +90,8 @@ shared prefix) if there is a meaningful one, else BRANCH humanised."
 (defun gp-create--dest-candidates (branches default dest)
   "Return BRANCHES for the destination dropdown, DEFAULT and DEST first.
 BRANCHES is every branch name in the repo; DEFAULT is the repo's
-default branch; DEST is the destination the form opened with (usually
-the same as DEFAULT, but not always -- re-opening a form keeps
-whatever was picked last).  Deduplicated, so DEFAULT/DEST are not
-repeated if they already lead the alphabetical remainder."
+default branch; DEST is the destination the form opened with.
+DEFAULT and DEST are never repeated in the remainder."
   (let* ((priority (delq nil (delete-dups (list default dest))))
          (rest (seq-difference branches priority #'equal)))
     (append priority rest)))
@@ -115,25 +110,16 @@ which keeps a PR out of reviewers' queues until you mark it ready."
 
 (defcustom gp-create-preferred-reviewers nil
   "Reviewers to pre-check in the create form, identified by account id.
+Useful where the platform has no default reviewers to offer (a
+Bitbucket repo without any configured, or GitHub, which has no
+queryable equivalent).
 
-For repos whose platform cannot answer \"who reviews this by
-default\" -- a Bitbucket repo with no configured default reviewers
-returns an empty list, and GitHub has no queryable equivalent at all
-\(CODEOWNERS is not one) -- so the people you always add ended up
-being ticked by hand every time.
+Prefer account ids, which survive renames: a Bitbucket uuid (braces
+included) or a GitHub login.  A display name or nickname is also
+accepted, matched case-insensitively.
 
-Prefer account ids: a Bitbucket uuid (braces included, e.g.
-\"{4efc3327-362a-4f4f-b573-c4435b0f2232}\") or a GitHub login.  They
-are stable, so a colleague renaming themselves cannot silently stop
-pre-checking them.  A display name or nickname is also accepted,
-matched case-insensitively, for readability at the cost of surviving
-renames.
-
-Entries that match no candidate are logged (see `gp-log-enabled')
-rather than silently ignored, so a stale id surfaces instead of just
-quietly not pre-checking someone.  Matching only ever pre-checks
-people the platform already offers as candidates -- it never invents
-a reviewer, so a stale entry cannot add the wrong person to a PR.
+Only candidates the platform already offers are pre-checked; entries
+matching none are logged (see `gp-log-enabled').
 
 To find the ids, open a create form with `gp-log-enabled' non-nil and
 run \\[gp-create-show-reviewer-ids].
@@ -194,14 +180,14 @@ Example:
   "<backspace>" #'gp-create-delete-backward)
 
 (defun gp-create-self-insert (n &optional c)
-  "Self-insert only inside an editable field; elsewhere do nothing."
+  "Self-insert N copies of C only inside an editable field."
   (interactive "p")
   (if (gp-create--in-field-p)
       (self-insert-command n c)
     (message "Move into a field (TAB) to edit")))
 
 (defun gp-create-delete-backward (n)
-  "Delete backwards only inside an editable field; elsewhere do nothing."
+  "Delete N characters backwards only inside an editable field."
   (interactive "p")
   (when (and (gp-create--in-field-p)
              (> (point) (or (ignore-errors (widget-field-start (widget-field-at (point))))
@@ -216,35 +202,28 @@ Example:
 
 (defun gp-create--in-field-p ()
   "Return non-nil if point is inside an editable widget text field.
-Only text fields capture `C'/`q' as literal input; on checkboxes
-and buttons those keys stay the global create/cancel actions
-\(checkboxes toggle with RET or SPC)."
+Only there do `C'/`q' insert text instead of creating/cancelling."
   (and (widget-field-at (point)) t))
 
 ;;;; Form construction --------------------------------------------------------
 
+(defun gp-create--want-matches-p (want reviewer)
+  "Return non-nil if the preferred entry WANT names REVIEWER."
+  (let ((name (alist-get 'display_name reviewer))
+        (nick (alist-get 'nickname reviewer)))
+    (or (and name (string-equal-ignore-case want name))
+        (and nick (string-equal-ignore-case want nick))
+        (equal want (alist-get 'uuid reviewer)))))
+
 (defun gp-create--preferred-p (reviewer)
   "Return non-nil if REVIEWER is named in `gp-create-preferred-reviewers'."
-  (let ((name (alist-get 'display_name reviewer))
-        (nick (alist-get 'nickname reviewer))
-        (uuid (alist-get 'uuid reviewer)))
-    (seq-some (lambda (want)
-                (or (and name (string-equal-ignore-case want name))
-                    (and nick (string-equal-ignore-case want nick))
-                    (equal want uuid)))
-              gp-create-preferred-reviewers)))
+  (seq-some (lambda (want) (gp-create--want-matches-p want reviewer))
+            gp-create-preferred-reviewers))
 
 (defun gp-create--log-unmatched-preferred (candidates)
-  "Log any `gp-create-preferred-reviewers' entry CANDIDATES cannot satisfy.
-A preferred name that matches nobody is almost always a rename or a
-typo; failing loudly in the log beats quietly not pre-checking them."
+  "Log any `gp-create-preferred-reviewers' entry CANDIDATES cannot satisfy."
   (dolist (want gp-create-preferred-reviewers)
-    (unless (seq-some (lambda (r)
-                        (let ((name (alist-get 'display_name r))
-                              (nick (alist-get 'nickname r)))
-                          (or (and name (string-equal-ignore-case want name))
-                              (and nick (string-equal-ignore-case want nick))
-                              (equal want (alist-get 'uuid r)))))
+    (unless (seq-some (lambda (r) (gp-create--want-matches-p want r))
                       candidates)
       (gp-log 'info "preferred reviewer %S matched no candidate for this repo"
               want))))
@@ -252,8 +231,7 @@ typo; failing loudly in the log beats quietly not pre-checking them."
 (defun gp-create--insert-reviewer-list (reviewers checked)
   "Insert one CHECKBOX per entry in REVIEWERS, each defaulting to CHECKED.
 A reviewer named in `gp-create-preferred-reviewers' is checked
-regardless of CHECKED -- that is the whole point of listing them --
-and gets a marker so it is clear why it came pre-ticked.
+regardless of CHECKED and marked with a star.
 Returns an alist (UUID . CHECKBOX-WIDGET) in REVIEWERS order."
   (mapcar
    (lambda (r)
@@ -272,10 +250,8 @@ Returns an alist (UUID . CHECKBOX-WIDGET) in REVIEWERS order."
 ;;;###autoload
 (defun gp-create-show-reviewer-ids (full-name)
   "List FULL-NAME's reviewer candidates with their account ids.
-A lookup helper for filling in `gp-create-preferred-reviewers': the
-create form shows names, but the custom wants stable ids.  Reads the
-same candidate pool the form does, so anyone listed here can be
-pre-checked."
+A lookup helper for filling in `gp-create-preferred-reviewers'; reads
+the same candidate pool the create form does."
   (interactive
    (list (or (and (bound-and-true-p gp-create--ctx)
                   (plist-get gp-create--ctx :full-name))
@@ -302,16 +278,10 @@ pre-checked."
 
 (defun gp-create--insert-reviewers (full-name)
   "Insert the reviewers section for FULL-NAME, returning the alist.
-Default reviewers (the platform auto-adds them; Bitbucket) are
-checked by default -- opting out is the unusual case.  Suggested
-reviewers (GitHub's repo collaborators, standing in for a real
-per-PR suggestion the create form can't ask for yet -- see
-`gp-repo-suggested-reviewers') are unchecked -- picking one is an
-explicit opt-in, except for anyone in
-`gp-create-preferred-reviewers', who is pre-checked wherever they
-appear.  Returns the combined alist (UUID . CHECKBOX-WIDGET)
-across both groups.  A blank section if neither backend has anything
-to offer for this repo."
+Default reviewers (which the platform auto-adds) start checked;
+suggested reviewers (see `gp-repo-suggested-reviewers') start
+unchecked, except anyone in `gp-create-preferred-reviewers'.
+Returns the combined alist (UUID . CHECKBOX-WIDGET)."
   (let ((defaults (gp-repo-default-reviewers full-name))
         (suggested (gp-repo-suggested-reviewers full-name)))
     (gp-create--log-unmatched-preferred (append defaults suggested))
@@ -342,8 +312,7 @@ to offer for this repo."
               (apply #'widget-create 'menu-choice
                      :tag "" :value dest :format "%[%v%]"
                      (mapcar (lambda (b) (list 'item b)) candidates))
-            ;; branch listing failed or is still unavailable -- fall back to a
-            ;; plain editable field so DEST is still choosable by hand
+            ;; No branch list: a plain field keeps DEST editable by hand.
             (widget-create 'editable-field :size 30 :format "%v" dest)))
     (widget-insert "\n")
     (widget-insert (propertize (format "in %s\n\n" full-name) 'face 'shadow))
@@ -370,8 +339,6 @@ to offer for this repo."
     (setq gp-create--w-reviewers (gp-create--insert-reviewers full-name))
     (widget-insert "\n")
 
-    ;; Shortcut lives in the button label (like the detail view's
-    ;; "reply [R]" / "resolve [X]" buttons), not in a separate help line.
     (widget-create 'push-button
                    :notify (lambda (&rest _) (gp-create-submit))
                    "Create PR [C]")
@@ -411,7 +378,6 @@ protected branch).  Opens the new PR's detail buffer on success."
       (user-error "Title is empty"))
     (when (equal source dest)
       (user-error "Destination %s is the same as the source branch" dest))
-    ;; ensure the source branch is on the remote (push if needed)
     (unless (gp-checkout-branch-on-remote-p dir source)
       (message "Pushing %s to origin…" source)
       (let ((res (gp-checkout-push-branch dir source)))
@@ -452,12 +418,9 @@ protected branch).  Opens the new PR's detail buffer on success."
 
 (defun gp-create-cancel ()
   "Discard the form and fall back to the normal PR list (`gp-helm').
-Kills the form buffer outright (not merely buries it) so a later
-open always starts from a clean slate."
+Kills the form buffer outright so a later open starts clean."
   (interactive)
-  ;; Grab the buffer/winconf before touching window state, then kill the
-  ;; named form buffer explicitly -- works no matter which window or
-  ;; `:notify' callback we were invoked from.
+  ;; Kill the named buffer: we may run from any window or `:notify' callback.
   (let ((winconf gp-create--return-window)
         (buf (or (get-buffer gp-create-buffer) (current-buffer))))
     (when winconf (set-window-configuration winconf))
@@ -473,9 +436,8 @@ open always starts from a clean slate."
   "Build the form context: derive title/description from commits.
 Returns a plist (:title :description :source :dest :dest-candidates
 :full-name :dir).  DEST-CANDIDATES is every branch in FULL-NAME for
-the destination dropdown, DEST (and the repo's default branch) sorted
-first; fetching it is best-effort, so a failed/slow branch listing
-still leaves DEST itself choosable."
+the destination dropdown, DEST and the default branch first;
+fetching it is best-effort."
   (let* ((summaries (gp-checkout-commit-summaries dir dest source))
          (title (gp-create--derive-title summaries source))
          (description (gp-create--body summaries))
@@ -491,7 +453,7 @@ still leaves DEST itself choosable."
   "Open the PR-creation form for branch SOURCE in repo FULL-NAME (clone DIR).
 DEST defaults to the repo's main branch.  The form is pre-filled
 from the branch's commit messages, with toggles for draft, delete
-source branch after merge, and the repo's default reviewers.
+source branch after merge, and reviewer candidates.
 `C' / `C-c C-c' creates, `q' / `C-c C-k' cancels."
   (let* ((dest (or dest
                    (gp-repo-default-branch full-name)
@@ -502,8 +464,7 @@ source branch after merge, and the repo's default reviewers.
     (when (equal source dest)
       (user-error "Branch %s is the destination branch; nothing to open a PR from"
                   source))
-    ;; Kill any stale form buffer rather than reusing it: a reused buffer can
-    ;; carry over old widgets/overlays from a previous, never-closed session.
+    ;; A reused buffer would carry over stale widgets/overlays.
     (when-let* ((old (get-buffer gp-create-buffer)))
       (kill-buffer old))
     (setq buf (get-buffer-create gp-create-buffer))
@@ -518,7 +479,6 @@ source branch after merge, and the repo's default reviewers.
               header-line-format
               (format "Create PR  %s → %s" source dest))
         (gp-create--build-form ctx)
-        ;; land on the title field for a quick edit
         (goto-char (point-min))
         (widget-forward 1)))
     (pop-to-buffer buf)
