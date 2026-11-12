@@ -168,6 +168,11 @@ custom pipeline named after the branch (which would not exist)."
     (should (= 1 (length (bitbucket-pipelines-match-commit
                           '(((target (commit (hash . "abcdef12")))))
                           "abcdef1234567890"))))
+    ;; short query hash, full hash on the pipeline: only the matching one
+    (should (equal (bitbucket-pipelines-match-commit pipes "abcdef12")
+                   (list (car pipes))))
+    ;; a hash matching neither way -> nothing
+    (should-not (bitbucket-pipelines-match-commit pipes "fedcba98"))
     ;; nil commit -> unchanged
     (should (= 2 (length (bitbucket-pipelines-match-commit pipes nil))))))
 

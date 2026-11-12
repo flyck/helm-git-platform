@@ -144,34 +144,54 @@ all invocations are recorded in the dynamically-bound list
                   (funcall ,script dir args))))
        ,@body)))
 
+(defun gp-test--mutating-git-calls (calls)
+  "Return the repository-changing steps among CALLS (as recorded by
+`gp-test-with-fake-git'), in order, without their directory: the
+read-only probes (status, rev-parse, worktree, diff, merge-base) are
+internal detail."
+  (cl-loop for c in calls
+           when (member (cadr c) '("stash" "reset" "fetch" "checkout" "pull" "branch"))
+           collect (cdr c)))
+
 (ert-deftest gp-test-run-clean-executes-three-steps ()
+  "A clean tree with no competing worktree: fetch, checkout, pull, in
+that order, nothing stashed, and the run reports the original DIR."
   (gp-test-with-fake-git
       (lambda (_dir args)
         (cond ((equal (car args) "status") '(0 . ""))         ;; clean
-              ((equal (car args) "rev-parse") '(0 . "main"))
-              (t '(0 . "ok"))))
+              ((equal (car args) "worktree")
+               '(0 . "worktree /repo\nHEAD a\nbranch refs/heads/main\n"))
+              ((equal args '("rev-parse" "--abbrev-ref" "HEAD")) '(0 . "main"))
+              (t '(0 . ""))))
     (let ((res (gp-checkout-run "/repo" "feature")))
       (should (plist-get res :ok))
       (should-not (plist-get res :stashed))
-      ;; worktree-list + status + rev-parse(current branch) + fetch + checkout
-      ;; + [divergence probe: rev-parse x2 + one merge-base --is-ancestor,
-      ;;    short-circuiting before the second since the first already
-      ;;    disproves divergence] + pull
-      (should (= (length git-calls) 9))
-      (should-not (cl-find "stash" git-calls
-                           :key (lambda (c) (cadr c)) :test #'equal)))))
+      (should (equal (plist-get res :dir) "/repo"))
+      (should (equal (gp-test--mutating-git-calls git-calls)
+                     '(("fetch" "origin" "feature")
+                       ("checkout" "feature")
+                       ("pull" "--ff-only" "origin" "feature")))))))
 
 (ert-deftest gp-test-run-dirty-stashes ()
-  (gp-test-with-fake-git
-      (lambda (_dir args)
-        (cond ((equal (car args) "status") '(0 . " M file.txt")) ;; dirty
-              ((equal (car args) "rev-parse") '(0 . "main"))
-              (t '(0 . "ok"))))
-    (let ((res (gp-checkout-run "/repo" "feature")))
-      (should (plist-get res :ok))
-      (should (plist-get res :stashed))
-      (should (cl-find "stash" git-calls
-                       :key (lambda (c) (cadr c)) :test #'equal)))))
+  "A dirty tree is stashed (named after the current branch) before the
+switch, and the run reports it as stashed."
+  (let ((gp-checkout-stash-prefix "gp-auto"))
+    (gp-test-with-fake-git
+        (lambda (_dir args)
+          (cond ((equal (car args) "status") '(0 . " M file.txt")) ;; dirty
+                ((equal args '("rev-parse" "--abbrev-ref" "HEAD")) '(0 . "main"))
+                ;; no intent-to-add paths and no competing worktree
+                ((member (car args) '("diff" "worktree")) '(0 . ""))
+                (t '(0 . ""))))
+      (let ((res (gp-checkout-run "/repo" "feature")))
+        (should (plist-get res :ok))
+        (should (plist-get res :stashed))
+        (should (equal (gp-test--mutating-git-calls git-calls)
+                       '(("stash" "push" "--include-untracked"
+                          "-m" "gp-auto: WIP on main")
+                         ("fetch" "origin" "feature")
+                         ("checkout" "feature")
+                         ("pull" "--ff-only" "origin" "feature"))))))))
 
 (ert-deftest gp-test-run-stops-on-failure ()
   "If checkout fails, pull is not attempted and :ok is nil."
@@ -215,16 +235,31 @@ other, i.e. genuinely diverged, not just behind/ahead)."
                      (t '(0 . "ok"))))))
     (should-not (gp-checkout-branch-diverged-p "/repo" "feature" "origin"))))
 
+(defun gp-test--ancestry-fake-git (local-is-ancestor remote-is-ancestor)
+  "Fake git where both refs exist and the two `merge-base --is-ancestor'
+probes answer LOCAL-IS-ANCESTOR (feature -> origin/feature) and
+REMOTE-IS-ANCESTOR (origin/feature -> feature)."
+  (lambda (_dir &rest args)
+    (pcase args
+      (`("rev-parse" "--verify" ,_) '(0 . "x"))
+      ('("merge-base" "--is-ancestor" "feature" "origin/feature")
+       (if local-is-ancestor '(0 . "") '(1 . "")))
+      ('("merge-base" "--is-ancestor" "origin/feature" "feature")
+       (if remote-is-ancestor '(0 . "") '(1 . "")))
+      (_ (error "Unexpected git call: %S" args)))))
+
 (ert-deftest gp-test-branch-diverged-p-false-when-just-behind ()
   "Not diverged when the local branch IS an ancestor of the remote one
 (the ordinary \"just behind\" case `pull --ff-only' handles fine)."
   (cl-letf (((symbol-function 'gp-checkout--git)
-             (lambda (_dir &rest args)
-               (cond ((equal (nth 1 args) "--verify") '(0 . "x"))
-                     ((equal (car args) "merge-base")
-                      ;; local is-ancestor-of remote: succeeds (0)
-                      (if (equal (nth 3 args) "feature") '(0 . "") '(1 . "")))
-                     (t '(0 . "ok"))))))
+             (gp-test--ancestry-fake-git t nil)))
+    (should-not (gp-checkout-branch-diverged-p "/repo" "feature" "origin"))))
+
+(ert-deftest gp-test-branch-diverged-p-false-when-just-ahead ()
+  "Not diverged when the remote branch is an ancestor of the local one
+(local commits not yet pushed)."
+  (cl-letf (((symbol-function 'gp-checkout--git)
+             (gp-test--ancestry-fake-git nil t)))
     (should-not (gp-checkout-branch-diverged-p "/repo" "feature" "origin"))))
 
 (ert-deftest gp-test-run-recovers-diverged-branch-on-confirmation ()
@@ -306,19 +341,5 @@ auto-stash step had already run -- stranding the user's work."
         (should-not (plist-get res :stashed))
         ;; only the worktree query ran -- no stash, no checkout
         (should (equal calls '(("worktree" "list" "--porcelain"))))))))
-
-(ert-deftest gp-test-run-normal-path-still-switches ()
-  "With no competing worktree the ordinary plan still runs."
-  (let ((calls '()))
-    (cl-letf (((symbol-function 'gp-checkout--git)
-               (lambda (_dir &rest args)
-                 (setq calls (append calls (list args)))
-                 (cons 0 (if (equal (car args) "worktree")
-                             "worktree /repo\nHEAD a\nbranch refs/heads/main\n"
-                           "")))))
-      (let ((res (gp-checkout-run "/repo" "feature")))
-        (should (plist-get res :ok))
-        (should (equal (plist-get res :dir) "/repo"))
-        (should (member '("checkout" "feature") calls))))))
 
 ;;; gp-checkout-test.el ends here

@@ -3,6 +3,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'json)
 (require 'gp-stealth)
 
@@ -43,7 +44,10 @@
             (should (string-suffix-p ".stealth-session" handed))
             (should (equal (alist-get 'workspace request) "/tmp/repo"))
             (should (string-match-p "Branch: feat/demo → main" (alist-get 'prompt request)))
-            (should (equal (mapcar #'car request) '(workspace prompt))))
+            ;; Exactly these two keys, in any order.
+            (should (= (length request) 2))
+            (should (null (cl-set-exclusive-or (mapcar #'car request)
+                                               '(workspace prompt)))))
         (when handed (ignore-errors (delete-file handed)))))))
 
 (ert-deftest gp-test-stealth-open-session-cleans-up-and-errors-on-failure ()

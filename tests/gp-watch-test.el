@@ -122,19 +122,21 @@ comments of the full PR, which the list endpoint does not carry."
                       (gp-watch--format-mode-line nil pr)))))))
 
 (ert-deftest gp-test-watch-mode-line-format ()
-  (should (equal (gp-watch--format-mode-line nil nil) ""))
-  ;; just the repo open-PR count
-  (let ((s (substring-no-properties (gp-watch--format-mode-line 3 nil))))
-    (should (equal s " BB:3")))
-  ;; on a branch PR: clickable comment counter with the 💬 emoji
-  (let ((s (substring-no-properties
-            (gp-watch--format-mode-line 2 '((id . 1) (comment_count . 5))))))
-    (should (string-match-p "BB:2" s))
-    (should (string-match-p "💬5" s)))
-  ;; branch PR with no repo count still shows the comment counter
-  (let ((s (substring-no-properties
-            (gp-watch--format-mode-line nil '((id . 9) (comment_count . 0))))))
-    (should (string-match-p "💬0" s))))
+  "Bitbucket PRs carry `comment_count'; see the GitHub test above."
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (should (equal (gp-watch--format-mode-line nil nil) ""))
+    ;; just the repo open-PR count
+    (let ((s (substring-no-properties (gp-watch--format-mode-line 3 nil))))
+      (should (equal s " BB:3")))
+    ;; on a branch PR: clickable comment counter with the 💬 emoji
+    (let ((s (substring-no-properties
+              (gp-watch--format-mode-line 2 '((id . 1) (comment_count . 5))))))
+      (should (string-match-p "BB:2" s))
+      (should (string-match-p "💬5" s)))
+    ;; branch PR with no repo count still shows the comment counter
+    (let ((s (substring-no-properties
+              (gp-watch--format-mode-line nil '((id . 9) (comment_count . 0))))))
+      (should (string-match-p "💬0" s)))))
 
 (ert-deftest gp-test-overlay-reapply-after-revert ()
   "Stored lines are re-applied (overlays redrawn) after a simulated revert."
@@ -152,71 +154,63 @@ comments of the full PR, which the list endpoint does not carry."
     (should (= (length gp-overlay--list) 1))))
 
 (ert-deftest gp-test-watch-overlays-only-when-comments-match-file ()
-  "Overlays are drawn only for comments whose inline path is THIS file."
+  "Overlays are drawn only for comments whose inline path is THIS file.
+The fixture PR has two inline comments on options-dialog.component.ts
+\(lines 40 and 105) and others on different files; a file with none
+gets no overlay at all."
   (bitbucket-mock-with-service
-    (cl-letf (((symbol-function 'gp-local-find-checkout)
-               (lambda (_fn) "/repo"))
-              ;; pretend the visited file is one with comments in the fixture
-              ((symbol-function 'gp-pull-request-comments)
-               (lambda (&rest _)
-                 '(((id . 1) (user (display_name . "A"))
-                    (content (raw . "hi")) (inline (path . "wanted.el") (to . 2)))
-                   ((id . 2) (user (display_name . "B"))
-                    (content (raw . "yo")) (inline (path . "other.el") (to . 9)))))))
+    (cl-letf (((symbol-function 'gp-local-find-checkout) (lambda (_fn) "/repo/")))
       (with-temp-buffer
-        (setq buffer-file-name "/repo/wanted.el")
-        (dotimes (i 5) (insert (format "line %d\n" (1+ i))))
-        (cl-letf (((symbol-function 'file-relative-name)
-                   (lambda (_f _d) "wanted.el")))
-          (let ((n (gp-watch--overlay-if-comments '((id . 7)) "ws/slug")))
-            (should (= n 1))))            ;; only the wanted.el comment
-        (set-buffer-modified-p nil)))))
-
-(ert-deftest gp-test-watch-no-overlay-when-file-absent-from-comments ()
-  (bitbucket-mock-with-service
-    (cl-letf (((symbol-function 'gp-local-find-checkout)
-               (lambda (_fn) "/repo"))
-              ((symbol-function 'gp-pull-request-comments)
-               (lambda (&rest _)
-                 '(((id . 2) (user (display_name . "B"))
-                    (content (raw . "yo")) (inline (path . "other.el") (to . 9))))))
-              ((symbol-function 'file-relative-name)
-               (lambda (_f _d) "wanted.el")))
+        (setq buffer-file-name
+              "/repo/src/app/dialogs/options-dialog/options-dialog.component.ts")
+        (dotimes (i 120) (insert (format "line %d\n" (1+ i))))
+        (should (= (gp-watch--overlay-if-comments '((id . 180)) "acme/web-frontend") 2))
+        (should (equal (sort (mapcar (lambda (ov) (line-number-at-pos (overlay-start ov)))
+                                     gp-overlay--list)
+                             #'<)
+                       '(40 105)))
+        (should (cl-find "/repositories/acme/web-frontend/pullrequests/180/comments"
+                         bitbucket-mock-calls :key #'cadr :test #'equal))
+        (set-buffer-modified-p nil))
       (with-temp-buffer
-        (setq buffer-file-name "/repo/wanted.el")
+        (setq buffer-file-name "/repo/src/app/untouched.ts")
         (insert "x\n")
-        (should (null (gp-watch--overlay-if-comments '((id . 7)) "ws/slug")))
+        (should (null (gp-watch--overlay-if-comments '((id . 180)) "acme/web-frontend")))
+        (should (null gp-overlay--list))
         (set-buffer-modified-p nil)))))
 
 (ert-deftest gp-test-watch-activates-in-magit-buffer-from-directory ()
-  "Magit buffers use `default-directory' for repo and branch PR resolution."
-  (let ((gp-watch-mode t))
-    (with-temp-buffer
-      (setq default-directory "/repo/")
-      (cl-letf (((symbol-function 'derived-mode-p)
-                 (lambda (&rest modes) (memq 'magit-mode modes)))
-                ((symbol-function 'gp-watch--repo-for-path)
-                 (lambda (path)
-                   (should (equal path "/repo/"))
-                   "ws/slug"))
-                ((symbol-function 'gp-watch--open-count)
-                 (lambda (_full-name) 4))
-                ((symbol-function 'gp-watch--current-branch)
-                 (lambda (path)
-                   (should (equal path "/repo/"))
-                   "feature/demo"))
-                ((symbol-function 'gp-watch--pr-for)
-                 (lambda (_full-name branch)
-                   (should (equal branch "feature/demo"))
-                   '((id . 8) (comment_count . 2))))
-                ((symbol-function 'gp-watch--overlay-if-comments)
-                 (lambda (&rest _) (ert-fail "should not overlay in non-file Magit buffer"))))
-        (gp-watch--maybe-activate)
-        (should (equal gp-watch--repo "ws/slug"))
-        (should (= gp-watch--pr-count 4))
-        (should (= (alist-get 'id gp-watch--branch-pr) 8))
-        (should (string-match-p "BB:4" (substring-no-properties gp-watch-mode-line)))
-        (should (string-match-p "💬2" (substring-no-properties gp-watch-mode-line)))))))
+  "Magit buffers use `default-directory' for repo and branch PR resolution.
+The open-PR count and the branch PR come from the (GitHub) mock: two
+open PRs, #42 on feature/widget with 1 general + 2 inline comments."
+  (github-mock-with-service
+    (let ((gp-watch-mode t))
+      (gp-watch-clear-cache)
+      (with-temp-buffer
+        (setq default-directory "/repo/")
+        (cl-letf (((symbol-function 'derived-mode-p)
+                   (lambda (&rest modes) (memq 'magit-mode modes)))
+                  ((symbol-function 'gp-watch--repo-for-path)
+                   (lambda (path)
+                     (should (equal path "/repo/"))
+                     "acme/web"))
+                  ((symbol-function 'gp-watch--current-branch)
+                   (lambda (path)
+                     (should (equal path "/repo/"))
+                     "feature/widget"))
+                  ((symbol-function 'gp-watch--overlay-if-comments)
+                   (lambda (&rest _) (ert-fail "should not overlay in non-file Magit buffer"))))
+          (gp-watch--maybe-activate)
+          (should (equal gp-watch--repo "acme/web"))
+          (should (= gp-watch--pr-count 2))
+          (should (= (alist-get 'id gp-watch--branch-pr) 42))
+          (should (member '("GET" "/repos/acme/web/pulls"
+                            (("state" . "open") ("head" . "acme:feature/widget")))
+                          (mapcar (lambda (c) (seq-take c 3)) github-mock-calls)))
+          (let ((line (substring-no-properties gp-watch-mode-line)))
+            (should (string-match-p ":2\\b" line))
+            (should (string-match-p "💬3" line))))))
+    (gp-watch-clear-cache)))
 
 (ert-deftest gp-test-watch-visit-branch-pr-opens-single-match ()
   "A single branch match opens the PR detail directly."

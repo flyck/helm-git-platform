@@ -14,6 +14,8 @@
 (require 'wid-edit)
 (require 'bitbucket-api) ;; `bitbucket-set-pull-request-reviewers' (exercised below)
 (require 'github-api)    ;; `github-set-pull-request-reviewers' (likewise)
+(require 'json)
+(require 'bitbucket-mock)
 
 ;;;; Candidate grouping (pure) -------------------------------------------------
 
@@ -75,21 +77,32 @@
   (current-buffer))
 
 (ert-deftest gp-reviewers-test-form-shows-groups-and-badges ()
+  "Each row shows its checkbox, name and badge; only reviewed rows are
+locked; the groups render in order Current / Defaults / Suggested."
   (with-temp-buffer
     (gp-reviewers-test--form
      '((id . 7) (title . "Add widget"))
      '((:id "{alice}" :name "Alice" :state approved)
+       (:id "{dan}" :name "Dan" :state changes)
        (:id "{bob}" :name "Bob" :state pending))
-     nil
+     '(((uuid . "{erin}") (display_name . "Erin")))
      '(((uuid . "{carol}") (display_name . "Carol"))))
-    (let ((text (substring-no-properties (buffer-string))))
-      (should (string-match-p "#7  Add widget" text))
-      (should (string-match-p "Current" text))
-      (should (string-match-p "Alice.*approved" text))
-      (should (string-match-p "(locked)" text))
-      (should (string-match-p "Bob.*pending" text))
-      (should (string-match-p "Suggested" text))
-      (should (string-match-p "Carol" text))
+    (let* ((text (substring-no-properties (buffer-string)))
+           (lines (split-string text "\n"))
+           (line-for (lambda (name)
+                       (cl-find-if (lambda (l) (string-match-p
+                                                (format "\\] %s\\b" name) l))
+                                   lines))))
+      (should (string-match-p "^#7  Add widget$" text))
+      (let ((cur (string-match "^Current$" text))
+            (def (string-match "^Default reviewers for this repo$" text))
+            (sug (string-match "^Suggested$" text)))
+        (should (and cur def sug (< cur def sug))))
+      (should (equal (funcall line-for "Alice") "[X] Alice   ✓ approved  (locked)"))
+      (should (equal (funcall line-for "Dan") "[X] Dan   ✗ changes requested  (locked)"))
+      (should (equal (funcall line-for "Bob") "[X] Bob   ⏳ pending"))
+      (should (equal (funcall line-for "Erin") "[ ] Erin"))
+      (should (equal (funcall line-for "Carol") "[ ] Carol"))
       (should (string-match-p "Save \\[C\\]" text))
       (should (string-match-p "Cancel \\[q\\]" text)))))
 
@@ -136,17 +149,23 @@ where it matters, not only at the keystroke."
     (widget-value-set (plist-get (car gp-reviewers--widgets) :widget) nil)
     (should (equal (gp-reviewers--selected-ids) '("{alice}")))))
 
-(ert-deftest gp-reviewers-test-save-sends-complete-list-and-baseline ()
-  "Save passes the desired end state plus the original list."
-  (let (captured)
-    (cl-letf (((symbol-function 'gp-set-pull-request-reviewers)
-               (lambda (fn id wanted current)
-                 (setq captured (list fn id wanted current))))
-              ((symbol-function 'gp-pr-full-name) (lambda (_) "acme/web"))
-              ((symbol-function 'gp-invalidate-pr-caches) #'ignore))
+(defun gp-reviewers-test--bitbucket-pr ()
+  "The mock's single Bitbucket PR (id 180 in acme/web-frontend)."
+  (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+
+(defun gp-reviewers-test--puts ()
+  "The PUT requests recorded by the Bitbucket mock, oldest first."
+  (reverse (cl-remove-if-not (lambda (c) (equal (car c) "PUT"))
+                             bitbucket-mock-calls)))
+
+(ert-deftest gp-reviewers-test-save-puts-complete-list-on-bitbucket ()
+  "Save sends the desired end state -- kept reviewers plus new ticks --
+as one whole-list PUT on the PR."
+  (bitbucket-mock-with-service
+    (let ((pr (gp-reviewers-test--bitbucket-pr)))
       (with-temp-buffer
         (gp-reviewers-test--form
-         '((id . 7))
+         pr
          '((:id "{bob}" :name "Bob" :state pending))
          nil
          '(((uuid . "{carol}") (display_name . "Carol"))))
@@ -156,45 +175,46 @@ where it matters, not only at the keystroke."
                     :widget)
          t)
         (gp-reviewers-save))
-      (should (equal captured '("acme/web" 7 ("{bob}" "{carol}") ("{bob}")))))))
+      (let ((puts (gp-reviewers-test--puts)))
+        (should (= (length puts) 1))
+        (pcase-let ((`(,_method ,path ,_params ,data) (car puts)))
+          (should (equal path "/repositories/acme/web-frontend/pullrequests/180"))
+          (should (equal (alist-get 'reviewers data)
+                         [((uuid . "{bob}")) ((uuid . "{carol}"))])))))))
 
 (ert-deftest gp-reviewers-test-save-noops-when-unchanged ()
   "An unchanged selection must not fire an API call."
-  (let ((called nil))
-    (cl-letf (((symbol-function 'gp-set-pull-request-reviewers)
-               (lambda (&rest _) (setq called t)))
-              ((symbol-function 'gp-pr-full-name) (lambda (_) "acme/web"))
-              ((symbol-function 'gp-invalidate-pr-caches) #'ignore))
-      (with-temp-buffer
-        (gp-reviewers-test--form
-         '((id . 7)) '((:id "{bob}" :name "Bob" :state pending)) nil nil)
-        (gp-reviewers-save))
-      (should-not called))))
+  (bitbucket-mock-with-service
+    (with-temp-buffer
+      (gp-reviewers-test--form
+       (gp-reviewers-test--bitbucket-pr)
+       '((:id "{bob}" :name "Bob" :state pending)) nil nil)
+      (gp-reviewers-save))
+    (should-not bitbucket-mock-calls)))
 
 ;;;; Backend semantics --------------------------------------------------------
 
 (ert-deftest gp-reviewers-test-bitbucket-puts-whole-list-as-array ()
   "Bitbucket replaces the list, and an empty one must encode as [] not null."
-  (require 'bitbucket-api)
-  (let (captured)
-    (cl-letf (((symbol-function 'bitbucket-pull-request)
-               (lambda (&rest _) '((title . "Keep me"))))
-              ((symbol-function 'bitbucket-api-request)
-               (lambda (method path &optional _params data)
-                 (setq captured (list method path data)))))
-      (bitbucket-set-pull-request-reviewers "acme/web" 7 '("{a}" "{b}"))
-      (pcase-let ((`(,method ,path ,data) captured))
-        (should (equal method "PUT"))
-        (should (string-match-p "/pullrequests/7\\'" path))
-        ;; the title is preserved -- a PUT without it would blank it
-        (should (equal (alist-get 'title data) "Keep me"))
+  (bitbucket-mock-with-service
+    (let ((bitbucket-cache-ttl 0)
+          (title (alist-get 'title (gp-reviewers-test--bitbucket-pr))))
+      (bitbucket-set-pull-request-reviewers "acme/web-frontend" 180 '("{a}" "{b}"))
+      (pcase-let ((`(,_method ,path ,_params ,data) (car (last (gp-reviewers-test--puts)))))
+        (should (equal path "/repositories/acme/web-frontend/pullrequests/180"))
+        ;; the title is resent from the fetched PR -- a PUT without it
+        ;; would blank it
+        (should (stringp title))
+        (should (equal (alist-get 'title data) title))
         (should (equal (alist-get 'reviewers data)
                        [((uuid . "{a}")) ((uuid . "{b}"))])))
       ;; clearing everyone: a vector, so json-encode emits []
-      (bitbucket-set-pull-request-reviewers "acme/web" 7 nil)
-      (should (equal (json-encode
-                      (list (cons 'reviewers (alist-get 'reviewers (nth 2 captured)))))
-                     "{\"reviewers\":[]}")))))
+      (bitbucket-set-pull-request-reviewers "acme/web-frontend" 180 nil)
+      (let ((data (nth 3 (car (last (gp-reviewers-test--puts))))))
+        (should (equal (json-encode
+                        (list (cons 'reviewers (alist-get 'reviewers data))))
+                       "{\"reviewers\":[]}")))
+      (should (= (length (gp-reviewers-test--puts)) 2)))))
 
 (ert-deftest gp-reviewers-test-github-sends-only-the-delta ()
   "GitHub POSTs additions and DELETEs removals, leaving the rest alone."
@@ -205,10 +225,11 @@ where it matters, not only at the keystroke."
                  (push (list method path (alist-get 'reviewers data)) calls))))
       (github-set-pull-request-reviewers "acme/web" 7 '("alice" "carol")
                                          '("alice" "bob"))
-      (setq calls (nreverse calls))
-      ;; bob removed, carol added, alice untouched (never re-notified)
-      (should (equal (mapcar (lambda (c) (list (nth 0 c) (nth 2 c))) calls)
-                     '(("DELETE" ["bob"]) ("POST" ["carol"])))))))
+      ;; bob removed, carol added, alice untouched (never re-notified).
+      ;; The two requests are independent, so compare them as a set.
+      (should (= (length calls) 2))
+      (should (member '("DELETE" "/repos/acme/web/pulls/7/requested_reviewers" ["bob"]) calls))
+      (should (member '("POST" "/repos/acme/web/pulls/7/requested_reviewers" ["carol"]) calls)))))
 
 (ert-deftest gp-reviewers-test-github-skips-empty-delta ()
   "No change means no request at all."

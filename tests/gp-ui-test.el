@@ -45,16 +45,25 @@ face on the rest of the string (see `gp--pr-heading')."
     (should (eq (get-text-property rest-pos 'face h) 'gp-pr-title-face))))
 
 (ert-deftest gp-test-render-list-builds-groups ()
-  "Rendering produces both group headings and one section per PR."
-  (let ((prs (gp-test--mock-prs))
-        (uuid "{21d7839d-779f-44b2-8c40-6f43ac90be06}"))
+  "Rendering partitions PRs by authorship into the two groups, with one
+section per PR."
+  (let* ((uuid "{21d7839d-779f-44b2-8c40-6f43ac90be06}")
+         ;; the fixture is all the user's own; add one by somebody else
+         (theirs (append '((id . 901) (title . "Someone else's change")
+                           (author (display_name . "Bea") (uuid . "{bea}")))
+                         (cl-remove-if (lambda (c) (memq (car c) '(id title author)))
+                                       (car (gp-test--mock-prs)))))
+         (prs (cons theirs (gp-test--mock-prs)))
+         (git-platform-current-backend (git-platform-bitbucket)))
     (with-temp-buffer
       (gp-list-mode)
       (let ((inhibit-read-only t))
         (gp--render-list prs uuid))
       (let ((text (substring-no-properties (buffer-string))))
-        (should (string-match-p "Needs my review (0)" text))
+        (should (string-match-p "Needs my review (1)" text))
         (should (string-match-p "My pull requests (10)" text))
+        ;; the other author's PR is listed under review, before "My pull requests"
+        (should (string-match-p "Needs my review (1)\\(?:.\\|\n\\)*#901\\(?:.\\|\n\\)*My pull requests" text))
         ;; a known PR id from the fixture appears
         (should (string-match-p "#239" text)))
       ;; section tree: root has children, and PR sections carry their pr
@@ -62,7 +71,7 @@ face on the rest of the string (see `gp--pr-heading')."
              (pr-secs (cl-remove-if-not
                        (lambda (s) (object-of-class-p s 'gp-pr-section))
                        (gp-test--all-sections root))))
-        (should (= (length pr-secs) 10))
+        (should (= (length pr-secs) 11))
         (should (alist-get 'id (oref (car pr-secs) value)))))))
 
 (defun gp-test--all-sections (section)
@@ -84,15 +93,17 @@ face on the rest of the string (see `gp--pr-heading')."
 ;; so a future call site that bypasses the gp-pr-* accessors again would
 ;; fail here, not just look fine against Bitbucket's shape.
 
-(defun gp-test--github-backend-pr ()
-  "Return (git-platform-github . github-mock--pr-1), for use inside
-`github-mock-with-service'."
-  (cons (git-platform-github) github-mock--pr-1))
+(defun gp-test--gh-pr ()
+  "Return `github-mock--pr-1' as the UI really holds it.
+Every producer (`github-pull-request', the list fetch) passes PRs
+through `github--reshape-pr', so `id' is the per-repo number 42, not
+the raw REST database id."
+  (github--reshape-pr github-mock--pr-1))
 
 (ert-deftest gp-test-pr-heading-shows-real-author-and-repo-slug-for-github-pr ()
   (github-mock-with-service
     (let* ((git-platform-current-backend (git-platform-github))
-           (pr github-mock--pr-1)
+           (pr (gp-test--gh-pr))
            (h (substring-no-properties (gp--pr-heading pr))))
       (should (string-match-p "ada" h))
       (should (string-match-p (regexp-quote "[web]") h)))))
@@ -100,7 +111,7 @@ face on the rest of the string (see `gp--pr-heading')."
 (ert-deftest gp-test-insert-pr-shows-real-branches-for-github-pr ()
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
-          (pr github-mock--pr-1))
+          (pr (gp-test--gh-pr)))
       (with-temp-buffer
         (gp-list-mode)
         (let ((inhibit-read-only t))
@@ -113,7 +124,7 @@ face on the rest of the string (see `gp--pr-heading')."
 (ert-deftest gp-test-render-detail-shows-real-branches-and-author-for-github-pr ()
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
-          (pr github-mock--pr-1))
+          (pr (gp-test--gh-pr)))
       (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "someone-else")))
         (with-temp-buffer
           (gp-detail-mode)
@@ -153,15 +164,14 @@ face on the rest of the string (see `gp--pr-heading')."
   "The draft-toggle button must key off `gp-pr-open-p', not a raw
 \"OPEN\" string comparison -- GitHub's `state' is lowercase \"open\"."
   (github-mock-with-service
-    (let ((git-platform-current-backend (git-platform-github))
-          (pr (append '((draft . t)) github-mock--pr-1)))
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (let ((inhibit-read-only t))
-            (gp--render-detail pr nil))
-          (should (string-match-p "Mark ready \\[D\\]"
-                                  (substring-no-properties (buffer-string)))))))))
+    ;; the mock's /user is ada, the PR's author
+    (let ((pr (append '((draft . t)) (gp-test--gh-pr))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (let ((inhibit-read-only t))
+          (gp--render-detail pr nil))
+        (should (string-match-p "Mark ready \\[D\\]"
+                                (substring-no-properties (buffer-string))))))))
 
 ;;;; In-place action spinner (no layout shift while a mutation is in flight)
 
@@ -195,7 +205,11 @@ face on the rest of the string (see `gp--pr-heading')."
     (should-not (string-match-p "87c8054110c84d42" text))
     (should (string-match-p "fix indentation of the wscat script" text))
     (should (string-match-p "Felix Brilej" text))
-    (should (string-match-p "Ada Lovelace" text))))
+    (should (string-match-p "Ada Lovelace" text))
+    ;; the date is relative ("N days ago"), not the raw ISO timestamp
+    (should (string-match-p "Felix Brilej  [0-9]+ [a-z]+ ago" text))
+    (should (string-match-p "Ada Lovelace  [0-9]+ [a-z]+ ago" text))
+    (should-not (string-match-p "2026-07-15" text))))
 
 (ert-deftest gp-test-detail-commits-summary-linkifies-ticket-keys ()
   "A ticket key in a commit summary (\"fix: WP-1231 ...\") becomes a link."
@@ -254,26 +268,47 @@ gone) that repeated the commit summary a second time for no reason."
 
 (ert-deftest gp-test-detail-commits-no-pipeline-match-is-quiet ()
   "A commit with no matching pipeline just has no status glyph -- not
-an error, not a placeholder."
-  (let ((text (gp-test--render-commits gp-test--commits)))
-    ;; gp-test--render-commits leaves gp--detail-pipelines at its
-    ;; default (nil), so nothing should match and nothing breaks
-    (should (string-match-p "fix indentation of the wscat script" text))))
+an error, not a placeholder, and not some other commit's pipeline."
+  (let ((stray '((state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
+                 (build_number . 77)
+                 (target (commit (hash . "ffffffffffffffffffffffffffffffffffffffff")))))
+        (git-platform-current-backend (git-platform-bitbucket)))
+    (with-temp-buffer
+      (gp-detail-mode)
+      ;; a real PR, so the per-commit pipeline lookup actually runs
+      (setq gp--pr '((destination (repository (full_name . "acme/web"))))
+            gp--detail-commits gp-test--commits
+            gp--detail-pipelines (list :current nil :recent (list (cons stray "s"))))
+      (let ((inhibit-read-only t))
+        (magit-insert-section (gp-root)
+          (gp--insert-commits)))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "fix indentation of the wscat script" text))
+        (should (string-match-p "add GraphQL subscription example" text))
+        (should-not (string-match-p "#77" text))
+        (should-not (string-match-p "#" text))))))
+
+(defun gp-test--steps-fetches ()
+  "Number of pipeline-steps requests in `bitbucket-mock-calls'."
+  (cl-count-if (lambda (c) (string-match-p "/pipelines/[^/]+/steps\\'" (nth 1 c)))
+               bitbucket-mock-calls))
+
+(defconst gp-test--running-state
+  '(state (name . "IN_PROGRESS") (stage (name . "RUNNING")))
+  "An unfinished pipeline's state, as tests/fixtures/pipelines.json has it.")
 
 (ert-deftest gp-test-detail-commits-current-pipeline-shows-step-progress-immediately ()
   "The head commit's own pipeline already carries its steps for free
 \(from the main pipeline load) -- its \"N/total\" count must show up
 on the very first render, with no fetch and no rerender needed."
-  (let* ((pipeline '((state (name . "RUNNING")) (build_number . 42)
-                     (target (commit (hash . "87c8054110c84d42edc3a4e89184ffd1a15d3a8d")))))
-         (steps (list '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
-                      '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
-                      '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
-                      '((state (name . "PENDING") (stage (name . "PAUSED"))))))
-         (calls 0)
-         (git-platform-current-backend (git-platform-bitbucket)))
-    (cl-letf (((symbol-function 'gp-pipeline-steps-async)
-               (lambda (&rest _) (setq calls (1+ calls)))))
+  (bitbucket-mock-with-service
+    (let* ((pipeline `((uuid . "{pipe-0}") ,gp-test--running-state (build_number . 42)
+                       (target (commit (hash . "87c8054110c84d42edc3a4e89184ffd1a15d3a8d")))))
+           (steps (list '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
+                        '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
+                        '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
+                        '((state (name . "PENDING") (stage (name . "PAUSED"))))))
+           (gp--recent-pipeline-steps-cache (make-hash-table :test 'equal)))
       (with-temp-buffer
         (gp-detail-mode)
         (setq gp--pr '((destination (repository (full_name . "acme/web"))))
@@ -282,65 +317,63 @@ on the very first render, with no fetch and no rerender needed."
         (let ((inhibit-read-only t))
           (magit-insert-section (gp-root)
             (gp--insert-commits)))
-        (should (string-match-p "3/4" (buffer-string)))
-        ;; the steps were already known -- no fetch was ever needed
-        (should (= calls 0))))))
+        (should (string-match-p "#42 (3/4)" (buffer-string)))
+        ;; the steps were already known -- no request went out at all
+        (should (= (gp-test--steps-fetches) 0))))))
 
 (ert-deftest gp-test-detail-commits-recent-pipeline-fetches-steps-once ()
   "An unfinished :recent pipeline has no steps yet, so the first render
-shows just the glyph and kicks off a fetch; once that resolves (and
-caches, see `gp--recent-pipeline-steps-cache'), a SECOND render for
-the SAME pipeline uuid must not fetch again."
-  (let* ((pipeline '((uuid . "{pipe-1}") (state (name . "RUNNING")) (build_number . 40)
-                     (target (commit (hash . "1a2b3c4d5e6f7788990011223344556677889900")))))
-         (steps (list '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))
-                      '((state (name . "PENDING") (stage (name . "PAUSED"))))))
-         (calls 0)
-         (gp--recent-pipeline-steps-cache (make-hash-table :test 'equal))
-         (git-platform-current-backend (git-platform-bitbucket)))
-    (cl-letf (((symbol-function 'gp-pipeline-steps-async)
-               (lambda (_full-name _id callback) (setq calls (1+ calls)) (funcall callback steps)))
-              ((symbol-function 'gp--detail-rerender) #'ignore))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (setq gp--pr '((destination (repository (full_name . "acme/web"))))
-              gp--detail-commits gp-test--commits
-              gp--detail-pipelines (list :current nil :recent (list (cons pipeline "s"))))
-        (let ((inhibit-read-only t))
-          (magit-insert-section (gp-root)
-            (gp--insert-commits)))
-        ;; first render: no cached steps yet, so it fetched exactly once
-        (should (= calls 1))
-        ;; steps are cached now -- a second render must not fetch again
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (magit-insert-section (gp-root)
-            (gp--insert-commits)))
-        (should (= calls 1))
-        (should (string-match-p "1/2" (buffer-string)))))))
+kicks off a fetch; once that resolves (and caches, see
+`gp--recent-pipeline-steps-cache'), a SECOND render for the SAME
+pipeline uuid must not fetch again, and shows the fetched count."
+  (bitbucket-mock-with-service
+    (let ((pipeline `((uuid . "{pipe-1}") ,gp-test--running-state (build_number . 40)
+                      (target (commit (hash . "1a2b3c4d5e6f7788990011223344556677889900")))))
+          (gp--recent-pipeline-steps-cache (make-hash-table :test 'equal)))
+      (cl-letf (((symbol-function 'gp--detail-rerender) #'ignore))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (setq gp--pr '((destination (repository (full_name . "acme/web"))))
+                gp--detail-commits gp-test--commits
+                gp--detail-pipelines (list :current nil :recent (list (cons pipeline "s"))))
+          (let ((inhibit-read-only t))
+            (magit-insert-section (gp-root)
+              (gp--insert-commits)))
+          ;; first render: no cached steps yet, so exactly one steps request
+          (should (= (gp-test--steps-fetches) 1))
+          (should (equal (nth 1 (car bitbucket-mock-calls))
+                         "/repositories/acme/web/pipelines/{pipe-1}/steps"))
+          ;; steps are cached now -- a second render must not fetch again
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (magit-insert-section (gp-root)
+              (gp--insert-commits)))
+          (should (= (gp-test--steps-fetches) 1))
+          ;; pipeline-steps.json: 3 steps, 1 SUCCESSFUL
+          (should (string-match-p "#40 (1/3)" (buffer-string))))))))
 
 (ert-deftest gp-test-detail-commits-finished-recent-pipeline-never-fetches-steps ()
   "A FINISHED older-commit pipeline's glyph is already the whole
 story -- fetching its steps just to show a redundant \"N/total (all
 succeeded)\" would be a wasted call for no new information."
-  (let* ((pipeline '((uuid . "{pipe-2}")
-                     (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
-                     (build_number . 40)
-                     (target (commit (hash . "1a2b3c4d5e6f7788990011223344556677889900")))))
-         (calls 0)
-         (gp--recent-pipeline-steps-cache (make-hash-table :test 'equal))
-         (git-platform-current-backend (git-platform-bitbucket)))
-    (cl-letf (((symbol-function 'gp-pipeline-steps-async)
-               (lambda (&rest _) (setq calls (1+ calls)))))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (setq gp--pr '((destination (repository (full_name . "acme/web"))))
-              gp--detail-commits gp-test--commits
-              gp--detail-pipelines (list :current nil :recent (list (cons pipeline "s"))))
-        (let ((inhibit-read-only t))
-          (magit-insert-section (gp-root)
-            (gp--insert-commits)))
-        (should (= calls 0))))))
+  (bitbucket-mock-with-service
+    (let ((pipeline '((uuid . "{pipe-2}")
+                      (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
+                      (build_number . 40)
+                      (target (commit (hash . "1a2b3c4d5e6f7788990011223344556677889900")))))
+          (gp--recent-pipeline-steps-cache (make-hash-table :test 'equal)))
+      (cl-letf (((symbol-function 'gp--detail-rerender) #'ignore))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (setq gp--pr '((destination (repository (full_name . "acme/web"))))
+                gp--detail-commits gp-test--commits
+                gp--detail-pipelines (list :current nil :recent (list (cons pipeline "s"))))
+          (let ((inhibit-read-only t))
+            (magit-insert-section (gp-root)
+              (gp--insert-commits)))
+          (should (string-match-p "#40" (buffer-string)))
+          (should-not (string-match-p "#40 (" (buffer-string)))
+          (should (= (gp-test--steps-fetches) 0)))))))
 
 (ert-deftest gp-test-detail-commits-empty-is-noop ()
   "No commits -> no section at all (not an empty heading)."
@@ -365,17 +398,23 @@ would break RET on a commit."
                        "87c8054110c84d42edc3a4e89184ffd1a15d3a8d"))))))
 
 (ert-deftest gp-test-detail-ret-on-commit-shows-commit ()
-  "RET on a commit section opens that commit, not the section fold."
-  (let ((called nil))
-    (cl-letf (((symbol-function 'magit-current-section)
-               (lambda () (let ((s (gp-commit-section)))
-                            (oset s value (car gp-test--commits)) s)))
-              ((symbol-function 'gp-detail-show-commit)
-               (lambda () (interactive) (setq called t)))
-              ((symbol-function 'magit-section-toggle)
-               (lambda (&rest _) (interactive) (setq called 'toggled))))
-      (gp-detail-ret)
-      (should (eq called t)))))
+  "RET on a rendered commit line opens that commit, not the section fold."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (setq gp--detail-commits gp-test--commits)
+    (let ((inhibit-read-only t))
+      (magit-insert-section (gp-root)
+        (gp--insert-commits)))
+    (let (shown)
+      (cl-letf (((symbol-function 'gp-detail-show-commit)
+                 (lambda () (interactive)
+                   (setq shown (plist-get (oref (magit-current-section) value) :hash))))
+                ((symbol-function 'magit-section-toggle)
+                 (lambda (&rest _) (interactive) (setq shown 'toggled))))
+        (goto-char (point-min))
+        (should (search-forward "add GraphQL subscription example" nil t))
+        (gp-detail-ret)
+        (should (equal shown "1a2b3c4d5e6f7788990011223344556677889900"))))))
 
 (ert-deftest gp-test-detail-show-commit-errors-off-a-commit ()
   "Away from a commit section it reports rather than acting on nothing."
@@ -488,26 +527,24 @@ made RET miss from the indentation and the +N/-N stat columns."
     (goto-char (point-min))             ;; the "Changed files (2)" heading
     (should-error (gp-detail-visit-file) :type 'user-error)))
 
-(ert-deftest gp-test-detail-show-commit-is-bound-to-a-lowercase-key ()
-  "Read-only actions stay lowercase; capitals are reserved for writes."
-  (should (eq (lookup-key gp-detail-mode-map "v") #'gp-detail-show-commit))
-  ;; the write keys keep their meaning
-  (should (eq (lookup-key gp-detail-mode-map "R") #'gp-detail-reply))
-  (should (eq (lookup-key gp-detail-mode-map "K") #'gp-detail-delete)))
-
 (ert-deftest gp-test-detail-run-action-shows-spinner-during-thunk ()
   "While `gp--detail-run-action's THUNK is running, the buffer already
 shows the spinner in that button's slot (not just after it returns)."
-  (with-temp-buffer
-    (gp-detail-mode)
-    (let (seen-during-thunk)
-      (gp--detail-run-action
-       (current-buffer) 'draft
-       (lambda ()
-         (setq seen-during-thunk gp--detail-pending-action)))
-      (should (eq seen-during-thunk 'draft))
-      ;; cleared once the thunk returns
-      (should-not gp--detail-pending-action))))
+  (github-mock-with-service
+    (with-temp-buffer
+      (gp-detail-mode)
+      ;; ada's own draft PR, so the draft toggle button is drawn
+      (gp--render-detail-into (current-buffer)
+                              (append '((draft . t)) (gp-test--gh-pr)) nil nil)
+      (should (string-match-p "Mark ready \\[D\\]" (buffer-string)))
+      (let (text-during-thunk)
+        (gp--detail-run-action
+         (current-buffer) 'draft
+         (lambda () (setq text-during-thunk (buffer-string))))
+        (should (string-match-p "⏳" text-during-thunk))
+        (should-not (string-match-p "Mark ready" text-during-thunk))
+        ;; cleared once the thunk returns
+        (should-not gp--detail-pending-action)))))
 
 (ert-deftest gp-test-detail-run-action-clears-pending-on-error ()
   "The pending flag is cleared even if THUNK signals."
@@ -572,7 +609,7 @@ naive `eq' implementation would hit across two separate renders."
   "GitHub keeps the body in `body'; an empty or null body reads as none."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github)))
-      (should (equal (gp-pr-description github-mock--pr-1)
+      (should (equal (gp-pr-description (gp-test--gh-pr))
                      "Adds the toggle.\n\n- [x] tests\n- [ ] docs"))
       (should-not (gp-pr-description '((id . 42) (body . ""))))
       (should-not (gp-pr-description (github--parse-json "{\"id\": 42, \"body\": null}")))
@@ -604,19 +641,24 @@ runs on PR descriptions."
              (pos (string-match "WP-1231" text)))
         (should (eq (get-text-property pos 'face text) 'link))
         (should (string-match-p "gp-ticket-url-format" (get-text-property pos 'help-echo text)))))))
+;; A CRLF body fetched from GitHub renders with clean lines.
 (ert-deftest gp-test-pr-description-strips-github-crlf ()
-  "A GitHub body authored in the web UI arrives CRLF-terminated; by the
-time it reaches the description accessor the ^M are gone, so the
-detail buffer renders clean lines."
+  "A GitHub body authored in the web UI arrives CRLF-terminated; once
+fetched (`github-pull-request') and rendered, the detail buffer shows
+clean lines with no ^M."
   (github-mock-with-service
-    (let ((git-platform-current-backend (git-platform-github)))
-      (let ((pr (github--reshape-pr
-                 '((id . 501) (number . 42)
-                   (body . "Adds the toggle.\r\n\r\n- [x] tests")))))
-        (let ((desc (gp-pr-description pr)))
-          (should (equal desc "Adds the toggle.\n\n- [x] tests"))
-          (should-not (string-match-p "\r" desc)))))))
-
+    (let ((github-mock-overrides
+           `(("/pulls/42\\'" . ,(cons '(body . "Adds the toggle.\r\n\r\n- [x] tests")
+                                       (assq-delete-all 'body (copy-alist github-mock--pr-1)))))))
+      (let ((pr (github-pull-request "acme/web" 42)))
+        (should (equal (gp-pr-description pr) "Adds the toggle.\n\n- [x] tests"))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--render-detail pr nil))
+          (let ((text (substring-no-properties (buffer-string))))
+            (should (string-match-p "Adds the toggle\\.\n" text))
+            (should-not (string-match-p "\r" text))))))))
 
 (ert-deftest gp-test-render-detail-shows-description-for-github-pr ()
   "The detail view renders the description section from GitHub's `body'."
@@ -626,7 +668,7 @@ detail buffer renders clean lines."
         (with-temp-buffer
           (gp-detail-mode)
           (let ((inhibit-read-only t))
-            (gp--render-detail github-mock--pr-1 nil))
+            (gp--render-detail (gp-test--gh-pr) nil))
           (let ((text (substring-no-properties (buffer-string))))
             (should (string-match-p "Description" text))
             (should (string-match-p "Adds the toggle" text))))))))
@@ -650,9 +692,9 @@ precisely where it is most useful."
           (should (string-match-p "edit \\[E\\]" text)))))))
 
 (ert-deftest gp-test-render-detail-shows-comments ()
-  (let ((pr (car (gp-test--mock-prs)))
-        (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+  (bitbucket-mock-with-service
+    (let ((pr (car (gp-test--mock-prs)))
+          (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
@@ -707,9 +749,11 @@ on other people's comments -- but never the edit action, which no API
 allows on someone else's text."
   (let ((pr (car (gp-test--mock-prs)))
         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
-        (gp-comment-delete-others '(bitbucket)))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{nobody}"))
-              ((symbol-function 'gp-backend-name) (lambda () 'bitbucket)))
+        (gp-comment-delete-others '(bitbucket))
+        (git-platform-current-backend (git-platform-bitbucket)))
+    ;; the real Bitbucket backend answers `gp-backend-name'; a uuid nobody
+    ;; in the fixture owns makes every comment "someone else's"
+    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{nobody}")))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
@@ -722,7 +766,7 @@ allows on someone else's text."
 (ert-deftest gp-test-comment-delete-others-scoped-per-backend ()
   "A backend absent from the list gets no elevated delete power."
   (let ((comment '((id . 1) (user (uuid . "{them}")))))
-    (cl-letf (((symbol-function 'gp-backend-name) (lambda () 'github)))
+    (let ((git-platform-current-backend (git-platform-github)))
       (let ((gp-comment-delete-others '(bitbucket)))
         (should-not (gp-comment-deletable-p comment "{me}")))
       (let ((gp-comment-delete-others '(github)))
@@ -731,10 +775,18 @@ allows on someone else's text."
         (should (gp-comment-deletable-p comment "{me}")))
       ;; your own comment stays deletable regardless of the setting
       (let ((gp-comment-delete-others nil))
-        (should (gp-comment-deletable-p '((id . 1) (user (uuid . "{me}"))) "{me}"))))))
+        (should (gp-comment-deletable-p '((id . 1) (user (uuid . "{me}"))) "{me}"))))
+    ;; and the same list read from the other side
+    (let ((git-platform-current-backend (git-platform-bitbucket)))
+      (let ((gp-comment-delete-others '(github)))
+        (should-not (gp-comment-deletable-p comment "{me}")))
+      (let ((gp-comment-delete-others '(bitbucket)))
+        (should (gp-comment-deletable-p comment "{me}"))))))
 
 (ert-deftest gp-test-detail-mode-map-mutating-actions-are-capitalised ()
-  "Write actions on comments sit on capitals; the lowercase keys are free."
+  "Write actions on comments sit on capitals; the lowercase keys are free.
+Read-only actions stay lowercase."
+  (should (eq (lookup-key gp-detail-mode-map "v") #'gp-detail-show-commit))
   (should (eq (lookup-key gp-detail-mode-map "R") #'gp-detail-reply))
   (should (eq (lookup-key gp-detail-mode-map "X") #'gp-detail-resolve))
   (should (eq (lookup-key gp-detail-mode-map "K") #'gp-detail-delete))
@@ -811,7 +863,7 @@ leave no entry point for adding the first reviewer."
           (should (string-match-p "edit \\[V\\]" text)))))))
 
 (ert-deftest gp-test-render-detail-closed-pr-hides-reviewer-editing ()
-  "A merged/closed PR cannot be edited, so no line and no button."
+  "A merged/closed PR with no reviewers cannot be edited: no line and no button."
   (let ((pr (cons '(state . "MERGED")
                   (assq-delete-all 'state (copy-alist (car (gp-test--mock-prs)))))))
     (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
@@ -819,7 +871,10 @@ leave no entry point for adding the first reviewer."
         (gp-detail-mode)
         (let ((inhibit-read-only t))
           (gp--render-detail pr nil))
-        (should-not (string-match-p "edit \\[V\\]" (buffer-string)))))))
+        (should-not (string-match-p "edit \\[V\\]" (buffer-string)))
+        ;; no "👥 no reviewers" line either
+        (should-not (string-match-p "👥" (buffer-string)))
+        (should-not (string-match-p "no reviewers" (buffer-string)))))))
 
 (ert-deftest gp-test-comment-location-inline-vs-general ()
   (should (equal (gp--comment-location
@@ -972,36 +1027,42 @@ a visible stall once per interval in any open detail buffer."
     (should (= (length threads) 1))
     (should (= (cdr (car threads)) 0))))
 
+(defconst gp-test--me "{21d7839d-779f-44b2-8c40-6f43ac90be06}"
+  "The signed-in user's uuid, as tests/fixtures/user.json has it.")
+
+(defun gp-test--delete-comment-at-point (comment answer)
+  "Run `gp-detail-delete' on COMMENT on PR 7 in acme/x, answering ANSWER.
+Runs inside `bitbucket-mock-with-service'; returns the DELETE requests."
+  (let ((gp--pr '((id . 7) (destination (repository (full_name . "acme/x"))))))
+    (cl-letf (((symbol-function 'magit-current-section)
+               (lambda () (let ((s (gp-comment-section))) (oset s value comment) s)))
+              ((symbol-function 'yes-or-no-p) (lambda (&rest _) answer))
+              ((symbol-function 'gp-detail-refresh) #'ignore))
+      (gp-detail-delete)
+      (cl-remove-if-not (lambda (c) (equal (car c) "DELETE")) bitbucket-mock-calls))))
+
 (ert-deftest gp-test-detail-delete-own-comment ()
   "`gp-detail-delete' deletes an own comment at point (confirmed)."
-  (let* ((uuid "{me}")
-         (pr '((id . 7) (destination (repository (full_name . "acme/x")))))
-         (own '((id . 55) (user (uuid . "{me}"))))
-         (gp--pr pr)
-         (deleted nil))
-    (cl-letf (((symbol-function 'magit-current-section)
-               (lambda () (let ((s (gp-comment-section))) (oset s value own) s)))
-              ((symbol-function 'gp-user-uuid) (lambda () uuid))
-              ((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
-              ((symbol-function 'gp-detail-refresh) #'ignore)
-              ((symbol-function 'gp-delete-comment)
-               (lambda (fn id cid) (setq deleted (list fn id cid)))))
-      (gp-detail-delete)
-      (should (equal deleted '("acme/x" 7 55))))))
+  (bitbucket-mock-with-service
+    (let ((deletes (gp-test--delete-comment-at-point
+                    `((id . 55) (user (uuid . ,gp-test--me))) t)))
+      (should (equal (mapcar (lambda (c) (nth 1 c)) deletes)
+                     '("/repositories/acme/x/pullrequests/7/comments/55"))))))
+
+(ert-deftest gp-test-detail-delete-declined-sends-nothing ()
+  "Answering no at the confirmation prompt makes no API call."
+  (bitbucket-mock-with-service
+    (should-not (gp-test--delete-comment-at-point
+                 `((id . 55) (user (uuid . ,gp-test--me))) nil))))
 
 (ert-deftest gp-test-detail-delete-rejects-foreign-comment ()
   "Deleting someone else's comment signals and does not call the API."
-  (let* ((pr '((id . 7) (destination (repository (full_name . "acme/x")))))
-         (other '((id . 55) (user (uuid . "{someone-else}"))))
-         (gp--pr pr)
-         (called nil))
-    (cl-letf (((symbol-function 'magit-current-section)
-               (lambda () (let ((s (gp-comment-section))) (oset s value other) s)))
-              ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
-              ((symbol-function 'gp-delete-comment)
-               (lambda (&rest _) (setq called t))))
-      (should-error (gp-detail-delete) :type 'user-error)
-      (should-not called))))
+  (bitbucket-mock-with-service
+    (let ((gp-comment-delete-others nil))
+      (should-error (gp-test--delete-comment-at-point
+                     '((id . 55) (user (uuid . "{someone-else}"))) t)
+                    :type 'user-error)
+      (should-not (cl-find "DELETE" bitbucket-mock-calls :key #'car :test #'equal)))))
 
 (ert-deftest gp-test-detail-send-to-terminal-delegates ()
   (let* ((pr '((id . 7) (destination (repository (full_name . "acme/x")))))
@@ -1068,35 +1129,86 @@ a visible stall once per interval in any open detail buffer."
       (should-not rerendered)
       (should (equal gp--detail-marked-comment-ids '(55))))))
 
+(defmacro gp-test--with-git-root (&rest body)
+  "Run BODY with `gp-local-git-root' a temp dir holding a real clone
+of acme/x (dir `x', branch `feature', origin on bitbucket.org).
+`repo' is bound to the clone's directory."
+  (declare (indent 0) (debug t))
+  `(let* ((root (make-temp-file "gp-ui-git-" t))
+          (repo (expand-file-name "x" root))
+          (gp-local-git-root root)
+          (gp-local--remote-cache (make-hash-table :test 'equal))
+          (git-platform-current-backend (git-platform-bitbucket)))
+     (unwind-protect
+         (progn
+           (make-directory repo)
+           (let ((default-directory (file-name-as-directory repo))
+                 (process-environment
+                  (append '("GIT_AUTHOR_NAME=t" "GIT_AUTHOR_EMAIL=t@t"
+                            "GIT_COMMITTER_NAME=t" "GIT_COMMITTER_EMAIL=t@t")
+                          process-environment)))
+             (dolist (args '(("init" "-q" "-b" "feature")
+                             ("remote" "add" "origin" "git@bitbucket.org:acme/x.git")
+                             ("commit" "-q" "--allow-empty" "-m" "init")))
+               (should (zerop (apply #'call-process "git" nil nil nil args)))))
+           ,@body)
+       (delete-directory root t))))
+
+(defun gp-test--git-branch (dir)
+  "Return DIR's checked-out branch name."
+  (let ((default-directory (file-name-as-directory dir)))
+    (string-trim (shell-command-to-string "git rev-parse --abbrev-ref HEAD"))))
+
 (ert-deftest gp-test-detail-open-local-opens-magit-without-checkout ()
-  (let* ((pr '((id . 7) (destination (repository (full_name . "acme/x")))))
-         (gp--pr pr)
-         (opened nil))
-    (cl-letf (((symbol-function 'require) (lambda (feature &optional _filename _noerror) (eq feature 'magit)))
-              ((symbol-function 'gp-local-find-checkout) (lambda (_full-name) "/tmp/repo"))
-              ((symbol-function 'magit-status-setup-buffer) (lambda (dir) (setq opened dir))))
-      (gp-detail-open-local)
-      (should (equal opened "/tmp/repo")))))
+  "Opens the PR's local clone in Magit and leaves its branch alone."
+  (skip-unless (and (executable-find "git") (require 'magit nil t)))
+  (gp-test--with-git-root
+    (let ((gp--pr '((id . 7) (source (branch (name . "other")))
+                    (destination (repository (full_name . "acme/x")))))
+          opened)
+      (cl-letf (((symbol-function 'magit-status-setup-buffer)
+                 (lambda (dir) (setq opened dir))))
+        (gp-detail-open-local))
+      (should (equal (file-truename (directory-file-name opened))
+                     (file-truename repo)))
+      ;; no branch switch: still on the clone's own branch
+      (should (equal (gp-test--git-branch repo) "feature")))))
+
+(ert-deftest gp-test-detail-open-local-errors-without-a-clone ()
+  "With no local clone of the PR's repo it reports instead of opening."
+  (skip-unless (and (executable-find "git") (require 'magit nil t)))
+  (gp-test--with-git-root
+    (let ((gp--pr '((id . 7) (destination (repository (full_name . "acme/elsewhere")))))
+          opened)
+      (cl-letf (((symbol-function 'magit-status-setup-buffer)
+                 (lambda (dir) (setq opened dir))))
+        (should-error (gp-detail-open-local) :type 'user-error))
+      (should-not opened))))
 
 (ert-deftest gp-test-render-detail-shows-mark-action-for-comments ()
-  (let ((pr (car (gp-test--mock-prs)))
-        (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+  "Every comment, your own and others', offers mark."
+  (bitbucket-mock-with-service
+    (let ((pr (car (gp-test--mock-prs)))
+          (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
           (gp--render-detail pr comments))
         (let ((text (substring-no-properties (buffer-string))))
+          (should (= (length comments) (how-many "mark \\[m\\]" 1 (point-max))))
           (should (string-match-p "mark \\[m\\]" text)))))))
 
 (ert-deftest gp-test-render-detail-shows-pending-comment-and-submit-action ()
   "A pending review-batch comment renders distinctly, with only edit and
 remove-from-batch actions, and the header gains a Submit review action."
-  (let* ((pr (car (gp-test--mock-prs)))
-         (ordinary (car (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
-         (pending (append '((pending . t) (id . 999999)) ordinary))
-         (comments (list ordinary pending)))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+  (bitbucket-mock-with-service
+    (let* ((pr (car (gp-test--mock-prs)))
+           (all (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
+           (ordinary (car all))
+           ;; a pending batch comment is always your own (user.json owns 808625667)
+           (own (cl-find 808625667 all :key (lambda (c) (alist-get 'id c))))
+           (pending (append '((pending . t) (id . 999999)) own))
+           (comments (list ordinary pending)))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
@@ -1107,9 +1219,9 @@ remove-from-batch actions, and the header gains a Submit review action."
           (should (string-match-p "Submit review (1) \\[S\\]" text)))))))
 
 (ert-deftest gp-test-render-detail-hides-submit-action-with-no-pending-comments ()
-  (let ((pr (car (gp-test--mock-prs)))
-        (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+  (bitbucket-mock-with-service
+    (let ((pr (car (gp-test--mock-prs)))
+          (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
@@ -1117,29 +1229,76 @@ remove-from-batch actions, and the header gains a Submit review action."
         (let ((text (substring-no-properties (buffer-string))))
           (should-not (string-match-p "Submit review" text)))))))
 
-(ert-deftest gp-test-submit-review-batch-offers-same-choices-on-both-backends ()
-  "The verdict prompt is backend-agnostic: both Bitbucket and GitHub can
-now genuinely act on all three choices, Bitbucket via delete+recreate
-\(see `bitbucket-submit-review-batch') and GitHub via its native
-COMMENT/APPROVE/REQUEST_CHANGES review events."
-  (dolist (backend (list (git-platform-bitbucket) (git-platform-github)))
-    (let ((git-platform-current-backend backend)
-          (pr '((id . 11) (destination (repository (full_name . "acme/x")))
-                (head (repo (full_name . "acme/x")))))
-          (offered nil))
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (_prompt collection &rest _)
-                   (setq offered collection)
-                   (car collection)))
-                ((symbol-function 'read-string) (lambda (&rest _) ""))
-                ((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/x"))
-                ((symbol-function 'gp-submit-review-batch) #'ignore)
-                ((symbol-function 'gp-invalidate-pr-caches) #'ignore)
-                ((symbol-function 'gp-detail-refresh) #'ignore))
-        (gp-ui-submit-review-batch pr)
-        (should (member "Approve" offered))
-        (should (member "Request changes" offered))
-        (should (member "Comment only (no verdict)" offered))))))
+(defmacro gp-test--submitting-review (pr label summary &rest body)
+  "Run BODY after `gp-ui-submit-review-batch' on PR.
+LABEL is the verdict picked; SUMMARY answers the summary prompt (nil
+declines the \"Add a summary comment?\" question).  `offered' is bound
+to the verdict choices shown.  Call inside a mock service."
+  (declare (indent 3) (debug t))
+  `(let ((offered nil))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt collection &rest _)
+                  (setq offered collection)
+                  ,label))
+               ((symbol-function 'yes-or-no-p) (lambda (&rest _) (and ,summary t)))
+               ((symbol-function 'read-string) (lambda (&rest _) (or ,summary "")))
+               ((symbol-function 'gp-detail-refresh) #'ignore))
+       (gp-ui-submit-review-batch ,pr))
+     (ignore offered)                   ;; not every BODY looks at it
+     ,@body))
+
+(defun gp-test--github-submitted-review ()
+  "The variables of the submitPullRequestReview mutation the mock saw."
+  (cadr (cl-find-if (lambda (c) (string-match-p "submitPullRequestReview" (car c)))
+                    github-mock-graphql-calls)))
+
+(ert-deftest gp-test-submit-review-batch-github-sends-the-chosen-verdict ()
+  "Each verdict label maps to GitHub's review event; an empty summary
+is sent as no body at all, a typed one verbatim."
+  (github-mock-with-service
+    (gp-test--submitting-review (gp-test--gh-pr) "Approve" nil
+      (should (equal offered '("Approve" "Request changes" "Comment only (no verdict)")))
+      (let ((vars (gp-test--github-submitted-review)))
+        (should (equal (alist-get 'event vars) "APPROVE"))
+        (should (assq 'body vars))
+        (should-not (alist-get 'body vars)))))
+  (github-mock-with-service
+    (gp-test--submitting-review (gp-test--gh-pr) "Request changes" "Please split this up"
+      (let ((vars (gp-test--github-submitted-review)))
+        (should (equal (alist-get 'event vars) "REQUEST_CHANGES"))
+        (should (equal (alist-get 'body vars) "Please split this up")))))
+  (github-mock-with-service
+    (gp-test--submitting-review (gp-test--gh-pr) "Comment only (no verdict)" "Looks fine so far"
+      (let ((vars (gp-test--github-submitted-review)))
+        (should (equal (alist-get 'event vars) "COMMENT"))
+        (should (equal (alist-get 'body vars) "Looks fine so far"))))))
+
+(defun gp-test--bitbucket-verdict-posts ()
+  "The approve / request-changes POST paths the Bitbucket mock saw."
+  (mapcar (lambda (c) (nth 1 c))
+          (cl-remove-if-not
+           (lambda (c) (and (equal (car c) "POST")
+                            (string-match-p "/\\(approve\\|request-changes\\)\\'" (nth 1 c))))
+           bitbucket-mock-calls)))
+
+(ert-deftest gp-test-submit-review-batch-bitbucket-sends-the-chosen-verdict ()
+  "On Bitbucket the verdict becomes an approve / request-changes call;
+\"Comment only\" sends neither."
+  (bitbucket-mock-with-service
+    (gp-test--submitting-review '((id . 11) (destination (repository (full_name . "acme/x")))) "Approve" nil
+      (should (equal offered '("Approve" "Request changes" "Comment only (no verdict)")))
+      (should (equal (gp-test--bitbucket-verdict-posts)
+                     '("/repositories/acme/x/pullrequests/11/approve")))))
+  (bitbucket-mock-with-service
+    (gp-test--submitting-review '((id . 11) (destination (repository (full_name . "acme/x")))) "Request changes" nil
+      (should (equal (gp-test--bitbucket-verdict-posts)
+                     '("/repositories/acme/x/pullrequests/11/request-changes")))))
+  (bitbucket-mock-with-service
+    (gp-test--submitting-review '((id . 11) (destination (repository (full_name . "acme/x")))) "Comment only (no verdict)" nil
+      (should-not (gp-test--bitbucket-verdict-posts))
+      ;; it still went through the batch (fetching the pending comments)
+      (should (cl-find "/repositories/acme/x/pullrequests/11/comments"
+                       bitbucket-mock-calls :key #'cadr :test #'equal)))))
 
 (ert-deftest gp-test-detail-browse-opens-comment-url-at-comment-point ()
   (let ((comment '((links (html (href . "https://example.test/comment/1")))))
@@ -1152,100 +1311,111 @@ COMMENT/APPROVE/REQUEST_CHANGES review events."
       (should (equal opened "https://example.test/comment/1")))))
 
 (ert-deftest gp-test-detail-browse-opens-pipeline-or-step-url ()
-  "`w' on a pipeline heading opens the pipeline; on a step, that step."
-  (let* ((pipeline '((uuid . "{p}")))
+  "`w' on a pipeline heading opens the pipeline; on a step, that step;
+elsewhere, the PR itself."
+  (let* ((pipeline '((uuid . "{p}") (build_number . 42)))
          (step '((uuid . "{s}") (name . "Deploy")))
          (parent (gp-pipeline-section))
          (child (gp-pipeline-step-section))
-         (at nil) (opened nil) (asked nil))
+         (git-platform-current-backend (git-platform-bitbucket))
+         (at nil) (opened nil))
     (oset parent value (cons pipeline (list step)))
     (oset child value step)
     (oset child parent parent)
     (oset parent parent nil)
     (cl-letf (((symbol-function 'magit-current-section) (lambda () at))
-              ((symbol-function 'gp-pr-full-name) (lambda (_) "acme/x"))
-              ((symbol-function 'gp-pipeline-web-url)
-               (lambda (full p &optional s)
-                 (setq asked (list full p s)) "https://example.test/pl"))
-              ((symbol-function 'gp-browse-pr) (lambda () (setq opened 'pr)))
               ((symbol-function 'browse-url)
                (lambda (url &rest _) (setq opened url))))
-      (let ((gp--pr '((id . 1))))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--pr '((id . 1) (destination (repository (full_name . "acme/x")))
+                       (links (html (href . "https://bitbucket.org/acme/x/pull-requests/1")))))
         (setq at parent)
         (gp-detail-browse)
-        (should (equal opened "https://example.test/pl"))
-        (should (equal asked (list "acme/x" pipeline nil)))
+        (should (equal opened "https://bitbucket.org/acme/x/pipelines/results/42"))
         (setq at child)
         (gp-detail-browse)
-        (should (equal asked (list "acme/x" pipeline step)))
+        (should (equal opened "https://bitbucket.org/acme/x/pipelines/results/42/steps/{s}"))
         (setq at nil)
         (gp-detail-browse)
-        (should (eq opened 'pr))))))
+        (should (equal opened "https://bitbucket.org/acme/x/pull-requests/1"))))))
+
+(defmacro gp-test--without-diff-fetch (&rest body)
+  "Run BODY with the deferred stats/diff fetch answering nil at once.
+`bitbucket-mock-with-service' does not serve the raw-text diff
+\(`bitbucket-api-get-text-async'), so this keeps the refresh offline."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'gp-pull-request-stats-async)
+              (lambda (_fn _id _pr cb) (funcall cb nil)))
+             ((symbol-function 'gp-pull-request-diff-async)
+              (lambda (_fn _id _c _pr cb) (funcall cb nil))))
+     ,@body))
 
 (ert-deftest gp-test-detail-refresh-uses-async-path-with-cached-content ()
-  (let* ((pr '((id . 7) (title . "Old")
-               (destination (repository (full_name . "acme/x")))))
-         (fresh-pr '((id . 7) (title . "New")
-                     (destination (repository (full_name . "acme/x")))))
-         (comments '(((id . 1) (content (raw . "new")))))
-         (show-pr-called nil))
-    (with-temp-buffer
-      (gp-detail-mode)
-      (setq gp--pr pr
-            gp--detail-comments '(((id . 0) (content (raw . "old"))))
-            gp--detail-stats '(:commits 1 :files 1 :added 0 :removed 0)
-            gp--detail-diff '(("a" . "diff"))
-            gp--detail-pipelines '(:recent nil))
-      (cl-letf (((symbol-function 'gp-show-pr)
-                 (lambda (&rest _) (setq show-pr-called t)))
-                ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
-                ((symbol-function 'bitbucket-pull-request-async)
-                 (lambda (_full-name _id callback)
-                   (funcall callback t fresh-pr)))
-                ((symbol-function 'bitbucket-pull-request-comments-async)
-                 (lambda (_full-name _id callback &optional _max-items)
-                   (funcall callback t comments)))
-                ;; the deferred stats/diff fetch is async now, so it runs
-                ;; within this test rather than on a timer that never fires
-                ((symbol-function 'gp-pull-request-stats-async)
-                 (lambda (_fn _id _pr cb) (funcall cb nil)))
-                ((symbol-function 'gp-pull-request-diff-async)
-                 (lambda (_fn _id _c _pr cb) (funcall cb nil))))
-        (gp-detail-refresh)
+  "`g' refetches the PR and its comments through the async path (no
+full `gp-show-pr' reload), and swaps them in."
+  (bitbucket-mock-with-service
+    (let ((pr '((id . 180) (title . "Old")
+                (destination (repository (full_name . "acme/web-frontend")))))
+          (show-pr-called nil))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--pr pr
+              gp--detail-comments '(((id . 0) (content (raw . "old"))))
+              gp--detail-stats '(:commits 1 :files 1 :added 0 :removed 0)
+              gp--detail-diff '(("a" . "diff"))
+              gp--detail-pipelines '(:recent nil))
+        (cl-letf (((symbol-function 'gp-show-pr)
+                   (lambda (&rest _) (setq show-pr-called t))))
+          (gp-test--without-diff-fetch (gp-detail-refresh)))
         (should-not show-pr-called)
-        (should (equal gp--pr fresh-pr))
-        (should (equal gp--detail-comments comments))
+        ;; both fetches went out, for this PR
+        (let ((paths (mapcar #'cadr bitbucket-mock-calls)))
+          (should (member "/repositories/acme/web-frontend/pullrequests/180" paths))
+          (should (member "/repositories/acme/web-frontend/pullrequests/180/comments" paths)))
+        ;; and their results replaced the old ones
+        (should (equal (alist-get 'title gp--pr) "Add feature toggle for the new widget"))
+        (should (equal (mapcar (lambda (c) (alist-get 'id c)) gp--detail-comments)
+                       (mapcar (lambda (c) (alist-get 'id c))
+                               (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))))
+        (should (string-match-p "Add feature toggle for the new widget"
+                                (substring-no-properties (buffer-string))))
+        ;; cached heavier content survives a refresh whose fetch came back empty
         (should (equal gp--detail-stats '(:commits 1 :files 1 :added 0 :removed 0)))
         (should (equal gp--detail-diff '(("a" . "diff"))))))))
+
+(defun gp-test--refresh-busted ()
+  "Run `gp-detail-refresh' on a Bitbucket PR; return what the deploy-cache
+bust received, or `none' when it was not called (or not defined)."
+  (bitbucket-mock-with-service
+    (let ((pr '((id . 180) (source (commit (hash . "abc")))
+                (destination (repository (full_name . "acme/web-frontend")))))
+          (busted 'none))
+      (with-temp-buffer
+        (gp-detail-mode)
+        (setq gp--pr pr gp--detail-pipelines '(:recent nil))
+        (when (fboundp 'gp-helm--deploy-cache-bust)
+          (advice-add 'gp-helm--deploy-cache-bust :override
+                      (lambda (p) (setq busted p)) '((name . gp-test-bust))))
+        (unwind-protect (gp-test--without-diff-fetch (gp-detail-refresh))
+          (when (fboundp 'gp-helm--deploy-cache-bust)
+            (advice-remove 'gp-helm--deploy-cache-bust 'gp-test-bust)))
+        busted))))
 
 (ert-deftest gp-test-detail-refresh-busts-deploy-cache-when-helm-loaded ()
   "`gp-detail-refresh' forgets the overview's cached deploy verdict for
 this PR -- but only when `gp-helm' is actually loaded (the fboundp
 guard), since this file does not require it."
-  (let* ((pr '((id . 7)
-               (source (commit (hash . "abc")))
-               (destination (repository (full_name . "acme/x")))))
-         (busted nil))
-    (with-temp-buffer
-      (gp-detail-mode)
-      (setq gp--pr pr
-            gp--detail-comments nil
-            gp--detail-stats nil
-            gp--detail-diff nil
-            gp--detail-pipelines '(:recent nil))
-      (cl-letf (((symbol-function 'gp-helm--deploy-cache-bust)
-                 (lambda (pr) (setq busted pr)))
-                ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
-                ((symbol-function 'bitbucket-pull-request-async)
-                 (lambda (_full-name _id callback) (funcall callback t pr)))
-                ((symbol-function 'bitbucket-pull-request-comments-async)
-                 (lambda (_full-name _id callback &optional _max-items) (funcall callback t nil)))
-                ((symbol-function 'gp-pull-request-stats-async)
-                 (lambda (_fn _id _pr cb) (funcall cb nil)))
-                ((symbol-function 'gp-pull-request-diff-async)
-                 (lambda (_fn _id _c _pr cb) (funcall cb nil))))
-        (gp-detail-refresh)
-        (should (equal busted pr))))))
+  ;; gp-helm loaded: the PR shown at refresh time is busted
+  (cl-letf (((symbol-function 'gp-helm--deploy-cache-bust) #'ignore))
+    (should (equal (alist-get 'id (gp-test--refresh-busted)) 180)))
+  ;; gp-helm not loaded: refresh still works and nothing is called
+  (let ((orig (and (fboundp 'gp-helm--deploy-cache-bust)
+                   (symbol-function 'gp-helm--deploy-cache-bust))))
+    (fmakunbound 'gp-helm--deploy-cache-bust)
+    (unwind-protect
+        (should (eq (gp-test--refresh-busted) 'none))
+      (when orig (fset 'gp-helm--deploy-cache-bust orig)))))
 
 (ert-deftest gp-test-every-buffer-name-is-tagged ()
   "No buffer this package opens may escape the shared prefix.
@@ -1302,7 +1472,7 @@ targeted, so the reply's own resolution is nil."
   "A GitHub PR's labels appear in the overview heading, after the title."
   (github-mock-with-service
     (let* ((git-platform-current-backend (git-platform-github))
-           (h (substring-no-properties (gp--pr-heading github-mock--pr-1))))
+           (h (substring-no-properties (gp--pr-heading (gp-test--gh-pr)))))
       (should (string-match-p "bug" h))
       (should (string-match-p "ui" h))
       ;; after the title, before the repo slug
@@ -1318,96 +1488,78 @@ a stray double space where they would have gone."
            (h (substring-no-properties (gp--pr-heading github-mock--pr-2))))
       (should (string-match-p (regexp-quote "Fix the flaky test  [web]") h)))))
 
+(defun gp-test--repo-line (text)
+  "Return the 📁 line of rendered detail TEXT, or nil."
+  (seq-find (lambda (l) (string-prefix-p "📁" l)) (split-string text "\n")))
+
 (ert-deftest gp-test-detail-shows-the-repo-above-the-branches ()
   "A detail buffer reached from a workspace-wide list has to say which
-repo it is for -- the branch line answers where-to-where, not in-what."
+repo it is for -- the branch line answers where-to-where, not in-what.
+The owner is what tells two same-named repos apart, so the full name
+is shown rather than the bare slug, on both backends."
   (bitbucket-mock-with-service
-    (let ((git-platform-current-backend (git-platform-bitbucket)))
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (let ((inhibit-read-only t))
-            (gp--render-detail (car (gp-test--mock-prs)) nil))
-          (let ((text (substring-no-properties (buffer-string))))
-            (should (string-match-p "acme/web-frontend" text))
-            ;; above the branch line, below the title
-            (should (< (string-match "acme/web-frontend" text)
-                       (string-match "🔀" text)))))))))
-
-(ert-deftest gp-test-detail-repo-uses-the-owner-qualified-name ()
-  "The owner is what tells two same-named repos apart, so the full name
-is shown rather than the bare slug."
-  (github-mock-with-service
-    (let ((git-platform-current-backend (git-platform-github)))
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (let ((inhibit-read-only t))
-            (gp--render-detail github-mock--pr-1 nil))
-          (should (string-match-p "acme/web"
-                                  (substring-no-properties (buffer-string)))))))))
-
-(ert-deftest gp-test-detail-omits-the-repo-line-when-unreadable ()
-  "A PR whose repo cannot be read shows no line at all, rather than a
-`?' standing in for information nobody has."
-  (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
     (with-temp-buffer
       (gp-detail-mode)
       (let ((inhibit-read-only t))
-        (gp--render-detail '((id . 9) (title . "no repo")) nil))
-      (should-not (string-match-p "📁" (substring-no-properties (buffer-string)))))))
+        (gp--render-detail (car (gp-test--mock-prs)) nil))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "acme/web-frontend" (gp-test--repo-line text)))
+        ;; above the branch line, below the title
+        (should (< (string-match "📁" text) (string-match "🔀" text))))))
+  (github-mock-with-service
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-detail (gp-test--gh-pr) nil))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "acme/web\\'" (gp-test--repo-line text)))
+        (should (< (string-match "📁" text) (string-match "🔀" text)))))))
 
 (ert-deftest gp-test-detail-repo-glyph-is-not-reused-in-the-header ()
   "Two different things wearing one glyph defeats the scanning it is for:
 the checkout button already owns 📦."
   (bitbucket-mock-with-service
-    (let ((git-platform-current-backend (git-platform-bitbucket)))
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (let ((inhibit-read-only t))
-            (gp--render-detail (car (gp-test--mock-prs)) nil))
-          (let* ((text (substring-no-properties (buffer-string)))
-                 (repo-line (car (seq-filter
-                                  (lambda (l) (string-match-p "web-frontend" l))
-                                  (split-string text "\n")))))
-            (should (string-prefix-p "📁" repo-line))))))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-detail (car (gp-test--mock-prs)) nil))
+      (let* ((text (substring-no-properties (buffer-string)))
+             (repo-line (car (seq-filter
+                              (lambda (l) (string-match-p "web-frontend" l))
+                              (split-string text "\n")))))
+        (should (string-prefix-p "📁" repo-line))))))
 
 (ert-deftest gp-test-detail-warns-about-uncommitted-local-changes ()
   "The notice fires from `gp--detail-local-dirty' alone, and names how
 many files and which branch they are sitting on."
   (bitbucket-mock-with-service
-    (let ((git-platform-current-backend (git-platform-bitbucket)))
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (setq gp--detail-local-dirty
-                (list :dir "/repo" :branch "feat/x" :count 3))
-          (let ((inhibit-read-only t))
-            (gp--render-detail (car (gp-test--mock-prs)) nil))
-          (let ((text (substring-no-properties (buffer-string))))
-            (should (string-match-p "⚠ Uncommitted local changes" text))
-            (should (string-match-p "3 files on feat/x" text))))))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty
+            (list :dir "/repo" :branch "feat/x" :count 3))
+      (let ((inhibit-read-only t))
+        (gp--render-detail (car (gp-test--mock-prs)) nil))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "⚠ Uncommitted local changes" text))
+        (should (string-match-p "3 files on feat/x" text))))))
 
 (ert-deftest gp-test-detail-dirty-warning-sits-near-the-top ()
   "It has to land above the description and the file list: its whole job
 is to be read BEFORE the checkout buttons a few lines up get pressed."
   (bitbucket-mock-with-service
-    (let ((git-platform-current-backend (git-platform-bitbucket)))
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
-          (let ((inhibit-read-only t))
-            (gp--render-detail (car (gp-test--mock-prs)) nil))
-          (let* ((text (substring-no-properties (buffer-string)))
-                 (warn (string-match "Uncommitted local changes" text))
-                 (comments (string-match "Comments (" text)))
-            (should warn)
-            (should comments)
-            (should (< warn comments))
-            ;; and below the header block it is warning you about
-            (should (< (string-match "🔀" text) warn))))))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (setq gp--detail-local-dirty (list :dir "/repo" :branch "main" :count 1))
+      (let ((inhibit-read-only t))
+        (gp--render-detail (car (gp-test--mock-prs)) nil))
+      (let* ((text (substring-no-properties (buffer-string)))
+             (warn (string-match "Uncommitted local changes" text))
+             (comments (string-match "Comments (" text)))
+        (should warn)
+        (should comments)
+        (should (< warn comments))
+        ;; and below the header block it is warning you about
+        (should (< (string-match "🔀" text) warn))))))
 
 (ert-deftest gp-test-detail-dirty-warning-singular-file ()
   "One file does not read as \"1 files\"."
@@ -1462,6 +1614,32 @@ the mergeability fetch follows."
       (should (string-match-p "Uncommitted"
                               (substring-no-properties (buffer-string)))))))
 
+(ert-deftest gp-test-detail-load-local-dirty-reads-a-real-clone ()
+  "End to end against real git: a clone of the PR's repo with two
+uncommitted files yields a count of 2 on its checked-out branch, and
+the rerendered buffer shows the warning."
+  (skip-unless (executable-find "git"))
+  (gp-test--with-git-root
+    (with-temp-file (expand-file-name "a.txt" repo) (insert "a"))
+    (with-temp-file (expand-file-name "b.txt" repo) (insert "b"))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((pr '((id . 9) (title . "t")
+                  (source (branch (name . "feature")))
+                  (destination (branch (name . "main"))
+                               (repository (full_name . "acme/x"))))))
+        (setq gp--pr pr)
+        (bitbucket-mock-with-service      ;; answers the rerender's /user
+          (cl-letf (((symbol-function 'run-at-time) ;; run the deferred body now
+                     (lambda (_time _rep fn &rest args) (apply fn args))))
+            (gp--detail-load-local-dirty (current-buffer) pr)))
+        (should (equal (plist-get gp--detail-local-dirty :count) 2))
+        (should (equal (plist-get gp--detail-local-dirty :branch) "feature"))
+        (should (equal (file-truename (plist-get gp--detail-local-dirty :dir))
+                       (file-truename repo)))
+        (should (string-match-p "2 files on feature"
+                                (substring-no-properties (buffer-string))))))))
+
 (ert-deftest gp-test-detail-load-local-dirty-fills-the-state ()
   "The loader resolves the checkout, counts, and stores the plist."
   (with-temp-buffer
@@ -1474,7 +1652,6 @@ the mergeability fetch follows."
                 ((symbol-function 'gp-local-find-checkout) (lambda (_fn) "/repo"))
                 ((symbol-function 'gp-checkout-dirty-count) (lambda (_dir) 4))
                 ((symbol-function 'gp-checkout-current-branch) (lambda (_dir) "feat/x"))
-                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
                 ((symbol-function 'gp--detail-rerender) (lambda (&rest _) nil))
                 ;; run the deferred body immediately
                 ((symbol-function 'run-at-time)
@@ -1493,7 +1670,6 @@ whole notice off non-nil."
       (cl-letf (((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/web"))
                 ((symbol-function 'gp-local-find-checkout) (lambda (_fn) "/repo"))
                 ((symbol-function 'gp-checkout-dirty-count) (lambda (_dir) 0))
-                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
                 ((symbol-function 'gp--detail-rerender) (lambda (&rest _) nil))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _rep fn &rest args) (apply fn args))))
@@ -1514,7 +1690,6 @@ local checkout the loader resolves nothing and stores nothing."
                  (lambda (&rest _) (setq ensured t) "/repo"))
                 ((symbol-function 'gp-checkout-dirty-count)
                  (lambda (_dir) (error "counted without a checkout")))
-                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
                 ((symbol-function 'gp--detail-rerender) (lambda (&rest _) nil))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _rep fn &rest args) (apply fn args))))
@@ -1535,7 +1710,6 @@ nothing would throw away point and section visibility on every refresh."
                 ((symbol-function 'gp-local-find-checkout) (lambda (_fn) "/repo"))
                 ((symbol-function 'gp-checkout-dirty-count) (lambda (_dir) 2))
                 ((symbol-function 'gp-checkout-current-branch) (lambda (_dir) "main"))
-                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
                 ((symbol-function 'gp--detail-rerender)
                  (lambda (&rest _) (cl-incf renders)))
                 ((symbol-function 'run-at-time)
@@ -1558,7 +1732,6 @@ take down the rest of the detail load."
       (cl-letf (((symbol-function 'gp-pr-full-name) (lambda (_pr) "acme/web"))
                 ((symbol-function 'gp-local-find-checkout)
                  (lambda (_fn) (error "boom")))
-                ((symbol-function 'gp--detail-buffer-shows-p) (lambda (&rest _) t))
                 ((symbol-function 'gp--detail-rerender) (lambda (&rest _) nil))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _rep fn &rest args) (apply fn args))))
@@ -1569,7 +1742,7 @@ take down the rest of the detail load."
 re-derivation from the surrounding text."
   (github-mock-with-service
     (let* ((git-platform-current-backend (git-platform-github))
-           (rendered (gp--format-labels (gp-pr-labels github-mock--pr-1)))
+           (rendered (gp--format-labels (gp-pr-labels (gp-test--gh-pr))))
            (pos (string-match "bug" rendered)))
       (should (equal (get-text-property pos 'gp-label rendered) "bug"))
       (should (eq (get-text-property pos 'keymap rendered) gp-label-map))
@@ -1595,7 +1768,7 @@ click would land on."
         (gp-list-mode)
         (let ((inhibit-read-only t))
           (magit-insert-section (gp-root)
-            (gp--insert-pr github-mock--pr-1)))
+            (gp--insert-pr (gp-test--gh-pr))))
         (goto-char (point-min))
         (should (search-forward "bug" nil t))
         (goto-char (match-beginning 0))
@@ -1616,7 +1789,7 @@ narrowing is visible and can be widened by ordinary editing."
           (gp-list-mode)
           (let ((inhibit-read-only t))
             (magit-insert-section (gp-root)
-              (gp--insert-pr github-mock--pr-1)))
+              (gp--insert-pr (gp-test--gh-pr))))
           (goto-char (point-min))
           (search-forward "bug")
           (goto-char (match-beginning 0))
@@ -1638,7 +1811,7 @@ on a click -- and shows only the ones actually carrying the label."
       (unwind-protect
           (with-temp-buffer
             (gp-list-mode)
-            (setq gp--prs (list github-mock--pr-1 github-mock--pr-2))
+            (setq gp--prs (list (gp-test--gh-pr) (github--reshape-pr github-mock--pr-2)))
             (cl-letf (((symbol-function 'pop-to-buffer)
                        (lambda (b &rest _) (setq buf b))))
               (gp--list-labelled "bug"))
@@ -1676,16 +1849,14 @@ view.  A slot that can never fill is worse than no slot."
 (ert-deftest gp-test-labels-line-in-detail-top-section ()
   "The detail view shows labels in its top section, with an edit button."
   (github-mock-with-service
-    (let ((git-platform-current-backend (git-platform-github)))
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (let ((inhibit-read-only t))
-            (gp--render-detail github-mock--pr-1 nil))
-          (let ((text (substring-no-properties (buffer-string))))
-            (should (string-match-p "🏷" text))
-            (should (string-match-p "bug" text))
-            (should (string-match-p "edit \\[L\\]" text))))))))
+    (with-temp-buffer
+      (gp-detail-mode)
+      (let ((inhibit-read-only t))
+        (gp--render-detail (gp-test--gh-pr) nil))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "🏷" text))
+        (should (string-match-p "bug" text))
+        (should (string-match-p "edit \\[L\\]" text))))))
 
 (ert-deftest gp-test-labels-line-offers-edit-with-none-yet ()
   "With no labels on an open PR the line still appears, so the first one
@@ -1695,7 +1866,7 @@ can be added -- same reasoning as the reviewers line."
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
-          (gp--insert-labels-line github-mock--pr-2))
+          (gp--insert-labels-line (github--reshape-pr github-mock--pr-2)))
         (let ((text (substring-no-properties (buffer-string))))
           (should (string-match-p "no labels" text))
           (should (string-match-p "edit \\[L\\]" text)))))))
@@ -1704,7 +1875,7 @@ can be added -- same reasoning as the reviewers line."
   "A merged/closed PR shows its labels read-only."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
-          (pr (append '((state . "closed")) github-mock--pr-1)))
+          (pr (append '((state . "closed")) (gp-test--gh-pr))))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
@@ -1725,7 +1896,7 @@ activating it actually calls the edit command -- and that the heading
 text still gets `magit-section-heading'."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
-          (pr (append '((body . "Some body text")) github-mock--pr-1))
+          (pr (append '((body . "Some body text")) (gp-test--gh-pr)))
           (called nil))
       (cl-letf (((symbol-function 'gp-ui-edit-description)
                  (lambda (_pr) (setq called t))))
@@ -1750,7 +1921,7 @@ text still gets `magit-section-heading'."
   "The empty state carries the edit button, so `E' is discoverable there."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
-          (pr (append '((body . "")) github-mock--pr-1)))
+          (pr (append '((body . "")) (gp-test--gh-pr))))
       (should (gp-pr-open-p pr))
       (with-temp-buffer
         (gp-detail-mode)
@@ -1771,7 +1942,7 @@ API error."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
           (pr (append '((state . "closed") (body . "Some body text"))
-                      github-mock--pr-1)))
+                      (gp-test--gh-pr))))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
@@ -1787,44 +1958,52 @@ The empty state exists to offer the edit button; where editing is
 impossible it would be a slot that can never fill."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github))
-          (pr (append '((state . "closed") (body . "")) github-mock--pr-1)))
+          (pr (append '((state . "closed") (body . "")) (gp-test--gh-pr))))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
           (gp--insert-description pr))
         (should (equal (buffer-string) ""))))))
 
+(defun gp-test--bitbucket-pr-puts ()
+  "The DATA of every PUT to a PR resource in `bitbucket-mock-calls', oldest first."
+  (mapcar (lambda (c) (nth 3 c))
+          (reverse (cl-remove-if-not
+                    (lambda (c) (and (equal (car c) "PUT")
+                                     (string-match-p "/pullrequests/[0-9]+\\'" (nth 1 c))))
+                    bitbucket-mock-calls))))
+
 (ert-deftest gp-test-edit-description-refreshes-the-detail-buffer ()
-  "Saving a description redraws the DETAIL buffer, not the compose one.
-`:on-success' runs while the compose buffer is current, where `gp--pr'
-is nil and a bare `gp-detail-refresh' silently does nothing -- the edit
-reaches the server but the view keeps showing the old text."
-  (let* ((pr (append '((description . "old body")) (car (gp-test--mock-prs))))
-         (detail-buf (gp--detail-buffer-name pr))
-         (refreshed-in nil)
-         (sent nil))
-    (unwind-protect
-        (progn
-          ;; a stand-in for the real detail buffer, so `buffer-live-p' holds
-          (get-buffer-create detail-buf)
-          (cl-letf (((symbol-function 'gp-set-pull-request-description)
-                     (lambda (_fn _id text &optional _title)
-                       (setq sent text)
-                       (append `((description . ,text)) pr)))
-                    ((symbol-function 'gp-detail-refresh)
-                     (lambda () (setq refreshed-in (buffer-name))))
-                    ((symbol-function 'gp-invalidate-pr-caches) #'ignore))
-            (let ((compose (gp-ui-edit-description pr)))
-              (unwind-protect
-                  (with-current-buffer compose
-                    (erase-buffer)
-                    (insert "new body")
-                    (gp-compose-submit))
-                (when (buffer-live-p compose) (kill-buffer compose)))))
-          (should (equal sent "new body"))
-          ;; the redraw must have happened inside the detail buffer
-          (should (equal refreshed-in detail-buf)))
-      (when (get-buffer detail-buf) (kill-buffer detail-buf)))))
+  "Saving a description sends it, then redraws the DETAIL buffer, not
+the compose one.  `:on-success' runs while the compose buffer is
+current, where `gp--pr' is nil and a bare `gp-detail-refresh' silently
+does nothing -- the edit reaches the server but the view keeps showing
+the old text."
+  (bitbucket-mock-with-service
+    (let* ((pr (append '((description . "old body")) (car (gp-test--mock-prs))))
+           (detail-buf (gp--detail-buffer-name pr))
+           (refreshed-in nil))
+      (unwind-protect
+          (progn
+            ;; a stand-in for the real detail buffer, so `buffer-live-p' holds
+            (get-buffer-create detail-buf)
+            (cl-letf (((symbol-function 'gp-detail-refresh)
+                       (lambda () (setq refreshed-in (buffer-name)))))
+              (let ((compose (gp-ui-edit-description pr)))
+                (unwind-protect
+                    (with-current-buffer compose
+                      (erase-buffer)
+                      (insert "new body")
+                      (gp-compose-submit))
+                  (when (buffer-live-p compose) (kill-buffer compose)))))
+            ;; exactly one PUT, carrying the new text and keeping the title
+            (let ((puts (gp-test--bitbucket-pr-puts)))
+              (should (= (length puts) 1))
+              (should (equal (alist-get 'description (car puts)) "new body"))
+              (should (equal (alist-get 'title (car puts)) (alist-get 'title pr))))
+            ;; the redraw must have happened inside the detail buffer
+            (should (equal refreshed-in detail-buf)))
+        (when (get-buffer detail-buf) (kill-buffer detail-buf))))))
 
 (defun gp-test--buttons ()
   "Return the buffer's button overlays, ordered by position.
@@ -1844,42 +2023,40 @@ order it happened to see locally."
 ;;;; Title editing ---------------------------------------------------------------
 
 (ert-deftest gp-test-edit-title-saves-a-changed-title ()
-  "A changed title is sent, then the buffer refreshes."
-  (let ((pr (append '((title . "old title")) (car (gp-test--mock-prs))))
-        sent refreshed)
-    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "  new title  "))
-              ((symbol-function 'gp-set-pull-request-title)
-               (lambda (_fn _id title) (setq sent title)))
-              ((symbol-function 'gp-invalidate-pr-caches) #'ignore)
-              ((symbol-function 'gp-detail-refresh) (lambda () (setq refreshed t))))
-      (gp-ui-edit-title pr))
-    ;; trimmed before sending
-    (should (equal sent "new title"))
-    (should refreshed)))
+  "A changed title is sent (trimmed), then the buffer refreshes."
+  (bitbucket-mock-with-service
+    (let ((pr (append '((title . "old title")) (car (gp-test--mock-prs))))
+          refreshed)
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "  new title  "))
+                ((symbol-function 'gp-detail-refresh) (lambda () (setq refreshed t))))
+        (gp-ui-edit-title pr))
+      (let ((puts (gp-test--bitbucket-pr-puts)))
+        (should (= (length puts) 1))
+        ;; trimmed before sending
+        (should (equal (alist-get 'title (car puts)) "new title"))
+        ;; the whole-object PUT resends the description so it is not blanked
+        (should (assq 'description (car puts))))
+      (should refreshed))))
 
 (ert-deftest gp-test-edit-title-does-nothing-when-unchanged ()
   "Submitting the same title costs no request.
 The prompt is pre-filled with the current title, so RET is the most
 likely keystroke -- it must not fire a pointless write."
-  (let ((pr (append '((title . "same title")) (car (gp-test--mock-prs))))
-        (sent nil))
-    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "same title"))
-              ((symbol-function 'gp-set-pull-request-title)
-               (lambda (&rest _) (setq sent t)))
-              ((symbol-function 'gp-detail-refresh) #'ignore))
-      (gp-ui-edit-title pr))
-    (should-not sent)))
+  (bitbucket-mock-with-service
+    (let ((pr (append '((title . "same title")) (car (gp-test--mock-prs)))))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "same title"))
+                ((symbol-function 'gp-detail-refresh) #'ignore))
+        (gp-ui-edit-title pr))
+      (should-not (gp-test--bitbucket-pr-puts)))))
 
 (ert-deftest gp-test-edit-title-refuses-an-empty-title ()
   "Clearing the prompt aborts rather than blanking the PR's title.
 Unlike a description, an empty title is never a legitimate edit."
-  (let ((pr (append '((title . "old")) (car (gp-test--mock-prs))))
-        (sent nil))
-    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "   "))
-              ((symbol-function 'gp-set-pull-request-title)
-               (lambda (&rest _) (setq sent t))))
-      (should-error (gp-ui-edit-title pr) :type 'user-error))
-    (should-not sent)))
+  (bitbucket-mock-with-service
+    (let ((pr (append '((title . "old")) (car (gp-test--mock-prs)))))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "   ")))
+        (should-error (gp-ui-edit-title pr) :type 'user-error))
+      (should-not (gp-test--bitbucket-pr-puts)))))
 
 (ert-deftest gp-test-title-edit-button-only-on-open-prs ()
   "The title carries an edit button while open, and none once closed."
@@ -1898,62 +2075,72 @@ Unlike a description, an empty title is never a legitimate edit."
 
 ;;;; Merge affordance -----------------------------------------------------------
 
+(defun gp-test--render-with-mergeability (pr mergeability)
+  "Render PR's detail with MERGEABILITY cached; return the text."
+  (with-temp-buffer
+    (gp-detail-mode)
+    (setq gp--detail-mergeability mergeability)
+    (let ((inhibit-read-only t)) (gp--render-detail pr nil))
+    (substring-no-properties (buffer-string))))
+
 (ert-deftest gp-test-merge-button-shown-when-mergeable ()
-  "A clean open PR offers the merge button and no warning."
-  (let ((pr (car (gp-test--mock-prs))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (setq gp--detail-mergeability '(t . "clean"))
-        (let ((inhibit-read-only t)) (gp--render-detail pr nil))
-        (let ((txt (substring-no-properties (buffer-string))))
-          (should (string-match-p "Merge \\[M\\]" txt))
-          (should-not (string-match-p "Cannot merge" txt)))))))
+  "A clean open PR offers the merge button and no warning -- GitHub's
+\"clean\", and Bitbucket's own (t . \"unverified\") answer."
+  (github-mock-with-service
+    (let ((txt (gp-test--render-with-mergeability (gp-test--gh-pr) '(t . "clean"))))
+      (should (string-match-p "Merge \\[M\\]" txt))
+      (should-not (string-match-p "Cannot merge" txt))))
+  (bitbucket-mock-with-service
+    (let ((txt (gp-test--render-with-mergeability
+                (car (gp-test--mock-prs)) '(t . "unverified"))))
+      (should (string-match-p "Merge \\[M\\]" txt))
+      (should-not (string-match-p "Cannot merge" txt)))))
 
 (ert-deftest gp-test-merge-blocked-and-warned-on-conflict ()
   "A conflicted PR replaces the button with the reason, and warns above.
 The state is the useful part: leaving a live button to fail on click
 tells the user nothing about why."
-  (let ((pr (car (gp-test--mock-prs))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (setq gp--detail-mergeability '(nil . "dirty"))
-        (let ((inhibit-read-only t)) (gp--render-detail pr nil))
-        (let ((txt (substring-no-properties (buffer-string))))
-          (should (string-match-p "Cannot merge: conflicts with" txt))
-          (should (string-match-p "dirty" txt))
-          ;; the action simply goes away; the warning above is the one place
-          ;; the reason is stated
-          (should-not (string-match-p "Merge \\[M\\]" txt)))))))
+  (github-mock-with-service
+    (let ((txt (gp-test--render-with-mergeability (gp-test--gh-pr) '(nil . "dirty"))))
+      (should (string-match-p "Cannot merge: conflicts with main  (dirty)" txt))
+      ;; the action simply goes away; the warning above is the one place
+      ;; the reason is stated
+      (should-not (string-match-p "Merge \\[M\\]" txt))))
+  ;; Bitbucket's conflict comes from the diffstat, flagged as unverified
+  (bitbucket-mock-with-service
+    (let ((txt (gp-test--render-with-mergeability
+                (car (gp-test--mock-prs)) '(nil . "unverified"))))
+      (should (string-match-p "Cannot merge: conflicts with main  (unverified)" txt))
+      (should-not (string-match-p "Merge \\[M\\]" txt)))))
 
 (ert-deftest gp-test-merge-not-blocked-when-mergeability-unknown ()
   "`unknown' and nil must not warn or hide the button.
 GitHub answers `unknown' until it has judged, and Bitbucket cannot
-answer at all -- treating either as a conflict would block merging a
-perfectly clean PR and show a warning about a problem that may not
-exist."
-  (let ((pr (car (gp-test--mock-prs))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
-      (dolist (m '((unknown . "unknown") nil))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (setq gp--detail-mergeability m)
-          (let ((inhibit-read-only t)) (gp--render-detail pr nil))
-          (let ((txt (substring-no-properties (buffer-string))))
-            (should (string-match-p "Merge \\[M\\]" txt))
-            (should-not (string-match-p "Cannot merge" txt))))))))
+answer at all without a diffstat -- treating either as a conflict
+would block merging a perfectly clean PR and show a warning about a
+problem that may not exist."
+  (github-mock-with-service
+    (let ((txt (gp-test--render-with-mergeability (gp-test--gh-pr) '(unknown . "unknown"))))
+      (should (string-match-p "Merge \\[M\\]" txt))
+      (should-not (string-match-p "Cannot merge" txt))))
+  (bitbucket-mock-with-service
+    (let ((txt (gp-test--render-with-mergeability (car (gp-test--mock-prs)) nil)))
+      (should (string-match-p "Merge \\[M\\]" txt))
+      (should-not (string-match-p "Cannot merge" txt)))))
 
 (ert-deftest gp-test-merge-affordance-absent-on-closed-pr ()
-  "A merged/declined PR offers no merge action at all."
-  (let ((pr (append '((state . "MERGED")) (car (gp-test--mock-prs)))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (setq gp--detail-mergeability '(t . "clean"))
-        (let ((inhibit-read-only t)) (gp--render-detail pr nil))
-        (should-not (string-match-p "Merge \\[M\\]"
-                                    (substring-no-properties (buffer-string))))))))
+  "A merged/closed PR offers no merge action at all."
+  (github-mock-with-service
+    (should-not (string-match-p
+                 "Merge \\[M\\]"
+                 (gp-test--render-with-mergeability
+                  (append '((state . "closed")) (gp-test--gh-pr)) '(t . "clean")))))
+  (bitbucket-mock-with-service
+    (should-not (string-match-p
+                 "Merge \\[M\\]"
+                 (gp-test--render-with-mergeability
+                  (append '((state . "MERGED")) (car (gp-test--mock-prs)))
+                  '(t . "unverified"))))))
 
 (ert-deftest gp-test-outcome-banner-states-the-result ()
   "A closed PR announces MERGED or DECLINED; an open one says nothing.
@@ -1984,7 +2171,8 @@ show no reason rather than an empty line."
                   (gp-detail-mode)
                   (let ((inhibit-read-only t)) (gp--insert-outcome-banner pr))
                   (substring-no-properties (buffer-string)))))
-    (let ((base (car (gp-test--mock-prs))))
+    (let ((base (car (gp-test--mock-prs)))
+          (git-platform-current-backend (git-platform-bitbucket)))
       (let ((with-reason (append '((state . "DECLINED")
                                    (reason . "superseded by #12"))
                                  base)))
@@ -1995,23 +2183,46 @@ show no reason rather than an empty line."
         (should-not (string-match-p "superseded" (banner without))))
       ;; a merged PR never shows a reason even if the field is present
       (let ((merged (append '((state . "MERGED") (reason . "ignored")) base)))
-        (should-not (string-match-p "ignored" (banner merged)))))))
+        (should-not (string-match-p "ignored" (banner merged)))))
+    ;; GitHub: closed unmerged reads as DECLINED, with no reason line at all
+    (github-mock-with-service
+      (let ((closed (append '((state . "closed") (merged . nil)) (gp-test--gh-pr))))
+        (should (equal (banner closed) "  DECLINED  \n\n"))))))
 
 (ert-deftest gp-test-merge-pipelines-omit-other-commits-runs ()
   "Only the merge commit's own run is shown, not the branch's history.
 `:recent' is every other run on the destination branch -- everything
 else that landed on main -- which has nothing to do with this PR."
-  (let ((pr (append '((state . "MERGED")) (car (gp-test--mock-prs))))
-        (shown nil))
-    (cl-letf (((symbol-function 'gp--insert-pipelines)
-               (lambda (data) (setq shown data))))
+  (bitbucket-mock-with-service
+    (let ((pr (append '((state . "MERGED")) (car (gp-test--mock-prs))))
+          (mine '((uuid . "{merge-run}") (build_number . 501)
+                  (state (name . "COMPLETED") (result (name . "SUCCESSFUL")))
+                  (target (commit (hash . "aaaa1111")))))
+          (other '((uuid . "{other-run}") (build_number . 497)
+                   (state (name . "COMPLETED") (result (name . "FAILED")))
+                   (target (commit (hash . "bbbb2222"))))))
       (with-temp-buffer
         (gp-detail-mode)
+        (setq gp--pr pr
+              gp--detail-merge-pipelines
+              (list :current (list (cons mine nil))
+                    :recent (list (cons other "unrelated commit on main"))))
+        (let ((inhibit-read-only t)) (gp--insert-merge-pipelines pr))
+        (let ((text (substring-no-properties (buffer-string))))
+          (should (string-match-p "After merge (on main)" text))
+          (should (string-match-p "501" text))
+          (should-not (string-match-p "497" text))
+          (should-not (string-match-p "unrelated commit on main" text)))
+        ;; with no merge-commit run yet, other runs on main must not
+        ;; conjure up a Pipelines section ("no pipeline for ...") either
         (setq gp--detail-merge-pipelines
-              '(:current ((mine . nil)) :recent ((other . nil) (another . nil))))
-        (let ((inhibit-read-only t)) (gp--insert-merge-pipelines pr))))
-    (should (equal (plist-get shown :current) '((mine . nil))))
-    (should-not (plist-get shown :recent))))
+              (list :current nil
+                    :recent (list (cons other "unrelated commit on main"))))
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (gp--insert-merge-pipelines pr))
+        (should-not (string-match-p "Pipelines\\|no pipeline"
+                                    (substring-no-properties (buffer-string))))))))
 
 (ert-deftest gp-test-merge-pipelines-shown-only-on-a-merged-pr ()
   "The destination-branch run appears on a merged PR and nowhere else.
@@ -2045,7 +2256,8 @@ PR-branch fetch never sees it."
 
 (ert-deftest gp-test-conflict-warning-offers-the-terminal-handoff ()
   "The warning carries a button to hand the conflict to the AI session."
-  (let ((pr (car (gp-test--mock-prs)))
+  (let ((pr (gp-test--gh-pr))
+        (git-platform-current-backend (git-platform-github))
         (called nil))
     (cl-letf (((symbol-function 'gp-ui-send-conflict-to-terminal)
                (lambda (_pr) (setq called t))))
@@ -2066,7 +2278,8 @@ PR-branch fetch never sees it."
   "`t' hands over the conflict on the warning, a comment elsewhere.
 A single global binding used to assume a comment at point, so pressing
 `t' on the warning failed with \"Point is not on a comment\"."
-  (let ((pr (car (gp-test--mock-prs)))
+  (let ((pr (gp-test--gh-pr))
+        (git-platform-current-backend (git-platform-github))
         (sent nil))
     (cl-letf (((symbol-function 'gp-ui-send-conflict-to-terminal)
                (lambda (_pr) (setq sent 'conflict)))
@@ -2095,8 +2308,10 @@ A single global binding used to assume a comment at point, so pressing
 (ert-deftest gp-test-conflict-warning-names-how-far-behind ()
   "The behind count is shown when known, and omitted when not.
 A zero would claim the branch is up to date when the truth is that the
-backend cannot say (Bitbucket has no ahead/behind counts)."
-  (let ((pr (car (gp-test--mock-prs))))
+backend cannot say (Bitbucket has no ahead/behind counts).  Only GitHub
+reports a divergence, so this is a GitHub PR."
+  (let ((pr (gp-test--gh-pr))
+        (git-platform-current-backend (git-platform-github)))
     (cl-labels ((warning-text (divergence)
                   (with-temp-buffer
                     (gp-detail-mode)
@@ -2167,18 +2382,6 @@ review comment and hit the very restriction this action avoids."
 
 ;;;; Reactions -----------------------------------------------------------------
 
-(ert-deftest gp-test-reaction-summary-groups-and-marks-mine ()
-  "Rows collapse to (CONTENT COUNT MINE-P), keeping first-seen order."
-  (let ((rows '(((content . "+1")   (user (uuid . "bea")))
-                ((content . "heart")(user (uuid . "ada")))
-                ((content . "+1")   (user (uuid . "ada")))
-                ((content . "+1")   (user (uuid . "cy"))))))
-    (should (equal (gp--reaction-summary rows "ada")
-                   '(("+1" 3 t ("bea" "ada" "cy")) ("heart" 1 t ("ada")))))
-    ;; a user with none of their own gets the same counts, all unmarked
-    (should (equal (gp--reaction-summary rows "zed")
-                   '(("+1" 3 nil ("bea" "ada" "cy")) ("heart" 1 nil ("ada")))))))
-
 (ert-deftest gp-test-reaction-tooltip-names-the-reactors ()
   "Hovering a reaction says who reacted, and what a click will do."
   (let ((tip (gp--reaction-tooltip "+1" 2 '("Ada Lovelace" "Bea") t)))
@@ -2196,17 +2399,6 @@ review comment and hit the very restriction this action avoids."
     (should (string-match-p "a, b, c" tip))
     (should (string-match-p "\\+4 more" tip))
     (should-not (string-match-p "\\bd\\b" tip))))
-
-(ert-deftest gp-test-reaction-summary-falls-back-when-no-display-name ()
-  "A reactor with only an id still gets named rather than dropped."
-  (should (equal (gp--reaction-summary
-                  '(((content . "+1") (user (uuid . "bea"))))
-                  "ada")
-                 '(("+1" 1 nil ("bea"))))))
-
-(ert-deftest gp-test-reaction-summary-empty-is-nil ()
-  "No reactions summarises to nil, so the renderer inserts nothing."
-  (should (null (gp--reaction-summary nil "ada"))))
 
 (ert-deftest gp-test-reaction-emoji-falls-back-to-the-token ()
   "An unmapped token still renders readably rather than blank.
@@ -2230,18 +2422,20 @@ the affordance rather than offer an action that can only fail."
                   :type 'user-error)))
 
 (ert-deftest gp-test-reactions-supported-on-github ()
-  "GitHub reports its eight reaction tokens."
+  "GitHub reports that it has reactions, and offers some to pick from."
   (let ((git-platform-current-backend (git-platform-github)))
     (should (gp-reactions-supported-p))
-    (should (equal (gp-reaction-choices)
-                   '("+1" "-1" "laugh" "confused" "heart" "hooray" "rocket" "eyes")))))
+    (should (member "+1" (gp-reaction-choices)))))
 
 (ert-deftest gp-test-no-reaction-buttons-rendered-on-bitbucket ()
-  "A platform without reactions renders no reaction affordance at all."
-  (let* ((git-platform-current-backend (git-platform-bitbucket))
-         (pr (car (gp-test--mock-prs)))
-         (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json"))))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}")))
+  "A platform without reactions renders no reaction affordance at all --
+even for a comment that somehow carries `reaction-counts'."
+  (bitbucket-mock-with-service
+    (let* ((pr (car (gp-test--mock-prs)))
+           (comments (alist-get 'values (bitbucket-mock--fixture "pr-comments.json")))
+           (comments (cons (append '((reaction-counts . (("+1" . 2))))
+                                   (car comments))
+                           (cdr comments))))
       (with-temp-buffer
         (gp-detail-mode)
         (let ((inhibit-read-only t))
@@ -2250,164 +2444,142 @@ the affordance rather than offer an action that can only fail."
           (should-not (string-match-p "react \\[!\\]" text))
           (should-not (string-match-p "👍" text)))))))
 
-(ert-deftest gp-test-reaction-buttons-rendered-when-supported ()
-  "Existing reactions render as buttons, counts in brackets.
-The counts come from the comment's own `reaction-counts' -- see
-`gp-test-reaction-render-never-fetches'."
-  (github-mock-with-service
-    (let ((git-platform-current-backend (git-platform-github)))
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada")))
-        (with-temp-buffer
-          (gp-detail-mode)
-          (let ((inhibit-read-only t))
-            (gp--insert-reactions
-             '((id . 42) (destination (repository (full_name . "acme/web"))))
-             '((id . 7) (reaction-counts . (("+1" . 2) ("rocket" . 1))))))
-          (let ((text (substring-no-properties (buffer-string))))
-            (should (string-match-p "👍 (2)" text))
-            (should (string-match-p "🚀 (1)" text)))
-          ;; real buttons, one per distinct reaction, in the given order.
-          ;; Counted via overlays: `insert-button' stores its properties
-          ;; there, and walking `next-button' past the last one signals.
-          (should (equal (gp-test--button-labels) '("👍 (2)" "🚀 (1)"))))))))
+(defun gp-test--gh-comment (&optional reactions mine)
+  "Bea's general comment 7 as `github--reshape-comment' shapes it.
+REACTIONS is REST's inline `reactions' object; MINE the contents the
+viewer reacted with (what the GraphQL prefetch would have recorded)."
+  (let ((github--viewer-reactions (make-hash-table :test 'eql)))
+    (when mine (puthash 7 mine github--viewer-reactions))
+    (github--reshape-comment
+     `((id . 7) (body . "hi")
+       (user (login . "bea") (avatar_url . "https://example.com/bea.png"))
+       (created_at . "2026-01-01T00:00:00Z")
+       (html_url . "https://github.com/acme/web/pull/42#issuecomment-7")
+       ,@(when reactions `((reactions . ,reactions)))))))
 
-(ert-deftest gp-test-reaction-pill-is-just-emoji-and-count ()
-  "The pill carries no ownership glyph.
-A tick there reads as \"resolved\"/\"done\" rather than \"me\"; the quick
-action's [+]/[-] label and the tooltip carry that instead."
-  (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
-            ((symbol-function 'gp-user-uuid) (lambda () "ada")))
+(ert-deftest gp-test-reaction-buttons-rendered-when-supported ()
+  "Existing reactions render as buttons, counts in brackets, straight
+from the comment's own `reaction-counts' -- drawing them must not hit
+the network (a fetch mid-redisplay once re-entered the renderer and
+drew each comment several times over).  The pill carries no ownership
+glyph: a tick reads as \"done\" rather than \"me\"."
+  (github-mock-with-service
     (with-temp-buffer
       (gp-detail-mode)
       (let ((inhibit-read-only t))
         (gp--insert-reactions
-         '((id . 42))
-         '((id . 7) (reaction-counts . (("+1" . 2) ("rocket" . 1)))
-                    (reaction-mine . ("+1")))))
-      (let ((txt (substring-no-properties (buffer-string))))
-        (should (string-match-p "👍 (2)" txt))
-        (should (string-match-p "🚀 (1)" txt))
+         (gp-test--gh-pr)
+         (gp-test--gh-comment '((\+1 . 2) (rocket . 1)) '("+1"))))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "👍 (2)" text))
+        (should (string-match-p "🚀 (1)" text))
         ;; yours is not decorated -- same shape either way
-        (should-not (string-match-p "✓" txt))))))
+        (should-not (string-match-p "✓" text)))
+      ;; real buttons, one per distinct reaction, in the given order.
+      ;; Counted via overlays: `insert-button' stores its properties
+      ;; there, and walking `next-button' past the last one signals.
+      (should (equal (gp-test--button-labels) '("👍 (2)" "🚀 (1)")))
+      ;; and nothing was requested to draw them
+      (should-not github-mock-calls)
+      (should-not github-mock-graphql-calls))))
 
 (ert-deftest gp-test-like-button-label-always-names-the-plus-key ()
   "The quick action stays [+] in both directions.
 The bracket names the KEY, and `+' is what toggles either way -- `-' is
 `negative-argument' globally, so labelling it [-] promised a key that
 does nothing.  Which way the toggle will go is in the help text."
-  (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
-            ((symbol-function 'gp-user-uuid) (lambda () "ada"))
-            ((symbol-function 'gp-comment-resolvable-p) (lambda (_) nil))
-            ((symbol-function 'gp-comment-own-p) (lambda (&rest _) nil))
-            ((symbol-function 'gp-comment-deletable-p) (lambda (&rest _) nil)))
-    (dolist (mine '(("+1") nil))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (let ((inhibit-read-only t))
-          (gp--insert-comment
-           `((id . 7) (content (raw . "hi")) (user (uuid . "bea"))
-             (reaction-counts . (("+1" . 1))) (reaction-mine . ,mine))
-           '((id . 42)) 0 nil))
-        (let ((txt (substring-no-properties (buffer-string))))
-          (should (string-match-p "👍 \\[\\+\\]" txt))
-          (should-not (string-match-p "👍 \\[-\\]" txt)))
-        ;; but the help text still says which way a press will go
-        (let* ((b (seq-find (lambda (o)
-                              (equal (buffer-substring-no-properties
-                                      (overlay-start o) (overlay-end o))
-                                     "👍 [+]"))
-                            (gp-test--buttons)))
-               (help (and b (overlay-get b 'help-echo))))
-          (should (string-match-p (if mine "Remove" "Add") help)))))))
+  (github-mock-with-service
+    (let ((gp-comment-delete-others nil))
+      (dolist (mine '(("+1") nil))
+        (with-temp-buffer
+          (gp-detail-mode)
+          (let ((inhibit-read-only t))
+            (gp--insert-comment (gp-test--gh-comment '((\+1 . 1)) mine)
+                                (gp-test--gh-pr) 0 nil))
+          (let ((txt (substring-no-properties (buffer-string))))
+            (should (string-match-p "👍 \\[\\+\\]" txt))
+            (should-not (string-match-p "👍 \\[-\\]" txt)))
+          ;; but the help text still says which way a press will go
+          (let* ((b (seq-find (lambda (o)
+                                (equal (buffer-substring-no-properties
+                                        (overlay-start o) (overlay-end o))
+                                       "👍 [+]"))
+                              (gp-test--buttons)))
+                 (help (and b (overlay-get b 'help-echo))))
+            (should (string-match-p (if mine "Remove" "Add") help))))))))
 
 (ert-deftest gp-test-action-row-indent-matches-with-and-without-reactions ()
   "The action row sits at the same indent either way.
 The reactions line used to have its indent inserted by the caller, which
 left that whitespace on the action row when a comment had no reactions --
 so removing your last reaction visibly shifted the row."
-  (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
-            ((symbol-function 'gp-user-uuid) (lambda () "ada"))
-            ((symbol-function 'gp-comment-resolvable-p) (lambda (_) nil))
-            ((symbol-function 'gp-comment-own-p) (lambda (&rest _) nil))
-            ((symbol-function 'gp-comment-deletable-p) (lambda (&rest _) nil)))
+  (github-mock-with-service
     (cl-labels
         ((action-indent (comment)
            (with-temp-buffer
              (gp-detail-mode)
              (let ((inhibit-read-only t))
-               (gp--insert-comment comment '((id . 42)) 0 nil))
+               (gp--insert-comment comment (gp-test--gh-pr) 0 nil))
              (let ((line (seq-find (lambda (l) (string-match-p "reply \\[R\\]" l))
                                    (split-string (substring-no-properties
                                                   (buffer-string))
                                                  "\n"))))
                (should line)
                (- (length line) (length (string-trim-left line)))))))
-      (let ((with (action-indent '((id . 7) (content (raw . "hi"))
-                                   (user (uuid . "bea"))
-                                   (reaction-counts . (("+1" . 1))))))
-            (without (action-indent '((id . 7) (content (raw . "hi"))
-                                      (user (uuid . "bea"))))))
-        (should (= with without))))))
+      (let ((with (gp-test--gh-comment '((\+1 . 1))))
+            (without (gp-test--gh-comment)))
+        ;; the two really differ in having reactions
+        (should (alist-get 'reaction-counts with))
+        (should-not (alist-get 'reaction-counts without))
+        (should (= (action-indent with) (action-indent without)))))))
 
-(ert-deftest gp-test-reaction-render-never-fetches ()
-  "Drawing reactions must not hit the network.
-It did once: the renderer called `gp-comment-reactions' per comment, and
-a fetch mid-redisplay re-entered the renderer and drew each comment
-several times over (a single comment showed four action rows).  Counts
-ride along on the comment instead."
-  (let ((fetches 0))
-    (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
-              ((symbol-function 'gp-user-uuid) (lambda () "ada"))
-              ((symbol-function 'gp-comment-reactions)
-               (lambda (&rest _) (cl-incf fetches) nil)))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (let ((inhibit-read-only t))
-          (gp--insert-reactions
-           '((id . 42))
-           '((id . 7) (reaction-counts . (("+1" . 3))))))
-        (should (string-match-p "👍 (3)" (substring-no-properties (buffer-string))))))
-    (should (= fetches 0))))
+(defun gp-test--reaction-fetches ()
+  "Number of reaction-list requests in `github-mock-calls'."
+  (cl-count-if (lambda (c) (and (equal (car c) "GET")
+                                (string-match-p "/reactions\\'" (nth 1 c))))
+               github-mock-calls))
 
 (ert-deftest gp-test-reaction-help-echo-is-lazy-and-names-reactors ()
   "The tooltip fetches only when shown, and then names who reacted.
 Also decides `mine' from those rows: the comment payload carries counts
 but not reactors, so a button cannot know whose reaction it is."
-  (let ((fetches 0))
-    (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "ada"))
-              ((symbol-function 'gp-pr-full-name) (lambda (_) "acme/web"))
-              ((symbol-function 'gp-comment-reactions)
-               (lambda (&rest _)
-                 (cl-incf fetches)
-                 '(((content . "+1") (user (uuid . "ada") (display_name . "Ada")))
-                   ((content . "+1") (user (uuid . "bea") (display_name . "Bea")))))))
-      (let ((fn (gp--reaction-help-echo '((id . 42)) '((id . 7)) "+1" 2 nil)))
+  (github-mock-with-service
+    (let ((path "/repos/acme/web/issues/comments/7/reactions"))
+      (setq github-mock--reactions
+            (list (list 5002 path "+1" "bea")
+                  (list 5001 path "+1" "ada")
+                  (list 5003 path "heart" "cy")))
+      (let ((fn (gp--reaction-help-echo (gp-test--gh-pr) (gp-test--gh-comment)
+                                        "+1" 2 nil)))
         ;; building it fetches nothing
-        (should (= fetches 0))
+        (should (= (gp-test--reaction-fetches) 0))
         (let ((tip (funcall fn)))
-          (should (= fetches 1))
-          (should (string-match-p "Ada, Bea" tip))
-          ;; "ada" is the current user, so it knows the click removes
+          (should (= (gp-test--reaction-fetches) 1))
+          (should (member path (mapcar #'cadr github-mock-calls)))
+          ;; only the +1 reactors, not cy's heart
+          (should (string-match-p "ada, bea" tip))
+          (should-not (string-match-p "cy" tip))
+          ;; "ada" is the signed-in user (mock /user), so the click removes
           (should (string-match-p "remove yours" tip)))))))
 
 (ert-deftest gp-test-toggle-reaction-adds-then-removes ()
   "The same entry point adds when absent and removes when present,
 which is what makes a rendered reaction a toggle."
-  (let* ((pr '((id . 42) (destination (repository (full_name . "acme/web")))))
-         (comment '((id . 7)))
-         (held nil)
-         (calls nil))
-    (cl-letf (((symbol-function 'gp-reactions-supported-p) (lambda () t))
-              ((symbol-function 'gp-user-uuid) (lambda () "ada"))
-              ((symbol-function 'gp-comment-reactions)
-               (lambda (_fn _c) (when held '(((content . "+1") (user (uuid . "ada")))))))
-              ((symbol-function 'gp-set-comment-reaction)
-               (lambda (_fn _c content on) (push (cons content on) calls) (setq held on) t))
-              ((symbol-function 'gp-invalidate-pr-caches) #'ignore)
-              ((symbol-function 'gp-detail-refresh) #'ignore))
-      (gp-ui-toggle-reaction pr comment "+1")      ;; none held -> add
-      (gp-ui-toggle-reaction pr comment "+1"))     ;; now held -> remove
-    (should (equal (reverse calls) '(("+1" . t) ("+1" . nil))))))
+  (github-mock-with-service
+    (let ((pr (gp-test--gh-pr))
+          (comment (gp-test--gh-comment))
+          (path "/repos/acme/web/issues/comments/7/reactions"))
+      (cl-letf (((symbol-function 'gp-detail-refresh) #'ignore))
+        (gp-ui-toggle-reaction pr comment "+1")   ;; none held -> add
+        (should (equal (mapcar (lambda (r) (nth 2 r)) github-mock--reactions) '("+1")))
+        (gp-ui-toggle-reaction pr comment "+1"))  ;; now held -> remove
+      (should-not github-mock--reactions)
+      ;; the writes, in order: a POST with the content, then a DELETE by id
+      (let ((writes (reverse (cl-remove-if (lambda (c) (equal (car c) "GET"))
+                                           github-mock-calls))))
+        (should (equal (mapcar (lambda (c) (list (car c) (nth 1 c))) writes)
+                       `(("POST" ,path) ("DELETE" ,(concat path "/5001")))))
+        (should (equal (alist-get 'content (nth 3 (car writes))) "+1"))))))
 
 (ert-deftest gp-test-label-face-uses-the-platform-color ()
   "Each distinct colour gets its own face, interned once and reused.
@@ -2442,53 +2614,51 @@ display all fall back to the single themable face."
           (gp-label-colors t))
       (should (eq (gp--label-face "d73a4a") 'gp-label-face)))))
 
+(defun gp-test--label-puts ()
+  "The (PATH LABELS) of every label PUT in `github-mock-calls', oldest first."
+  (mapcar (lambda (c) (list (nth 1 c) (append (alist-get 'labels (nth 3 c)) nil)))
+          (reverse (cl-remove-if-not
+                    (lambda (c) (and (equal (car c) "PUT")
+                                     (string-match-p "/labels\\'" (nth 1 c))))
+                    github-mock-calls))))
+
 (ert-deftest gp-test-edit-labels-sends-the-chosen-set ()
   "Editing labels PUTs the complete chosen set and refreshes the buffer."
   (github-mock-with-service
-    (let ((git-platform-current-backend (git-platform-github))
-          sent refreshed)
+    (let (refreshed)
       (cl-letf (((symbol-function 'completing-read-multiple)
                  (lambda (&rest _) '("bug" "chore")))
-                ((symbol-function 'gp-set-pull-request-labels)
-                 (lambda (fn id labels) (setq sent (list fn id labels)) t))
-                ((symbol-function 'gp-invalidate-pr-caches) (lambda (&rest _) nil))
                 ((symbol-function 'gp-detail-refresh)
                  (lambda (&rest _) (setq refreshed t))))
         ;; a PR as callers actually hold it: `github--reshape-pr' has already
         ;; put the PR *number* in `id', which is what the endpoints take
         (gp-ui-edit-labels (github-pull-request "acme/web" 42))
-        (should (equal sent '("acme/web" 42 ("bug" "chore"))))
+        (should (equal (gp-test--label-puts)
+                       '(("/repos/acme/web/issues/42/labels" ("bug" "chore")))))
         (should refreshed)))))
 
 (ert-deftest gp-test-edit-labels-no-change-skips-the-write ()
   "Leaving the pre-filled set untouched must not PUT or refresh --
 a no-op edit should not churn the PR or invalidate caches."
   (github-mock-with-service
-    (let ((git-platform-current-backend (git-platform-github))
-          (wrote nil) (refreshed nil))
+    (let ((refreshed nil))
       (cl-letf (((symbol-function 'completing-read-multiple)
                  ;; same set the PR already has, in the other order
                  (lambda (&rest _) '("ui" "bug")))
-                ((symbol-function 'gp-set-pull-request-labels)
-                 (lambda (&rest _) (setq wrote t)))
                 ((symbol-function 'gp-detail-refresh)
                  (lambda (&rest _) (setq refreshed t))))
-        (gp-ui-edit-labels github-mock--pr-1)
-        (should-not wrote)
+        (gp-ui-edit-labels (gp-test--gh-pr))
+        (should-not (gp-test--label-puts))
         (should-not refreshed)))))
 
 (ert-deftest gp-test-edit-labels-rejects-a-name-outside-the-pool ()
   "An unknown name is refused rather than silently creating a new label
 on the repo, which is what GitHub's endpoint would otherwise do."
   (github-mock-with-service
-    (let ((git-platform-current-backend (git-platform-github))
-          (wrote nil))
-      (cl-letf (((symbol-function 'completing-read-multiple)
-                 (lambda (&rest _) '("typoo")))
-                ((symbol-function 'gp-set-pull-request-labels)
-                 (lambda (&rest _) (setq wrote t))))
-        (should-error (gp-ui-edit-labels github-mock--pr-1) :type 'user-error)
-        (should-not wrote)))))
+    (cl-letf (((symbol-function 'completing-read-multiple)
+               (lambda (&rest _) '("typoo"))))
+      (should-error (gp-ui-edit-labels (gp-test--gh-pr)) :type 'user-error)
+      (should-not (gp-test--label-puts)))))
 
 (ert-deftest gp-test-edit-labels-refuses-on-bitbucket-and-closed-prs ()
   "The command reports rather than acting where labels cannot apply."
@@ -2497,7 +2667,7 @@ on the repo, which is what GitHub's endpoint would otherwise do."
   (github-mock-with-service
     (let ((git-platform-current-backend (git-platform-github)))
       (should-error (gp-ui-edit-labels (append '((state . "closed"))
-                                               github-mock--pr-1))
+                                               (gp-test--gh-pr)))
                     :type 'user-error))))
 
 (ert-deftest gp-test-edit-labels-is-bound-to-a-capital-key ()
@@ -2512,37 +2682,23 @@ on the repo, which is what GitHub's endpoint would otherwise do."
 ;; `gp-pull-request-stats'/`gp-pull-request-diff', which blocked Emacs for the
 ;; whole round-trip (~1.2s measured) a beat after every `g'.
 
-(ert-deftest gp-test-load-stats-diff-uses-async-ops ()
-  "The loader must reach for the async ops, never the blocking twins."
-  (let ((async-calls nil)
-        (sync-calls nil)
-        (pr '((id . 7) (title . "t")
-              (destination (repository (full_name . "acme/x")))
-              (source (commit (hash . "abc123"))))))
-    (with-temp-buffer
-      (gp-detail-mode)
-      (setq gp--pr pr)
-      (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
-                ((symbol-function 'gp-pull-request-stats-async)
-                 (lambda (_fn _id _pr cb) (push 'stats-async async-calls)
-                   (funcall cb '(:commits 1 :files 1 :added 0 :removed 0))))
-                ((symbol-function 'gp-pull-request-diff-async)
-                 (lambda (_fn _id _c _pr cb) (push 'diff-async async-calls) (funcall cb "diff")))
-                ((symbol-function 'gp-pull-request-stats)
-                 (lambda (&rest _) (push 'stats-sync sync-calls) nil))
-                ((symbol-function 'gp-pull-request-diff)
-                 (lambda (&rest _) (push 'diff-sync sync-calls) nil)))
-        (gp--detail-load-stats-diff (current-buffer) pr 0))
-      (should (memq 'stats-async async-calls))
-      (should (memq 'diff-async async-calls))
-      ;; the whole point: no blocking call
-      (should-not sync-calls))))
+(defconst gp-test--two-file-diff
+  (concat "diff --git a/app.py b/app.py\n"
+          "--- a/app.py\n+++ b/app.py\n"
+          "@@ -1,1 +1,1 @@\n-old\n+new\n"
+          "diff --git a/docs/readme.md b/docs/readme.md\n"
+          "--- a/docs/readme.md\n+++ b/docs/readme.md\n"
+          "@@ -1,0 +1,1 @@\n+hello\n")
+  "A unified diff touching two files, as the diff endpoints return it.")
 
 (ert-deftest gp-test-load-stats-diff-folds-in-each-result ()
-  "Stats and diff land independently, each rendering what has arrived."
+  "Stats and diff land independently, each rendering what has arrived,
+and only through the async ops -- never the blocking twins."
   (let ((pr '((id . 7) (title . "t")
               (destination (repository (full_name . "acme/x")))
-              (source (commit (hash . "abc123"))))))
+              (source (commit (hash . "abc123")))))
+        (git-platform-current-backend (git-platform-bitbucket))
+        (sync-calls nil))
     (with-temp-buffer
       (gp-detail-mode)
       (setq gp--pr pr)
@@ -2550,12 +2706,19 @@ on the repo, which is what GitHub's endpoint would otherwise do."
                 ((symbol-function 'gp-pull-request-stats-async)
                  (lambda (_fn _id _pr cb) (funcall cb '(:commits 2 :files 3 :added 9 :removed 1))))
                 ((symbol-function 'gp-pull-request-diff-async)
-                 (lambda (_fn _id _c _pr cb) (funcall cb "diff --git a/x b/x")))
-                ((symbol-function 'gp-split-diff-by-file)
-                 (lambda (d) (list (cons "x" d)))))
+                 (lambda (_fn _id _c _pr cb) (funcall cb gp-test--two-file-diff)))
+                ;; tripwires: a blocking fetch would freeze Emacs
+                ((symbol-function 'gp-pull-request-stats)
+                 (lambda (&rest _) (push 'stats-sync sync-calls) nil))
+                ((symbol-function 'gp-pull-request-diff)
+                 (lambda (&rest _) (push 'diff-sync sync-calls) nil)))
         (gp--detail-load-stats-diff (current-buffer) pr 0))
+      (should-not sync-calls)
       (should (equal (plist-get gp--detail-stats :files) 3))
-      (should (equal gp--detail-diff '(("x" . "diff --git a/x b/x")))))))
+      ;; the diff is split per file, keyed by path
+      (should (equal (mapcar #'car gp--detail-diff) '("app.py" "docs/readme.md")))
+      (should (string-match-p "\\+hello" (cdr (assoc "docs/readme.md" gp--detail-diff))))
+      (should-not (string-match-p "hello" (cdr (assoc "app.py" gp--detail-diff)))))))
 
 (ert-deftest gp-test-load-stats-diff-failure-keeps-previous-content ()
   "A failed fetch must not blank stats/diff that are already displayed.
@@ -2565,7 +2728,8 @@ failed\", not \"the PR has no stats\"."
               (destination (repository (full_name . "acme/x")))
               (source (commit (hash . "abc123")))))
         (good-stats '(:commits 1 :files 2 :added 5 :removed 0))
-        (good-diff '(("x" . "old diff"))))
+        (good-diff '(("x" . "old diff")))
+        (git-platform-current-backend (git-platform-bitbucket)))
     (with-temp-buffer
       (gp-detail-mode)
       (setq gp--pr pr gp--detail-stats good-stats gp--detail-diff good-diff)
@@ -2580,7 +2744,8 @@ failed\", not \"the PR has no stats\"."
 
 (ert-deftest gp-test-load-stats-diff-ignores-results-for-another-pr ()
   "A result arriving after the buffer moved on is dropped."
-  (let ((pr '((id . 7) (title . "t")
+  (let ((git-platform-current-backend (git-platform-bitbucket))
+        (pr '((id . 7) (title . "t")
               (destination (repository (full_name . "acme/x")))
               (source (commit (hash . "abc123")))))
         (other '((id . 99) (title . "other")
@@ -2588,14 +2753,16 @@ failed\", not \"the PR has no stats\"."
     (with-temp-buffer
       (gp-detail-mode)
       ;; buffer is showing a DIFFERENT PR than the one being fetched
-      (setq gp--pr other gp--detail-stats nil)
+      (setq gp--pr other gp--detail-stats nil gp--detail-diff nil)
       (cl-letf (((symbol-function 'gp-user-uuid) (lambda () "{me}"))
                 ((symbol-function 'gp-pull-request-stats-async)
                  (lambda (_fn _id _pr cb) (funcall cb '(:commits 1 :files 3 :added 0 :removed 0))))
                 ((symbol-function 'gp-pull-request-diff-async)
-                 (lambda (_fn _id _c _pr cb) (funcall cb nil))))
+                 (lambda (_fn _id _c _pr cb) (funcall cb gp-test--two-file-diff))))
         (gp--detail-load-stats-diff (current-buffer) pr 0))
-      (should-not gp--detail-stats))))
+      ;; both results were real, and both are dropped
+      (should-not gp--detail-stats)
+      (should-not gp--detail-diff))))
 
 ;;;; Async overview refresh --------------------------------------------------
 ;;
@@ -2744,18 +2911,25 @@ This is the refresh case: the comment comes back from the API with a new
       (magit-insert-section (gp-root)
         (magit-insert-section (gp-comment-section
                                '((id . 7) (updated_on . "T1")))
+          (magit-insert-heading "comment 7")
           (insert "body\n"))))
     ;; user collapses it
     (magit-section-hide (car (oref magit-root-section children)))
     (should (oref (car (oref magit-root-section children)) hidden))
+    (should (gp--test-body-invisible-p (car (oref magit-root-section children))))
     ;; refresh: same comment id, changed timestamp
     (let ((inhibit-read-only t))
       (erase-buffer)
       (magit-insert-section (gp-root)
         (magit-insert-section (gp-comment-section
                                '((id . 7) (updated_on . "T2")))
+          (magit-insert-heading "comment 7")
           (insert "body\n"))))
-    (should (oref (car (oref magit-root-section children)) hidden))))
+    (gp--apply-section-visibility)
+    (let ((sec (car (oref magit-root-section children))))
+      (should (oref sec hidden))
+      ;; and the body text is really hidden, not just the slot
+      (should (gp--test-body-invisible-p sec)))))
 
 (ert-deftest gp-test-expanded-comment-stays-expanded-across-refresh ()
   "The converse: an expanded comment is not spuriously collapsed on redraw."

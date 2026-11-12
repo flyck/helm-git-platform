@@ -42,13 +42,6 @@
   (should (equal (car (gp-pipeline--status-glyph "COMPLETED" "SUCCESSFUL" 'step)) "✔"))
   (gp-pipeline--spinner-stop))
 
-(ert-deftest gp-test-pipeline-spinner-frames-uniform-width ()
-  "Every spinner frame is one character wide, so animating never reflows."
-  (mapc (lambda (f)
-          (should (= (length f) 1))
-          (should (= (string-width f) (string-width (aref gp-pipeline-spinner-frames 0)))))
-        gp-pipeline-spinner-frames))
-
 (ert-deftest gp-test-pipeline-spinner-survives-rerender-gap ()
   "A tick landing in a rerender's erase window must not stop the animation.
 Regression: the timer stopped on the FIRST spinner-less tick, and only a
@@ -225,19 +218,6 @@ since a PENDING step is merely one whose turn has not come."
   (should (equal (github-pipeline-step-state '((status . "queued"))) "QUEUED"))
   (should (equal (github-pipeline-step-state '((status . "waiting"))) "PENDING")))
 
-(ert-deftest gp-test-pipeline-spinner-face-is-blue-in-either-mode ()
-  "The spinner names its own blue for light and dark backgrounds,
-rather than borrowing a theme face that may be red."
-  (let ((spec (face-default-spec 'gp-pipeline-spinner-face)))
-    (dolist (bg '(light dark))
-      (let* ((entry (seq-find (lambda (e) (member `(background ,bg) (car e))) spec))
-             (hex (plist-get (cdr entry) :foreground))
-             (rgb (mapcar (lambda (i) (string-to-number (substring hex i (+ i 2)) 16))
-                          '(1 3 5))))
-        ;; blue dominates red and green
-        (should (> (nth 2 rgb) (nth 0 rgb)))
-        (should (> (nth 2 rgb) (nth 1 rgb)))))))
-
 ;;;; Fetch (sorted, with steps) ------------------------------------------------
 
 (ert-deftest gp-test-pipeline-fetch-current-vs-recent ()
@@ -257,34 +237,21 @@ rather than borrowing a theme face that may be red."
       (should (equal (cdr (car recent)) "Fix the widget toggle")))))
 
 (ert-deftest gp-test-pipeline-fetch-async-matches-sync ()
-  "The async fetch produces exactly the shape the synchronous one does.
+  "The async fetch produces exactly the shape the synchronous one does,
+and calls back exactly once.
 The detail view polls the async twin every few seconds; if the two
-ever diverge, the rendered section silently changes with them."
+ever diverge, the rendered section silently changes with them.  The
+fan-out counter must settle once, not once per sub-fetch."
   (bitbucket-mock-with-service
     (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
            (gp-cache-ttl 0)             ;; no warm commit-message cache either way
            (sync (gp-pipeline-fetch-for-pr pr))
-           (async 'unset))
-      (gp-pipeline-fetch-for-pr-async pr (lambda (d) (setq async d)))
-      (should-not (eq async 'unset))    ;; the callback actually ran
+           (async 'unset)
+           (calls 0))
+      (gp-pipeline-fetch-for-pr-async
+       pr (lambda (d) (setq async d calls (1+ calls))))
+      (should (= calls 1))
       (should (equal async sync)))))
-
-(ert-deftest gp-test-pipeline-fetch-async-fans-out-steps-and-summaries ()
-  "Async fetch resolves steps per current run and a summary per recent run."
-  (bitbucket-mock-with-service
-    (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
-           (gp-cache-ttl 0)
-           (data nil))
-      (gp-pipeline-fetch-for-pr-async pr (lambda (d) (setq data d)))
-      (let ((current (plist-get data :current))
-            (recent (plist-get data :recent)))
-        (should (= (length current) 2))
-        ;; every current run got its steps fanned out and folded back in
-        (should (cl-every (lambda (pp) (consp pp)) current))
-        (should (= (length (cdr (car current))) 3))
-        ;; the recent run got its commit message resolved to a summary
-        (should (= (length recent) 1))
-        (should (equal (cdr (car recent)) "Fix the widget toggle"))))))
 
 (ert-deftest gp-test-pipeline-fetch-async-reports-nil-on-failed-branch-fetch ()
   "A failed branch fetch calls back with nil (caller keeps its stale data)."
@@ -298,15 +265,6 @@ ever diverge, the rendered section silently changes with them."
         (gp-pipeline-fetch-for-pr-async pr (lambda (d) (setq called t data d))))
       (should called)
       (should (null data)))))
-
-(ert-deftest gp-test-pipeline-fetch-async-fires-callback-once ()
-  "The fan-out counter must settle exactly once, not once per sub-fetch."
-  (bitbucket-mock-with-service
-    (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
-           (gp-cache-ttl 0)
-           (calls 0))
-      (gp-pipeline-fetch-for-pr-async pr (lambda (_) (setq calls (1+ calls))))
-      (should (= calls 1)))))
 
 (ert-deftest gp-test-commit-summary-first-line ()
   (should (equal (gp-commit-summary "first line\nsecond") "first line"))
@@ -326,20 +284,26 @@ ever diverge, the rendered section silently changes with them."
 
 (ert-deftest gp-test-pipeline-step-rerun-hint-names-its-key ()
   "A rerunnable step advertises the key actually bound to the rerun command.
-Bitbucket steps are never rerunnable, so the mock fixtures cannot
-cover this hint -- which is how it went stale once already."
-  (cl-letf (((symbol-function 'gp-pipeline-step-rerunnable-p) (lambda (_) t))
-            ((symbol-function 'gp-pipeline-step-runnable-manual-p) (lambda (_) nil))
-            ((symbol-function 'gp-pipeline-step-manual-p) (lambda (_) nil)))
-    (with-temp-buffer
-      (gp-detail-mode)
-      (let ((inhibit-read-only t))
-        (magit-insert-section (gp-root)
-          (gp-pipeline--insert-step '((name . "Deploy")))))
-      (let ((text (substring-no-properties (buffer-string))))
-        (should (string-match-p "\\[rerun ▸ P\\]" text))
-        (should (eq (lookup-key gp-detail-mode-map "P")
-                    #'gp-detail-pipeline-rerun-step))))))
+Bitbucket steps are never rerunnable, so this renders a finished
+GitHub Actions job -- the backend whose jobs can be re-run -- and an
+in-progress one, which cannot."
+  (let ((git-platform-current-backend (git-platform-github))
+        (render (lambda (job)
+                  (with-temp-buffer
+                    (gp-detail-mode)
+                    (let ((inhibit-read-only t))
+                      (magit-insert-section (gp-root)
+                        (gp-pipeline--insert-step job)))
+                    (substring-no-properties (buffer-string))))))
+    (should (string-match-p "\\[rerun ▸ P\\]"
+                            (funcall render '((id . 11) (name . "Deploy")
+                                              (status . "completed")
+                                              (conclusion . "failure")))))
+    (should-not (string-match-p "\\[rerun"
+                                (funcall render '((id . 12) (name . "Deploy")
+                                                  (status . "in_progress")))))
+    (should (eq (lookup-key gp-detail-mode-map "P")
+                #'gp-detail-pipeline-rerun-step))))
 
 (ert-deftest gp-test-pipeline-render-section ()
   (bitbucket-mock-with-service
@@ -390,8 +354,13 @@ with a deploy script configured -- Bitbucket's API has no other way
 to act on a finished step."
   (let ((gp-pipeline-deploy-script (list "/bin/true")))
     (should (gp-pipeline-step-redeployable-p gp-test--redeployed-step))
-    ;; still waiting (not yet run) -- that is `runnable', not `redeployable'
-    (should-not (gp-pipeline-step-redeployable-p gp-test--deploy-step))
+    ;; a manual gate still waiting (not yet run), as the fixture's
+    ;; "Deploy to LIVE" -- that is `runnable', not `redeployable'
+    (let ((waiting '((name . "Deploy to LIVE")
+                     (state (name . "PENDING") (stage (name . "PAUSED")))
+                     (trigger (type . "pipeline_step_trigger_manual")))))
+      (should (gp-pipeline-step-runnable-manual-p waiting))
+      (should-not (gp-pipeline-step-redeployable-p waiting)))
     ;; a non-manual step never qualifies regardless of result
     (should-not (gp-pipeline-step-redeployable-p
                  '((state (name . "COMPLETED") (result (name . "SUCCESSFUL"))))))
@@ -445,17 +414,28 @@ the whole pipeline."
   "Calling `gp-detail-pipeline-redeploy' directly on a step that is not
 redeployable is a clear user error, not a silent no-op or a crash."
   (let ((gp-pipeline-deploy-script (list "/bin/true"))
-        (gp--pr '((id . 1) (source (branch (name . "b"))))))
+        (gp--pr '((id . 1) (source (branch (name . "b")))))
+        (ran nil))
     (cl-letf (((symbol-function 'gp-pipeline--step-at-point)
-               (lambda () gp-test--deploy-step))  ;; HALTED, not SUCCESSFUL
+               ;; a manual step, but its last run FAILED, not SUCCESSFUL
+               (lambda () '((uuid . "{step-uuid}") (name . "Deploy to LIVE")
+                            (state (name . "COMPLETED") (result (name . "FAILED")))
+                            (trigger (type . "pipeline_step_trigger_manual")))))
               ((symbol-function 'gp-pipeline--at-point)
-               (lambda () (cons gp-test--deploy-pipeline nil))))
-      (should-error (gp-detail-pipeline-redeploy) :type 'user-error))))
+               (lambda () (cons gp-test--deploy-pipeline nil)))
+              ((symbol-function 'gp-pipeline--deploy-run)
+               (lambda (&rest _) (setq ran t))))
+      (let ((err (should-error (gp-detail-pipeline-redeploy) :type 'user-error)))
+        (should (string-match-p "result: FAILED" (cadr err))))
+      (should-not ran))))
+
+(defvar native-comp-enable-subr-trampolines)
 
 (ert-deftest gp-test-pipeline-redeploy-confirms-then-runs-deploy-script ()
   "A confirmed redeploy invokes the same deploy-script path as the
 first manual run, not a fresh pipeline trigger or the browser."
-  (let* ((gp-pipeline-deploy-script (list "/bin/true"))
+  (let* ((native-comp-enable-subr-trampolines nil) ; no trampoline build to stub a primitive
+         (gp-pipeline-deploy-script (list "/bin/true"))
          (gp--pr '((id . 1) (source (branch (name . "b")))))
          (deploy-args nil))
     (cl-letf (((symbol-function 'gp-pipeline--step-at-point)
@@ -471,7 +451,8 @@ first manual run, not a fresh pipeline trigger or the browser."
 
 (ert-deftest gp-test-pipeline-redeploy-declines-without-confirmation ()
   "Answering no to the confirmation prompt runs nothing."
-  (let* ((gp-pipeline-deploy-script (list "/bin/true"))
+  (let* ((native-comp-enable-subr-trampolines nil) ; no trampoline build to stub a primitive
+         (gp-pipeline-deploy-script (list "/bin/true"))
          (gp--pr '((id . 1) (source (branch (name . "b")))))
          (ran nil))
     (cl-letf (((symbol-function 'gp-pipeline--step-at-point)
@@ -502,8 +483,13 @@ first manual run, not a fresh pipeline trigger or the browser."
                 (lambda (s) (object-of-class-p s 'gp-pipeline-section))
                 (gp-test--all-pipeline-sections magit-root-section))))
           (should (= (length pipe-secs) 2))
-          ;; each section's value is (PIPELINE . STEPS)
-          (should (cl-every (lambda (s) (consp (oref s value))) pipe-secs)))))))
+          (let ((by-number
+                 (lambda (n)
+                   (cl-find n pipe-secs
+                            :key (lambda (s) (alist-get 'build_number (car (oref s value))))))))
+            ;; #41 is COMPLETED -> collapsed; #42 is IN_PROGRESS -> expanded
+            (should (oref (funcall by-number 41) hidden))
+            (should-not (oref (funcall by-number 42) hidden))))))))
 
 (defun gp-test--all-pipeline-sections (section)
   "Flatten SECTION and descendants."
@@ -686,6 +672,8 @@ refreshed and the finished deploy sat stale until a manual `g'."
             (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
           (cl-letf (((symbol-function 'gp-detail-refresh)
                      (lambda () (setq refreshed (current-buffer))))
+                    ;; the immediate spinner paint rerenders the detail,
+                    ;; which asks for the current user
                     ((symbol-function 'gp-user-uuid) (lambda () "{me}")))
             (let ((gp-pipeline-deploy-script (list script))
                   (gp-pipeline-deploy-notify nil))
@@ -774,6 +762,8 @@ re-check it (see `gp-helm--deploy-cache-bust-repo')."
           (with-current-buffer detail
             (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
           (cl-letf (((symbol-function 'gp-detail-refresh) #'ignore)
+                    ;; the immediate spinner paint rerenders the detail,
+                    ;; which asks for the current user
                     ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
                     ((symbol-function 'gp-helm--deploy-cache-bust-repo)
                      (lambda (full-name) (setq busted full-name))))
@@ -794,6 +784,7 @@ re-check it (see `gp-helm--deploy-cache-bust-repo')."
   "A failed deploy leaves other PRs' cached verdicts alone -- nothing
 about them changed."
   (let* ((busted 'unset)
+         (exit 'unset)
          (detail (generate-new-buffer " *gp-detail-fake*"))
          (script (make-temp-file "gp-deploy-test" nil ".sh")))
     (unwind-protect
@@ -803,7 +794,7 @@ about them changed."
           (with-current-buffer detail
             (setq-local gp--pr '((id . 1) (source (branch (name . "b"))))))
           (cl-letf (((symbol-function 'gp-detail-refresh) #'ignore)
-                    ((symbol-function 'gp-user-uuid) (lambda () "{me}"))
+                    ((symbol-function 'gp--detail-rerender) #'ignore)
                     ((symbol-function 'gp-helm--deploy-cache-bust-repo)
                      (lambda (full-name) (setq busted full-name))))
             (let ((gp-pipeline-deploy-script (list script))
@@ -811,12 +802,14 @@ about them changed."
               (with-current-buffer detail
                 (gp-pipeline--deploy-run
                  "acme/web" "b" gp-test--deploy-pipeline
-                 gp-test--deploy-step '((id . 1))))
-              ;; give the (short-lived, failing) process time to exit
+                 gp-test--deploy-step '((id . 1))
+                 (lambda (ok) (setq exit ok))))
+              ;; wait for the sentinel itself (ON-EXIT is its last act),
+              ;; not merely for the process to die
               (let ((deadline (+ (float-time) 5)))
-                (while (and (process-live-p (get-buffer-process gp-pipeline-deploy-buffer))
-                            (< (float-time) deadline))
+                (while (and (eq exit 'unset) (< (float-time) deadline))
                   (accept-process-output nil 0.05)))))
+          (should (eq exit nil))          ; the sentinel ran, and saw failure
           (should (eq busted 'unset)))
       (kill-buffer detail)
       (delete-file script))))

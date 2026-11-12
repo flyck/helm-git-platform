@@ -107,7 +107,7 @@ saw no cache key to fetch and skipped every merged PR outright."
   (bitbucket-mock-with-service
     (let ((c (bitbucket-create-comment "ws/slug" 7 "looks good"
                                        '("src/a.ts" . 42))))
-      (should (= (alist-get 'id c) 99999))
+      (should c)
       ;; inspect the recorded POST body
       (let* ((call (cl-find "POST" bitbucket-mock-calls
                             :key #'car :test #'equal))
@@ -344,15 +344,18 @@ omitting it would blank the PR's title (same trap as `set-draft')."
 The endpoint replaces the whole object -- the mirror of
 `bitbucket-set-pull-request-description' having to resend the title."
   (bitbucket-mock-with-service
-    (bitbucket-set-pull-request-title "ws/slug" 7 "A better title")
+    (let ((bitbucket-mock-overrides
+           '(("/pullrequests/7\\'" . ((id . 7) (title . "Old title")
+                                      (description . "Existing body"))))))
+      (bitbucket-set-pull-request-title "ws/slug" 7 "A better title"))
     (let* ((put (car (cl-remove-if-not
                       (lambda (c) (and (equal (car c) "PUT")
                                        (string-suffix-p "/pullrequests/7" (nth 1 c))))
                       bitbucket-mock-calls)))
            (data (nth 3 put)))
       (should (equal (alist-get 'title data) "A better title"))
-      ;; present, so the existing description survives the replace
-      (should (assq 'description data)))))
+      ;; resent verbatim, so the existing description survives the replace
+      (should (equal (alist-get 'description data) "Existing body")))))
 
 (ert-deftest bitbucket-test-set-title-rejects-an-empty-title ()
   "An empty title fails locally rather than blanking the PR's title."
@@ -532,22 +535,31 @@ of falling back."
       (bitbucket-pull-request "acme/repo" 180)
       (should bitbucket-mock-calls))))
 
-(ert-deftest bitbucket-test-pull-request-nil-not-cached ()
-  "A nil PR result is not cached; a later fetch retries and can succeed."
-  (let ((bitbucket-cache-ttl 300)
-        (calls 0))
-    (bitbucket-cache-clear)
-    (cl-letf (((symbol-function 'bitbucket-api-request)
-               (lambda (&rest _)
-                 (cl-incf calls)
-                 (if (= calls 1) nil '((id . 180))))))
-      (should (null (bitbucket-pull-request "acme/repo" 180)))
+(ert-deftest bitbucket-test-pull-request-error-not-cached ()
+  "A failed PR fetch signals and is not cached; a later fetch retries.
+A GET of a PR never answers nil -- HTTP and transport failures make
+`bitbucket-api-request' signal -- so the reachable case is \"an error
+leaves no cache entry behind\"."
+  (bitbucket-mock-with-service
+    (let* ((bitbucket-cache-ttl 300)
+           (gets 0)
+           (bitbucket-mock-overrides
+            `(("/pullrequests/180\\'"
+               . ,(lambda (&rest _)
+                    (cl-incf gets)
+                    (if (= gets 1)
+                        (error "Bitbucket API GET -> HTTP 503")
+                      '((id . 180) (title . "Back")))))))
+           (pr-gets (lambda ()
+                      (cl-count-if (lambda (c) (string-suffix-p "/pullrequests/180" (nth 1 c)))
+                                   bitbucket-mock-calls))))
+      (should-error (bitbucket-pull-request "acme/repo" 180))
       ;; not cached -> retried, now succeeds
-      (should (equal (bitbucket-pull-request "acme/repo" 180) '((id . 180))))
-      (should (= calls 2))
-      ;; now cached -> no third call
-      (should (equal (bitbucket-pull-request "acme/repo" 180) '((id . 180))))
-      (should (= calls 2)))))
+      (should (equal (alist-get 'title (bitbucket-pull-request "acme/repo" 180)) "Back"))
+      (should (= (funcall pr-gets) 2))
+      ;; now cached -> no third request
+      (should (equal (alist-get 'title (bitbucket-pull-request "acme/repo" 180)) "Back"))
+      (should (= (funcall pr-gets) 2)))))
 
 (ert-deftest bitbucket-test-comments-not-cached ()
   "Comments are deliberately NOT cached: every call hits the service."
@@ -562,10 +574,10 @@ of falling back."
 
 (ert-deftest bitbucket-test-stats-cached-by-commit ()
   "Stats are cached keyed by the PR's source commit (one compute per commit)."
-  (let ((bitbucket-cache-ttl 300)
+  (let ((gp--result-cache (make-hash-table :test 'equal)) ; never the global one
+        (bitbucket-cache-ttl 300)
         (computes 0)
         (pr '((id . 180) (source (commit (hash . "abc123"))))))
-    (bitbucket-cache-clear)
     (cl-letf (((symbol-function 'bitbucket--pull-request-stats-1)
                (lambda (&rest _) (cl-incf computes) (list :files 2))))
       (should (equal (bitbucket-pull-request-stats "acme/repo" 180 pr) '(:files 2)))
@@ -576,38 +588,64 @@ of falling back."
         (bitbucket-pull-request-stats "acme/repo" 180 pr2)
         (should (= computes 2))))))
 
+(defun bitbucket-test--diffstat-overrides (statuses)
+  "`bitbucket-mock-overrides' giving PR 180 a diffstat of STATUSES.
+The PR carries its signed `links.diffstat.href', as the real payload
+does, and that href serves one diffstat entry per status in
+STATUSES; the PR's commit listing is a single commit."
+  (let ((href "https://api.bitbucket.org/2.0/repositories/acme/repo/diffstat/acme/repo:aaa%0Dbbb?from_pullrequest_id=180"))
+    `(("/diffstat/"
+       . ((values . ,(cl-loop for st in statuses for i from 1
+                              collect `((type . "diffstat") (status . ,st)
+                                        (lines_added . 1) (lines_removed . 0)
+                                        (old (path . ,(format "f%d.el" i)))
+                                        (new (path . ,(format "f%d.el" i))))))))
+      ("/pullrequests/180/commits\\'" . ((values ((hash . "bbb")))))
+      ("/pullrequests/180\\'"
+       . ((id . 180) (source (commit (hash . "bbb")))
+          (links (diffstat (href . ,href))))))))
+
 (ert-deftest bitbucket-test-mergeability-conflict-file ()
-  "A diffstat file with status \"merge conflict\" reports MERGEABLE nil."
-  (cl-letf (((symbol-function 'bitbucket-pull-request)
-             (lambda (&rest _) '((id . 180))))
-            ((symbol-function 'bitbucket-pull-request-stats)
-             (lambda (&rest _)
-               (list :file-list (list (list :path "a.el" :status "modified")
-                                       (list :path "b.el" :status "merge conflict"))))))
-    (should (equal (bitbucket-pull-request-mergeability "acme/repo" 180)
-                   '(nil . "unverified")))))
+  "A diffstat file with status \"merge conflict\" reports MERGEABLE nil.
+Driven through the PR's real `links.diffstat.href'."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           (bitbucket-test--diffstat-overrides '("modified" "merge conflict"))))
+      (should (equal (bitbucket-pull-request-mergeability "acme/repo" 180)
+                     '(nil . "unverified")))
+      ;; the diffstat came from the signed href, not a constructed path
+      (should (cl-find-if (lambda (c) (string-match-p "/diffstat/acme/repo:" (nth 1 c)))
+                          bitbucket-mock-calls)))))
 
 (ert-deftest bitbucket-test-mergeability-clean ()
   "No conflicted file in the diffstat reports MERGEABLE t."
-  (cl-letf (((symbol-function 'bitbucket-pull-request)
-             (lambda (&rest _) '((id . 180))))
-            ((symbol-function 'bitbucket-pull-request-stats)
-             (lambda (&rest _)
-               (list :file-list (list (list :path "a.el" :status "modified"))))))
-    (should (equal (bitbucket-pull-request-mergeability "acme/repo" 180)
-                   '(t . "unverified")))))
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           (bitbucket-test--diffstat-overrides '("modified" "added"))))
+      (should (equal (bitbucket-pull-request-mergeability "acme/repo" 180)
+                     '(t . "unverified"))))))
 
-(ert-deftest bitbucket-test-mergeability-no-diffstat-is-nil ()
-  "No file-list at all (PR or stats fetch failed) means \"cannot answer\"."
-  (cl-letf (((symbol-function 'bitbucket-pull-request)
-             (lambda (&rest _) nil)))
-    (should (null (bitbucket-pull-request-mergeability "acme/repo" 180)))))
+(ert-deftest bitbucket-test-mergeability-empty-diffstat-is-nil ()
+  "A diffstat listing no files gives nothing to judge: \"cannot answer\"."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides (bitbucket-test--diffstat-overrides '())))
+      (should (null (bitbucket-pull-request-mergeability "acme/repo" 180))))))
+
+(ert-deftest bitbucket-test-mergeability-failed-fetch-signals ()
+  "A failed PR fetch propagates out of the mergeability probe.
+Unlike `github-pull-request-mergeability' there is no `ignore-errors'
+here; the detail view's callers wrap the call themselves."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           `(("/pullrequests/180\\'"
+              . ,(lambda (&rest _) (error "Bitbucket API GET -> HTTP 503"))))))
+      (should-error (bitbucket-pull-request-mergeability "acme/repo" 180)))))
 
 (ert-deftest bitbucket-test-diff-cached-by-commit ()
   "The diff is cached when a commit hash is supplied; absent it, never cached."
-  (let ((bitbucket-cache-ttl 300)
+  (let ((gp--result-cache (make-hash-table :test 'equal)) ; never the global one
+        (bitbucket-cache-ttl 300)
         (fetches 0))
-    (bitbucket-cache-clear)
     (cl-letf (((symbol-function 'bitbucket--pull-request-diff-1)
                (lambda (&rest _) (cl-incf fetches) "DIFFTEXT")))
       ;; with a commit -> cached
@@ -622,9 +660,9 @@ of falling back."
 
 (ert-deftest bitbucket-test-diff-empty-not-cached ()
   "An empty diff is not cached, so a transient empty response is re-fetched."
-  (let ((bitbucket-cache-ttl 300)
+  (let ((gp--result-cache (make-hash-table :test 'equal)) ; never the global one
+        (bitbucket-cache-ttl 300)
         (calls 0))
-    (bitbucket-cache-clear)
     (cl-letf (((symbol-function 'bitbucket--pull-request-diff-1)
                (lambda (&rest _)
                  (cl-incf calls)
@@ -634,6 +672,29 @@ of falling back."
       (should (equal (bitbucket-pull-request-diff "acme/repo" 180 "abc") "REAL DIFF"))
       (should (= calls 2)))))
 
+(defconst bitbucket-test--stale-pr
+  '((id . 180)
+    (destination (repository (full_name . "acme/web-frontend")))
+    (participants ((role . "REVIEWER")
+                   (approved . t)
+                   (state . "approved")
+                   (user (uuid . "{stale}") (display_name . "Stale")))))
+  "A PR as a list-level cache may hold it: one approval, since withdrawn.")
+
+(defconst bitbucket-test--fresh-pr-overrides
+  '(("/pullrequests/180\\'"
+     . ((id . 180)
+        (destination (repository (full_name . "acme/web-frontend")))
+        (participants ((role . "REVIEWER")
+                       (approved)
+                       (state . "changes_requested")
+                       (user (uuid . "{fresh}") (display_name . "Fresh")))
+                      ((role . "PARTICIPANT")
+                       (approved)
+                       (state)
+                       (user (uuid . "{bystander}") (display_name . "Bystander")))))))
+  "The server's current PR 180: the one reviewer now requests changes.")
+
 (ert-deftest bitbucket-test-review-tally-async-refetches-not-stale ()
   "The async tally reflects the SERVER's current PR, not a stale local copy.
 Regression test: a PR object held in a list-level cache (e.g. Helm's
@@ -642,33 +703,25 @@ reviewer's vote does not invalidate that cache -- so the badge must
 come from a fresh fetch, not from re-deriving the tally off the
 passed-in PR's own (possibly stale) `participants'."
   (bitbucket-mock-with-service
-    (let* ((stale-pr '((id . 180)
-                       (destination (repository (full_name . "acme/web-frontend")))
-                       (participants ((role . "REVIEWER")
-                                       (approved . t)
-                                       (state . "approved")))))
-           tally)
-      ;; the mock's single-PR fixture has no participants at all, so a
-      ;; correct refetch reports zero approvals despite the stale PR
-      ;; object claiming one.
-      (bitbucket-pr-review-tally-async stale-pr (lambda (v) (setq tally v)))
-      (should (equal tally '(:approved 0 :changes 0 :pending 0))))))
+    (let ((bitbucket-mock-overrides bitbucket-test--fresh-pr-overrides)
+          tally)
+      (bitbucket-pr-review-tally-async bitbucket-test--stale-pr
+                                       (lambda (v) (setq tally v)))
+      (should (equal tally '(:approved 0 :changes 1 :pending 0))))))
 
 (ert-deftest bitbucket-test-reviewers-async-refetches-not-stale ()
   "The async per-reviewer breakdown also comes from a fresh fetch."
   (bitbucket-mock-with-service
-    (let* ((stale-pr '((id . 180)
-                       (destination (repository (full_name . "acme/web-frontend")))
-                       (participants ((role . "REVIEWER")
-                                       (approved . t)
-                                       (state . "approved")
-                                       (user (uuid . "{stale}"))))))
-           reviewers)
-      (bitbucket-pr-reviewers-async stale-pr (lambda (v) (setq reviewers v)))
-      (should (null reviewers)))))
+    (let ((bitbucket-mock-overrides bitbucket-test--fresh-pr-overrides)
+          reviewers)
+      (bitbucket-pr-reviewers-async bitbucket-test--stale-pr
+                                    (lambda (v) (setq reviewers v)))
+      (should (equal (mapcar (lambda (r) (list (plist-get r :id) (plist-get r :state)))
+                             reviewers)
+                     '(("{fresh}" changes)))))))
 
 (ert-deftest bitbucket-test-repo-branches-sorted-names ()
-  "Extracts just the name field, alphabetically, across pages."
+  "Extracts just the name field of each listed branch, alphabetically."
   (bitbucket-mock-with-service
     (let ((bitbucket-cache-ttl 0))
       (cl-letf (((symbol-function 'bitbucket-api-paged)

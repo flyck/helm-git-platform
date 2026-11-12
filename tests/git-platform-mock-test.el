@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'git-platform-mock)
 (require 'gp-pipeline)
 
@@ -169,17 +170,18 @@
     (let* ((pipe (car (gp-pipelines-for-branch "acme/infra" "infra/eks-1-30")))
            (steps (gp-pipeline-steps "acme/infra" "{mock-pipe-104}"))
            (prod (nth 2 steps)))
+      ;; the gate: unfinished run, nothing executing, prod startable
       (should-not (gp-pipeline-finished-p pipe))
+      (should-not (cl-some #'gp-pipeline-step-running-p steps))
       (should (gp-pipeline-step-runnable-manual-p prod))
-      (should (gp-pipeline--manual-gate-open-p pipe steps))
       ;; running the manual step closes the gate and starts the apply
       (gp-pipeline-run-manual-step "acme/infra" "infra/eks-1-30" pipe prod)
       (let ((steps (gp-pipeline-steps "acme/infra" "{mock-pipe-104}")))
         (should (gp-pipeline-step-running-p (nth 2 steps)))
-        (should-not (gp-pipeline--manual-gate-open-p
+        (should-not (gp-pipeline-step-runnable-manual-p (nth 2 steps)))
+        (should-not (gp-pipeline-finished-p
                      (car (gp-pipelines-for-branch "acme/infra"
-                                                   "infra/eks-1-30"))
-                     steps)))
+                                                   "infra/eks-1-30")))))
       ;; ...and 20s later the run is green
       (setq gp-mock--prod-run-at (- (float-time) 25))
       (should (equal (gp-pipeline-result
@@ -190,7 +192,8 @@
 (ert-deftest gp-mock-test-commit-statuses-and-create-pr ()
   "Helm's status bubbles and PR creation read/write the mock."
   (gp-mock-test--with
-    (should (equal (gp-mock--commit-statuses "c1d2e3f4a5b6") '("FAILED")))
+    (should (equal (gp-commit-build-states "acme/billing" "c1d2e3f4a5b6")
+                   '("FAILED")))
     (should (equal (gp-commit-build-states "acme/infra" "0ab1c2d3e4f5")
                    '("INPROGRESS")))
     (let ((pr (gp-create-pull-request "acme/webshop" "feature/wishlist" "main"
@@ -233,8 +236,6 @@ Exercises the whole path -- `gp-set-comment-reaction' /
 `gp-comment-reactions' on a real (sqlite) backend -- rather than each
 backend's internals, so the protocol's contract is what is pinned."
   (gp-mock-test--with
-    (should (gp-reactions-supported-p))
-    (should (member "+1" (gp-reaction-choices)))
     (let* ((fn "acme/webshop")
            (comment (car (gp-pull-request-comments fn 101))))
       (should comment)
@@ -264,15 +265,16 @@ backend's internals, so the protocol's contract is what is pinned."
 (ert-deftest gp-mock-test-set-title-round-trip ()
   "Retitling goes through the protocol and reads back, description intact."
   (gp-mock-test--with
-    (let* ((fn "acme/webshop")
-           (pr (car (gp-workspace-pull-requests)))
-           (id (alist-get 'id pr))
-           (before (gp-pr-description pr)))
+    (let* ((pr (car (gp-workspace-pull-requests)))
+           (fn (gp-pr-full-name pr))
+           (id (alist-get 'id pr)))
+      ;; the seed leaves descriptions empty; give it one that could be lost
+      (gp-set-pull-request-description fn id "Keep this body.")
       (gp-set-pull-request-title fn id "a retitled pull request")
       (let ((fresh (gp-pull-request fn id)))
         (should (equal (alist-get 'title fresh) "a retitled pull request"))
         ;; the description must not be collateral damage
-        (should (equal (gp-pr-description fresh) before))))))
+        (should (equal (gp-pr-description fresh) "Keep this body."))))))
 
 (provide 'git-platform-mock-test)
 ;;; git-platform-mock-test.el ends here

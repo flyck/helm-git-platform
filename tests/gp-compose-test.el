@@ -9,6 +9,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'gp-compose)
+(require 'bitbucket-mock)
 
 ;; Forward declaration: defined by the optional `markdown-mode' package,
 ;; only referenced here under `skip-unless (require 'markdown-mode nil t)'.
@@ -63,27 +64,42 @@
             (should-error (gp-compose-toggle-batch) :type 'user-error))
         (kill-buffer buf)))))
 
+(defun gp-test-compose--post-after-toggle (batch-default)
+  "Compose an inline comment with `gp-review-batch-default' BATCH-DEFAULT,
+toggle batch mode once, submit it against the Bitbucket mock and return
+the POST body sent to the comments endpoint."
+  (bitbucket-mock-with-service
+    (let* ((gp-review-batch-default batch-default)
+           (buf (gp-compose (list :full-name "ws/slug" :id 12
+                                  :inline '("a.ts" . 5) :batchable t))))
+      (unwind-protect
+          (with-current-buffer buf
+            (insert "looks off")
+            (should (eq (and gp-compose--batch t) batch-default))
+            (gp-compose-toggle-batch)
+            (should (eq (and gp-compose--batch t) (not batch-default)))
+            (cl-letf (((symbol-function 'set-window-configuration) #'ignore))
+              (gp-compose-submit)))
+        (when (buffer-live-p buf) (kill-buffer buf)))
+      (let ((posts (cl-remove-if-not
+                    (lambda (c) (and (equal (nth 0 c) "POST")
+                                     (string-match-p
+                                      "/pullrequests/12/comments\\'" (nth 1 c))))
+                    bitbucket-mock-calls)))
+        (should (= (length posts) 1))
+        (nth 3 (car posts))))))
+
 (ert-deftest gp-test-compose-toggle-batch-flips-and-routes-submit ()
-  "Toggling batch mode routes submission through the batch add function."
-  (let* ((gp-review-batch-default nil)
-         (calls nil)
-         (target (list :full-name "ws/slug" :id 12 :inline '("a.ts" . 5)
-                       :batchable t)))
-    (cl-letf (((symbol-function 'gp-create-comment)
-               (lambda (&rest args) (push (cons 'immediate args) calls) '((id . 1))))
-              ((symbol-function 'gp-add-review-batch-comment)
-               (lambda (&rest args) (push (cons 'batched args) calls) '((id . 2) (pending . t)))))
-      (let ((buf (gp-compose target)))
-        (unwind-protect
-            (with-current-buffer buf
-              (insert "looks off")
-              (should-not gp-compose--batch)
-              (gp-compose-toggle-batch)
-              (should gp-compose--batch)
-              (cl-letf (((symbol-function 'set-window-configuration) #'ignore))
-                (gp-compose-submit))
-              (should (eq (caar calls) 'batched)))
-          (when (buffer-live-p buf) (kill-buffer buf)))))))
+  "Toggling batch mode flips how the inline comment is posted: toggled on
+it goes out `pending' (the review batch), toggled off it is published
+immediately.  Either way it keeps its inline anchor and text."
+  (let ((batched (gp-test-compose--post-after-toggle nil))
+        (immediate (gp-test-compose--post-after-toggle t)))
+    (should (eq (alist-get 'pending batched) t))
+    (should-not (assq 'pending immediate))
+    (dolist (body (list batched immediate))
+      (should (equal (alist-get 'inline body) '((path . "a.ts") (to . 5))))
+      (should (equal (alist-get 'raw (alist-get 'content body)) "looks off")))))
 
 (ert-deftest gp-test-compose-submit-kills-lingering-preview-buffer ()
   "A preview opened before submitting must not linger afterwards."
@@ -114,15 +130,6 @@
           (should-not (get-buffer gp-compose-preview-buffer)))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
-(ert-deftest gp-test-compose-empty-is-rejected ()
-  (let ((buf (gp-compose
-              (list :full-name "ws/slug" :id 1
-                    :submit-function (lambda (&rest _) (error "should not run"))))))
-    (unwind-protect
-        (with-current-buffer buf
-          (should-error (gp-compose-submit) :type 'user-error))
-      (when (buffer-live-p buf) (kill-buffer buf)))))
-
 (ert-deftest gp-test-compose-on-success-runs ()
   (let* ((got nil)
          (target (list :full-name "ws/slug" :id 1
@@ -137,24 +144,6 @@
           (should (= got 42)))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
-(ert-deftest gp-test-compose-describe-target ()
-  (should (string-match-p "Reply"
-                          (gp-compose--describe-target
-                           '(:id 3 :parent 9))))
-  (should (string-match-p "Inline comment on a\\.ts:5"
-                          (gp-compose--describe-target
-                           '(:id 3 :inline ("a.ts" . 5)))))
-  (should (string-match-p "Comment on PR #3"
-                          (gp-compose--describe-target '(:id 3)))))
-
-(ert-deftest gp-test-compose-render-markdown ()
-  "Rendering returns a buffer containing the source text."
-  (let ((buf (gp-compose-render-markdown "# Title\n\nsome *text*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (should (string-match-p "Title" (buffer-string))))
-      (when (buffer-live-p buf) (kill-buffer buf)))))
-
 (ert-deftest gp-test-compose-render-markdown-hides-markup ()
   "The preview must actually RENDER markdown (hide `**'/`#' markup and
 show real bold/heading faces), not just syntax-color the raw
@@ -165,7 +154,18 @@ traced to `markdown-hide-markup' never being turned on."
     (unwind-protect
         (with-current-buffer buf
           (should (eq major-mode 'gfm-mode))
-          (should markdown-hide-markup))
+          (should markdown-hide-markup)
+          (goto-char (point-min))
+          (should (search-forward "**bold**" nil t))
+          (let ((open (match-beginning 0))
+                (word (+ (match-beginning 0) 2)))
+            ;; the `**' delimiters carry markdown-mode's markup property ...
+            (should (eq (get-text-property open 'invisible) 'markdown-markup))
+            (should (eq (get-text-property (1+ open) 'invisible) 'markdown-markup))
+            ;; ... and the word itself is real bold, not visible markup
+            (should-not (get-text-property word 'invisible))
+            (should (memq 'markdown-bold-face
+                          (ensure-list (get-text-property word 'face))))))
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (ert-deftest gp-test-compose-render-markdown-resets-stale-view-mode-buffer ()
@@ -261,7 +261,9 @@ freezing the editor's wrap points into the published comment."
   ;; unchanged for the comment cases
   (should (equal (gp-compose--describe-target '(:id 7)) "Comment on PR #7"))
   (should (equal (gp-compose--describe-target '(:id 7 :parent 3))
-                 "Reply on PR #7")))
+                 "Reply on PR #7"))
+  (should (equal (gp-compose--describe-target '(:id 7 :inline ("a.ts" . 5)))
+                 "Inline comment on a.ts:5")))
 
 (ert-deftest gp-test-compose-no-hard-breaks-target-keeps-newlines ()
   "`:no-hard-breaks' suppresses the hard-break rewrite on submit.

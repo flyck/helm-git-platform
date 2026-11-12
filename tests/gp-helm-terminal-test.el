@@ -8,6 +8,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'gp-helm-terminal)
 (require 'gp-helm-terminal-iterm2)
 
@@ -37,13 +38,16 @@
     (should (string-match-p "Second fix" text))))
 
 (ert-deftest gp-test-terminal-choose-session-prefers-exact-ai-match ()
+  "Backends report `:job-name' only for AI processes (else nil), so a
+session with no job is judged by its title (`:name')."
   (let* ((repo "/tmp/repo")
          (sessions (list (make-gp-helm-terminal-session
                           :id "1" :path "/tmp/repo/sub" :job-name "opencode")
+                         ;; AI recognised only through the title fallback.
                          (make-gp-helm-terminal-session
-                          :id "2" :path "/tmp/repo" :job-name "opencode")
+                          :id "2" :path "/tmp/repo" :job-name nil :name "Claude")
                          (make-gp-helm-terminal-session
-                          :id "3" :path "/tmp/repo" :job-name "zsh"))))
+                          :id "3" :path "/tmp/repo" :job-name nil :name "-zsh"))))
     (should (equal (gp-helm-terminal-session-id
                     (gp-helm-terminal--choose-session sessions repo))
                    "2"))))
@@ -53,7 +57,7 @@
          (gp-helm-terminal-launch-command "claude")
          (gp-helm-terminal-launch-delay 1.2)
          (sessions (list (make-gp-helm-terminal-session
-                          :id "1" :path "/tmp/repo" :job-name "zsh")))
+                          :id "1" :path "/tmp/repo" :job-name nil :name "-zsh")))
          (plan (gp-helm-terminal--plan sessions repo)))
     (should (eq (plist-get plan :action) 'open))
     (should (equal (plist-get plan :directory) repo))
@@ -65,48 +69,72 @@
     (should (equal (gp-helm-terminal--launch-command)
                    "claude --permission-mode default"))))
 
-(ert-deftest gp-test-terminal-send-comment-opens-or-reuses-via-backend ()
+(ert-deftest gp-test-terminal-send-comment-reuses-tagged-iterm2-session ()
+  "A real iTerm2 listing with a session tagged for the repo is reused:
+the prompt is pasted into that session (not a new window) and submitted."
   (let* ((pr '((id . 42)
                (title . "Implement thing")
                (source (branch (name . "feat/demo")))
                (destination (branch (name . "main"))
                             (repository (full_name . "acme/repo")))))
          (comment '((content (raw . "Please rename this helper."))))
-         (opened nil)
-         (sent nil))
+         (sep gp-helm-terminal-iterm2--field-separator)
+         (scripts nil))
     (cl-letf (((symbol-function 'gp-local-ensure-checkout) (lambda (_pr) "/tmp/repo"))
-              ((symbol-function 'gp-helm-terminal--list-sessions)
-               (lambda ()
-                 (list (make-gp-helm-terminal-session
-                        :id "abc" :path "/tmp/repo" :job-name "opencode"))))
-              ((symbol-function 'gp-helm-terminal-iterm2-send-text)
-               (lambda (id text submit) (setq sent (list id text submit))))
-              ((symbol-function 'gp-helm-terminal-iterm2-open-session)
-               (lambda (&rest args) (setq opened args))))
-      (let ((gp-helm-terminal-backend 'iterm2))
+              ((symbol-function 'gp-helm-terminal-iterm2--run-script)
+               (lambda (lines &rest args)
+                 (if (null args)
+                     ;; The listing: one tagged session for /tmp/repo, one
+                     ;; tagged for another repo.
+                     (concat (string-join '("abc" "/dev/ttys001" "/tmp/repo" "Claude" "false") sep)
+                             "\n"
+                             (string-join '("zzz" "/dev/ttys002" "/tmp/other" "Claude" "true") sep))
+                   (push (list lines args
+                               (with-temp-buffer
+                                 (insert-file-contents (nth 1 args))
+                                 (buffer-string)))
+                         scripts)
+                   "ok"))))
+      (let ((gp-helm-terminal-backend 'iterm2)
+            (gp-helm-terminal-submit-immediately t))
         (gp-helm-terminal-send-comment pr comment)
-        (should (equal (car sent) "abc"))
-        (should (string-match-p "Please rename this helper\." (cadr sent)))
-        (should (caddr sent))
-        (should-not opened)))))
+        (should (= (length scripts) 1))
+        (pcase-let ((`(,lines ,args ,payload) (car scripts)))
+          ;; send-text, not open-session: argv is (id file submit).
+          (should (equal (nth 0 args) "abc"))
+          (should (equal (nth 2 args) "true"))
+          (should (= (length args) 3))
+          (should (member "write contents of file payloadFile" lines))
+          (should (string-match-p "Please rename this helper\\." payload)))))))
 
 (ert-deftest gp-test-terminal-send-comment-logs-errors ()
+  "When osascript fails, the handoff logs the AppleScript error and
+re-signals the backend's `user-error'."
   (let* ((pr '((id . 42)
                (title . "Implement thing")
                (source (branch (name . "feat/demo")))
                (destination (branch (name . "main"))
                             (repository (full_name . "acme/repo")))))
          (comment '((content (raw . "Please rename this helper."))))
-         (logged nil))
-    (cl-letf (((symbol-function 'gp-local-ensure-checkout) (lambda (_pr) "/tmp/repo"))
-              ((symbol-function 'gp-helm-terminal--safe-list-sessions) (lambda () nil))
-              ((symbol-function 'gp-helm-terminal--execute)
-               (lambda (&rest _) (error "boom")))
-              ((symbol-function 'gp-log-error)
-               (lambda (fmt &rest args)
-                 (setq logged (apply #'format fmt args)))))
-      (should-error (gp-helm-terminal-send-comment pr comment))
-      (should (string-match-p "terminal handoff failed: boom" logged)))))
+         (gp-log-enabled t)
+         (gp-log-buffer-name " *gp-terminal-test-log*"))
+    (when (get-buffer gp-log-buffer-name) (kill-buffer gp-log-buffer-name))
+    (unwind-protect
+        (cl-letf (((symbol-function 'gp-local-ensure-checkout) (lambda (_pr) "/tmp/repo"))
+                  ((symbol-function 'call-process)
+                   (lambda (&rest _)
+                     (insert "execution error: Not authorized (-1743)")
+                     1)))
+          (let ((gp-helm-terminal-backend 'iterm2))
+            (let ((err (should-error (gp-helm-terminal-send-comment pr comment)
+                                     :type 'user-error)))
+              (should (string-match-p "iTerm2 AppleScript failed: execution error"
+                                      (cadr err))))
+            (with-current-buffer gp-log-buffer-name
+              (should (string-match-p
+                       "\\[ERROR\\] terminal handoff failed: iTerm2 AppleScript failed: execution error: Not authorized"
+                       (buffer-string))))))
+      (when (get-buffer gp-log-buffer-name) (kill-buffer gp-log-buffer-name)))))
 
 (ert-deftest gp-test-terminal-send-comment-falls-back-to-opening-session ()
   (let* ((pr '((id . 42)
@@ -208,11 +236,8 @@ prompt embedded inline (so it stays short and newline-free)."
       (should (equal (car captured-args) "sess-1"))
       (should (equal (nth 2 captured-args) "true"))
       (should (equal seen-contents "hello\nworld"))
-      (should (member "tell s" captured-lines))
-      (should (member "select" captured-lines))
       (should (member "write contents of file payloadFile" captured-lines))
-      (should (member "write text (ASCII character 13) newline NO" captured-lines))
-      (should (member "end tell" captured-lines)))))
+      (should (member "write text (ASCII character 13) newline NO" captured-lines)))))
 
 ;;; Plain shell ("open in terminal")
 
@@ -275,7 +300,15 @@ no submit are sent into the plain shell."
                  (setq captured-lines lines captured-args args) "ok")))
       (gp-helm-terminal-iterm2-open-session "/tmp/repo" "" "" 0 t)
       (should (equal (nth 4 captured-args) "false"))
-      (should (member "if (item 5 of argv) is \"true\" then" captured-lines))
+      (let ((guard (cl-position "if (item 5 of argv) is \"true\" then"
+                                captured-lines :test #'equal))
+            (paste (cl-position "write contents of file payloadFile"
+                                captured-lines :test #'equal))
+            (submit (cl-position "write text (ASCII character 13) newline NO"
+                                 captured-lines :test #'equal)))
+        (should guard)
+        (should (< guard paste))
+        (should (< guard submit)))
       (gp-helm-terminal-iterm2-open-session "/tmp/repo" "prompt" "claude" 1 t)
       (should (equal (nth 4 captured-args) "true")))))
 

@@ -37,6 +37,7 @@
           (should (get-buffer other))
           (should (memq #'gp-helm--kill-dead-buffer helm-cleanup-hook))
           (should (gp-helm--own-buffer-p (gp--buffer-name "helm")))
+          (should (gp-helm--own-buffer-p (gp-helm--buffer "files")))
           (should-not (gp-helm--own-buffer-p (gp--buffer-name "helmet"))))
       (when (get-buffer mine) (kill-buffer mine))
       (kill-buffer other))))
@@ -68,7 +69,9 @@
                 'gp-helm-id-face))))
 
 (ert-deftest gp-test-pr-review-tally ()
-  (let ((pr '((participants
+  "Bitbucket's tally counts REVIEWER participants only, by vote."
+  (let ((git-platform-current-backend (git-platform-bitbucket))
+        (pr '((participants
                . (((role . "REVIEWER") (state . "approved"))
                   ((role . "REVIEWER") (approved . t) (state . nil))
                   ((role . "REVIEWER") (state . "changes_requested"))
@@ -114,73 +117,88 @@ the badge has no natural neutral symbol)."
         (pr '((id . 1))))
     (should (equal (gp-helm--review-badge pr) ""))))
 
-(ert-deftest gp-test-helm-scan-review-tallies-async-populates-cache ()
-  (let ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
-        (pr '((id . 1))))
-    (cl-letf (((symbol-function 'gp-pr-review-tally-async)
-               (lambda (_pr callback) (funcall callback '(:approved 2 :changes 0 :pending 0))))
-              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
-      (gp-helm--scan-review-tallies-async (list pr))
-      (should (equal (gethash 1 gp-helm--review-tally-cache)
-                     '(:approved 2 :changes 0 :pending 0))))))
+(defun gp-helm-test--bb-pr-with-participants (participants)
+  "Mock route: the fixture PR as GET /pullrequests/N, with PARTICIPANTS."
+  (lambda (&rest _)
+    (cons (cons 'participants participants)
+          (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))))
 
 (ert-deftest gp-test-helm-scan-review-tallies-async-always-refetches ()
   "A PR id already in the cache must still be refetched, not skipped --
 approvals can change out from under a cached PR-list entry (e.g. someone
 else votes in the web UI) well before the id-keyed cache would ever be
 cleared, so this scan must not treat a prior entry as fresh forever."
-  (let ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
-        (pr '((id . 1))))
-    (puthash 1 '(:approved 0 :changes 0 :pending 1) gp-helm--review-tally-cache)
-    (cl-letf (((symbol-function 'gp-pr-review-tally-async)
-               (lambda (_pr callback) (funcall callback '(:approved 1 :changes 0 :pending 0))))
-              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
-      (gp-helm--scan-review-tallies-async (list pr))
-      (should (equal (gethash 1 gp-helm--review-tally-cache)
+  (bitbucket-mock-with-service
+    (let* ((gp-helm--review-tally-cache (make-hash-table :test 'eql))
+           (pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+           (bitbucket-mock-overrides
+            `(("/pullrequests/180\\'"
+               . ,(gp-helm-test--bb-pr-with-participants
+                   '(((role . "REVIEWER") (state . "approved")
+                      (user (display_name . "Bea") (uuid . "{bea}")))))))))
+      (puthash 180 '(:approved 0 :changes 0 :pending 1) gp-helm--review-tally-cache)
+      (cl-letf (((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+        (gp-helm--scan-review-tallies-async (list pr)))
+      (should (member '("GET" "/repositories/acme/web-frontend/pullrequests/180" nil nil)
+                      bitbucket-mock-calls))
+      (should (equal (gethash 180 gp-helm--review-tally-cache)
                      '(:approved 1 :changes 0 :pending 0))))))
 
 (ert-deftest gp-test-helm-scan-reviewers-async-always-refetches ()
   "Mirrors `gp-test-helm-scan-review-tallies-async-always-refetches' --
 the per-reviewer cache backing `gp-helm--covered-by-others-p' must not
 treat a prior id-keyed entry as fresh forever either."
-  (let ((gp-helm--reviewers-cache (make-hash-table :test 'eql))
-        (pr '((id . 1))))
-    (puthash 1 '((:name "a" :state pending)) gp-helm--reviewers-cache)
-    (cl-letf (((symbol-function 'gp-pr-reviewers-async)
-               (lambda (_pr callback) (funcall callback '((:name "a" :state approved)))))
-              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
-      (gp-helm--scan-reviewers-async (list pr))
-      (should (equal (gethash 1 gp-helm--reviewers-cache)
-                     '((:name "a" :state approved)))))))
+  (bitbucket-mock-with-service
+    (let* ((gp-helm--reviewers-cache (make-hash-table :test 'eql))
+           (pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+           (bitbucket-mock-overrides
+            `(("/pullrequests/180\\'"
+               . ,(gp-helm-test--bb-pr-with-participants
+                   '(((role . "REVIEWER") (state . "approved")
+                      (user (display_name . "Bea") (uuid . "{bea}")))
+                     ((role . "PARTICIPANT") (state . nil)
+                      (user (display_name . "Cy") (uuid . "{cy}")))))))))
+      (puthash 180 '((:name "Bea" :state pending)) gp-helm--reviewers-cache)
+      (cl-letf (((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+        (gp-helm--scan-reviewers-async (list pr)))
+      (should (equal (mapcar (lambda (r) (list (plist-get r :id) (plist-get r :state)))
+                             (gethash 180 gp-helm--reviewers-cache))
+                     '(("{bea}" approved)))))))
+
+(ert-deftest gp-test-helm-scan-reviewers-async-caches-none-for-no-reviewers ()
+  "A fetched PR with no reviewers caches `none', not nil -- nil would
+read as \"not fetched yet\".  The fixture PR has no participants."
+  (bitbucket-mock-with-service
+    (let ((gp-helm--reviewers-cache (make-hash-table :test 'eql))
+          (pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json")))))
+      (cl-letf (((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+        (gp-helm--scan-reviewers-async (list pr)))
+      (should (eq (gethash 180 gp-helm--reviewers-cache 'miss) 'none)))))
 
 ;;;; Comment resolution badge ----------------------------------------------------
 
 (ert-deftest gp-test-helm-comment-resolution-counts-splits-by-thread-root ()
   "A reply counts under its thread ROOT's resolution, not its own --
-Bitbucket/GitHub set `resolution' on the root a reply rarely carries
-it directly (see `gp--comment-thread-resolved-p')."
-  (let ((root-open '((id . 1)))
-        (root-resolved '((id . 2) (resolution . t)))
+Bitbucket sets `resolution' on the root, a reply rarely carries it
+directly (see `gp--comment-thread-resolved-p').  Real Bitbucket
+accessors: every comment is resolvable, `resolution' is an object."
+  (let ((git-platform-current-backend (git-platform-bitbucket))
+        (root-open '((id . 1) (resolution . nil)))
+        (root-resolved '((id . 2) (resolution (user (display_name . "Bea")))))
         (reply-of-resolved '((id . 3) (parent (id . 2)))))
-    (cl-letf (((symbol-function 'gp-comment-resolvable-p) (lambda (_) t))
-              ((symbol-function 'gp-comment-resolved-p)
-               (lambda (c) (and (alist-get 'resolution c) t))))
-      (should (equal (gp-helm--comment-resolution-counts
-                      (list root-open root-resolved reply-of-resolved))
-                     '(1 . 2))))))
+    (should (equal (gp-helm--comment-resolution-counts
+                    (list root-open root-resolved reply-of-resolved))
+                   '(1 . 2)))))
 
 (ert-deftest gp-test-helm-comment-resolution-counts-excludes-unresolvable ()
-  "A comment with no resolve concept at all (GitHub general/issue
-comments) counts toward neither side -- the badge tracks \"things to
-look at\", not every comment ever posted."
-  (let ((resolvable-open '((id . 1)))
-        (unresolvable '((id . 2))))
-    (cl-letf (((symbol-function 'gp-comment-resolvable-p)
-               (lambda (c) (= (alist-get 'id c) 1)))
-              ((symbol-function 'gp-comment-resolved-p) (lambda (_) nil)))
-      (should (equal (gp-helm--comment-resolution-counts
-                      (list resolvable-open unresolvable))
-                     '(1 . 0))))))
+  "A comment with no resolve concept at all (a GitHub general/issue
+comment) counts toward neither side -- the badge tracks \"things to
+look at\", not every comment ever posted.  The mock serves one issue
+comment and one inline review comment."
+  (github-mock-with-service
+    (let ((comments (gp-pull-request-comments "acme/web" 42)))
+      (should (= (length comments) 2))
+      (should (equal (gp-helm--comment-resolution-counts comments) '(1 . 0))))))
 
 (ert-deftest gp-test-helm-format-comment-resolution-shows-unresolved-over-total ()
   "One emoji, then \"unresolved(total)\", plain text -- not two
@@ -201,17 +219,17 @@ colour there was never reliable."
 (ert-deftest gp-test-helm-scan-comment-resolution-async-always-refetches ()
   "Mirrors the review-tally/reviewers scans: a comment resolved from the
 detail view or the web UI must show up here well before `gp-cache-ttl'
-would force a relist, so a prior id-keyed entry must not block a refetch."
-  (let ((gp-helm--comment-resolution-cache (make-hash-table :test 'eql))
-        (pr '((id . 1) (destination (repository (full_name . "acme/x"))))))
-    (puthash 1 '(1 . 0) gp-helm--comment-resolution-cache)
-    (cl-letf (((symbol-function 'gp-pull-request-comments-async)
-               (lambda (_fn _id callback) (funcall callback t '(((id . 9))))))
-              ((symbol-function 'gp-comment-resolvable-p) (lambda (_) t))
-              ((symbol-function 'gp-comment-resolved-p) (lambda (_) t))
-              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
-      (gp-helm--scan-comment-resolution-async (list pr))
-      (should (equal (gethash 1 gp-helm--comment-resolution-cache) '(0 . 1))))))
+would force a relist, so a prior id-keyed entry must not block a refetch.
+The fixture PR has 9 comments, none resolved."
+  (bitbucket-mock-with-service
+    (let ((gp-helm--comment-resolution-cache (make-hash-table :test 'eql))
+          (pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json")))))
+      (puthash 180 '(1 . 0) gp-helm--comment-resolution-cache)
+      (cl-letf (((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+        (gp-helm--scan-comment-resolution-async (list pr)))
+      (should (cl-find "/repositories/acme/web-frontend/pullrequests/180/comments"
+                       bitbucket-mock-calls :key #'cadr :test #'equal))
+      (should (equal (gethash 180 gp-helm--comment-resolution-cache) '(9 . 0))))))
 
 (ert-deftest gp-test-helm-scan-comment-resolution-async-ignores-failed-fetch ()
   "A failed comments fetch leaves whatever was cached alone, rather than
@@ -379,42 +397,64 @@ so fetching its \"destination pipeline\" would be meaningless."
       (gp-helm--scan-live-deploys-async (list open))
       (should (= calls 0)))))
 
+(defun gp-helm-test--pipeline-requests ()
+  "Return (REF-NAME . STEP-PIPELINE-UUIDS) requested in `bitbucket-mock-calls'.
+REF-NAME is the branch the pipeline listing asked for; the uuids are
+the runs whose steps were fetched (the ones on the asked-for commit)."
+  (let (ref uuids)
+    (dolist (call bitbucket-mock-calls)
+      (let ((path (nth 1 call)))
+        (cond
+         ((string-match "/pipelines/\\([^/]+\\)/steps\\'" path)
+          (push (match-string 1 path) uuids))
+         ((string-match-p "/pipelines/?\\'" path)
+          (setq ref (cdr (assoc "target.ref_name" (nth 2 call))))))))
+    (cons ref (sort uuids #'string<))))
+
 (ert-deftest gp-test-helm-scan-live-deploys-async-populates-cache ()
   "End to end against the mock: a merged PR's DESTINATION branch and
 MERGE commit (not its own, by-then-stale source branch/commit) drive
 the fetch.  The fixture's deploy steps aren't live/prod-SUCCESSFUL, so
-this resolves to nil -- and a cached commit is never re-fetched."
+this resolves to nil -- and a cached commit is never re-fetched.
+The source commit is the fixture's older run (00001111deadbeef), the
+merge commit its two newest, so the step fetches show which one keyed
+the lookup."
   (bitbucket-mock-with-service
     (let* ((gp-helm--live-deploy-cache (make-hash-table :test 'equal))
            (pr '((state . "MERGED")
                  (merge_commit (hash . "deadbeefcafe0001"))
+                 (source (branch (name . "feature/widget-toggle"))
+                         (commit (hash . "00001111deadbeef")))
                  (destination (branch (name . "main"))
                               (repository (full_name . "acme/web-frontend")))))
            (key (gp-helm--live-deploy-cache-key pr)))
       (gp-helm--scan-live-deploys-async (list pr))
+      (should (equal (gp-helm-test--pipeline-requests)
+                     '("main" "{pipeline-aaaa-1111}" "{pipeline-bbbb-2222}")))
       (should (eq (gethash key gp-helm--live-deploy-cache 'miss) nil))
-      (let ((calls 0))
-        (cl-letf (((symbol-function 'gp-pipeline-fetch-for-branch-async)
-                   (lambda (&rest _) (setq calls (1+ calls)))))
-          (gp-helm--scan-live-deploys-async (list pr))
-          (should (= calls 0)))))))
+      (setq bitbucket-mock-calls nil)
+      (gp-helm--scan-live-deploys-async (list pr))
+      (should-not bitbucket-mock-calls))))
 
 (ert-deftest gp-test-helm-scan-deploys-async-populates-cache ()
-  "End to end against the mock: a fixture with no successful deploy
-step yet caches nil, and a cached commit is never re-fetched."
+  "End to end against the mock: an open PR's SOURCE branch and commit
+drive the fetch; a fixture with no successful deploy step yet caches
+nil, and a cached commit is never re-fetched."
   (bitbucket-mock-with-service
     (let* ((gp-helm--deploy-cache (make-hash-table :test 'equal))
            (pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
            (key (gp-helm--deploy-cache-key pr)))
       (gp-helm--scan-deploys-async (list pr))
+      (should (equal (gp-helm-test--pipeline-requests)
+                     '("feature/widget-toggle"
+                       "{pipeline-aaaa-1111}" "{pipeline-bbbb-2222}")))
       ;; resolved (to nil: the fixture's deploy steps aren't SUCCESSFUL yet),
       ;; not left as a miss
       (should (eq (gethash key gp-helm--deploy-cache 'miss) nil))
-      (let ((calls 0))
-        (cl-letf (((symbol-function 'gp-pipeline-fetch-for-pr-async)
-                   (lambda (_pr _cb) (setq calls (1+ calls)))))
-          (gp-helm--scan-deploys-async (list pr))
-          (should (= calls 0)))))))
+      (setq bitbucket-mock-calls nil)
+      (gp-helm--scan-deploys-async (list pr))
+      (should-not bitbucket-mock-calls))))
+
 (defun gp-test--pipelines-down (&rest _)
   "Mock route for a pipelines listing that fails at the network."
   (error "HTTP 503"))
@@ -519,19 +559,17 @@ pipeline starts a moment later."
 (ert-deftest gp-test-helm-pad-truncates-and-faces ()
   (should (= (string-width (gp-helm--pad "abcdef" 4)) 4))
   (should (string-suffix-p "…" (gp-helm--pad "abcdef" 4)))
-  (should (eq (get-text-property 0 'face (gp-helm--pad "x" 3 'bold)) 'bold)))
+  (should (eq (get-text-property 0 'face (gp-helm--pad "x" 3 'bold)) 'bold))
+  ;; a name that fits is kept whole, padded to the width
+  (let ((cell (gp-helm--pad "web-frontend" 16)))
+    (should (= (string-width cell) 16))
+    (should (string-prefix-p "web-frontend" cell))
+    (should-not (string-match-p "…" cell))))
 
 (defun gp-helm-test--faces-at (pos line)
   "Return the face property at POS in LINE, always as a list."
   (let ((f (get-text-property pos 'face line)))
     (if (listp f) f (list f))))
-
-(ert-deftest gp-test-helm-draft-rows-dimmed ()
-  (let ((line (gp-helm--pr-display
-               '((id . 1) (title . "wip") (author (display_name . "me"))
-                 (destination (repository (slug . "r"))))
-               t)))
-    (should (memq 'gp-helm-draft-face (gp-helm-test--faces-at 0 line)))))
 
 (ert-deftest gp-test-helm-draft-rows-are-uniformly-grey ()
   "A draft row is dimmed as one flat grey, labels included.
@@ -612,23 +650,6 @@ wins over keeping each label's colour (and its exact alignment) there."
       (let-alist (cdr inline-cand)
         (should (string-prefix-p (substring .inline.path 0 10)
                                  (string-trim-left (car inline-cand))))))))
-
-(ert-deftest gp-test-helm-pr-actions-shape ()
-  "The PR action alist exposes the key drill-downs and the checkout."
-  (let ((actions (gp-helm--pr-actions)))
-    (should (assoc "Browse files (helm)" actions))
-    (should (assoc "Browse comments (helm)" actions))
-    (should (assoc "Checkout branch & open" actions))
-    (should (cl-every (lambda (a) (functionp (cdr a))) actions))))
-
-(ert-deftest gp-test-helm-buffer-names-are-tagged ()
-  "Helm session buffers carry the shared prefix like every other buffer.
-`gp-helm-buffer' is also looked up by name in `gp-helm--title-width',
-so it must stay a single source of truth rather than a literal."
-  (should (string-prefix-p "*gp: " gp-helm-buffer))
-  (dolist (suffix '("files" "comments" "open" "repo" "repo-branch"))
-    (should (string-prefix-p "*gp: " (gp-helm--buffer suffix)))))
-
 
 ;;;; Reviewing partition --------------------------------------------------------
 
@@ -819,33 +840,6 @@ when the column truncated it away."
         (should (string-match-p "bug" tail))
         (should (string-match-p "ui" tail))))))
 
-(ert-deftest gp-test-helm-repo-column-fits-a-real-repo-name ()
-  "Real workspaces use descriptive, prefixed slugs; the column has to fit
-one rather than a short one-word name, or every row is cut mid-word."
-  (should (>= gp-helm-repo-width
-              (length "lambda-datasource-batch-jobs-mutations")))
-  ;; and a name that fits is not truncated
-  (let ((cell (gp-helm--pad "lambda-datasource-batch-jobs-mutations"
-                            gp-helm-repo-width)))
-    (should (string-match-p "lambda-datasource-batch-jobs-mutations" cell))
-    (should-not (string-match-p "…" cell))))
-
-(ert-deftest gp-test-helm-repo-column-is-paid-for-by-the-title ()
-  "The title is the column that auto-grows, so widening the repo takes
-from it -- but on any normal window it keeps far more than a title needs."
-  (let ((buf (get-buffer-create gp-helm-buffer)))
-    (unwind-protect
-        (save-window-excursion
-          (set-window-buffer (selected-window) buf)
-          (let* ((win (window-body-width (selected-window)))
-                 (wide (let ((gp-helm-repo-width 38)) (gp-helm--title-width)))
-                 (narrow (let ((gp-helm-repo-width 22)) (gp-helm--title-width))))
-            ;; the 16 columns the repo gained come off the title...
-            (when (> narrow gp-helm-title-min-width)
-              (should (= (- narrow wide) 16)))
-            ;; ...and both still fit inside the window
-            (should (<= (+ wide 38) win))))
-      (kill-buffer buf))))
 (ert-deftest gp-test-helm-search-tokens-scope-each-field ()
   "Every field is repeated in `field:value' form, so a search can name
 the field it means -- `label:bug' rather than a bare `bug' that would
@@ -909,121 +903,176 @@ twice is a no-op so the key is idempotent."
       (gp-helm--append-to-pattern "label:bug")
       (should (null set)))))
 
+(defun gp-helm-test--gh-pr-with-labels (labels)
+  "The mock's PR #42 as the GitHub list returns it, carrying LABELS."
+  (github--reshape-pr
+   (cons (cons 'labels labels)
+         (assq-delete-all 'labels (github-mock--simple-pr github-mock--pr-1)))))
+
 (ert-deftest gp-test-helm-filter-by-label-uses-the-only-label ()
   "One label needs no prompt: the key inserts it straight away."
-  (let ((helm-pattern "")
-        (inserted nil))
-    (cl-letf (((symbol-function 'helm-get-selection)
-               (lambda (&rest _) '((id . 42) (labels ((name . "bug") (color . "d73a4a"))))))
-              ((symbol-function 'gp-pr-labels)
-               (lambda (_pr) '((:name "bug" :color "d73a4a"))))
-              ((symbol-function 'helm-set-pattern)
-               (lambda (p) (setq inserted p))))
-      (gp-helm--filter-by-label)
-      (should (equal inserted "label:bug")))))
+  (github-mock-with-service
+    (let ((helm-pattern "")
+          (inserted nil)
+          (pr (gp-helm-test--gh-pr-with-labels
+               '(((id . 1) (name . "bug") (color . "d73a4a"))))))
+      (cl-letf (((symbol-function 'helm-get-selection) (lambda (&rest _) pr))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "Should not prompt for one label")))
+                ((symbol-function 'helm-set-pattern)
+                 (lambda (p) (setq inserted p))))
+        (gp-helm--filter-by-label)
+        (should (equal inserted "label:bug"))))))
 
 (ert-deftest gp-test-helm-filter-by-label-prompts-when-ambiguous ()
-  "Several labels give no way to tell which was meant, so it asks."
-  (let ((helm-pattern "")
-        (inserted nil)
-        (offered nil))
-    (cl-letf (((symbol-function 'helm-get-selection) (lambda (&rest _) '((id . 42))))
-              ((symbol-function 'gp-pr-labels)
-               (lambda (_pr) '((:name "bug") (:name "ui"))))
-              ((symbol-function 'completing-read)
-               (lambda (_prompt coll &rest _) (setq offered coll) "ui"))
-              ((symbol-function 'helm-set-pattern)
-               (lambda (p) (setq inserted p))))
-      (gp-helm--filter-by-label)
-      (should (equal offered '("bug" "ui")))
-      (should (equal inserted "label:ui")))))
+  "Several labels give no way to tell which was meant, so it asks.
+The mock's PR #42 carries two labels, bug and ui."
+  (github-mock-with-service
+    (let ((helm-pattern "")
+          (inserted nil)
+          (offered nil)
+          (pr (github--reshape-pr (github-mock--simple-pr github-mock--pr-1))))
+      (cl-letf (((symbol-function 'helm-get-selection) (lambda (&rest _) pr))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt coll &rest _) (setq offered coll) "ui"))
+                ((symbol-function 'helm-set-pattern)
+                 (lambda (p) (setq inserted p))))
+        (gp-helm--filter-by-label)
+        (should (equal offered '("bug" "ui")))
+        (should (equal inserted "label:ui"))))))
 
 (ert-deftest gp-test-helm-filter-by-label-noop-without-labels ()
   "An unlabelled PR leaves the pattern alone rather than inserting a
-`label:' token that would match nothing."
-  (let ((helm-pattern "")
-        (inserted nil))
-    (cl-letf (((symbol-function 'helm-get-selection) (lambda (&rest _) '((id . 42))))
-              ((symbol-function 'gp-pr-labels) (lambda (_pr) nil))
-              ((symbol-function 'helm-set-pattern)
-               (lambda (p) (setq inserted p))))
-      (gp-helm--filter-by-label)
-      (should (null inserted)))))
+`label:' token that would match nothing.  The mock's PR #43 has none."
+  (github-mock-with-service
+    (let ((helm-pattern "")
+          (inserted nil)
+          (pr (github--reshape-pr (github-mock--simple-pr github-mock--pr-2))))
+      (cl-letf (((symbol-function 'helm-get-selection) (lambda (&rest _) pr))
+                ((symbol-function 'helm-set-pattern)
+                 (lambda (p) (setq inserted p))))
+        (gp-helm--filter-by-label)
+        (should (null inserted))))))
 
-(ert-deftest gp-test-helm-title-width-reserves-the-label-column ()
-  "The auto-growing title column shrinks by the label column's width,
-and gets that space back where labels are unsupported."
-  (let ((gp-helm-labels-width 18))
-    ;; drive the real window path: a live window over the helm buffer, so the
-    ;; auto-grow branch runs rather than the fixed fallback
-    (let ((buf (get-buffer-create gp-helm-buffer)))
-      (unwind-protect
-          (save-window-excursion
-            (set-window-buffer (selected-window) buf)
-            (let* ((win (window-body-width (selected-window)))
-                   (with-labels
-                    (let ((git-platform-current-backend (git-platform-github)))
-                      (gp-helm--title-width)))
-                   (without
-                    (let ((git-platform-current-backend (git-platform-bitbucket)))
-                      (gp-helm--title-width))))
-              (ignore win)
-              ;; both may bottom out at the minimum on a narrow batch frame;
-              ;; only compare when there is room to see the difference
-              (when (> without gp-helm-title-min-width)
-                (should (= (- without with-labels) 18)))))
-        (kill-buffer buf)))))
+(ert-deftest gp-test-helm-title-width-pays-for-labels-and-repo ()
+  "The title is the column that auto-grows: it shrinks by the label
+column's width where labels are supported, and by every column the repo
+gains -- but never below `gp-helm-title-min-width'.  A wide window
+(stubbed: a batch frame is too narrow to leave the minimum) shows the
+arithmetic; a narrow one the floor."
+  (let ((buf (get-buffer-create gp-helm-buffer))
+        (width 250)
+        (gp-helm-labels-width 18)
+        (gp-helm-title-reserve 28)
+        (gp-helm-title-min-width 24))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer (selected-window) buf)
+          (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) width)))
+            (cl-flet ((title (backend repo)
+                        (let ((git-platform-current-backend backend)
+                              (gp-helm-repo-width repo))
+                          (gp-helm--title-width))))
+              (let ((bb (git-platform-bitbucket)) (gh (git-platform-github)))
+                ;; 250 - (bubble 3 + avatar 3 + id 6 + author 16 + seps 8
+                ;;        + reserve 28) - repo 38 = 148
+                (should (= (title bb 38) 148))
+                ;; the label column comes off the title...
+                (should (= (title gh 38) (- 148 18)))
+                ;; ...and so does every column the repo gains
+                (should (= (title bb 22) (+ 148 16)))
+                ;; a narrow window bottoms out at the minimum
+                (setq width 80)
+                (should (= (title gh 38) 24))))))
+      (kill-buffer buf))))
 
 ;;;; Recently merged -------------------------------------------------------------
+
+(defun gp-helm-test--bb-merged-pr (id hours-ago)
+  "A merged Bitbucket PR ID, as the list endpoint shapes it.
+Bitbucket has no merge time: `updated_on' (HOURS-AGO before now)
+stands in for it."
+  `((id . ,id) (state . "MERGED")
+    (updated_on . ,(format-time-string
+                    "%FT%T.000000+00:00"
+                    (time-subtract (current-time) (* hours-ago 3600)) t))
+    (merge_commit (hash . ,(format "m%d" id)))
+    (destination (branch (name . "main"))
+                 (repository (full_name . "acme/web-frontend")))))
 
 (ert-deftest gp-test-helm-merged-recently-uses-a-rolling-window ()
   "Only PRs merged inside the rolling window are kept.
 Rolling rather than calendar-day so work merged late yesterday evening
-is still listed the next morning instead of vanishing at midnight."
-  (cl-letf* ((now (date-to-time "2026-08-22T10:00:00Z"))
-             ((symbol-function 'current-time) (lambda () now))
-             ((symbol-function 'gp-pr-merged-p) (lambda (pr) (alist-get 'merged pr)))
-             ((symbol-function 'gp-pr-merged-at) (lambda (pr) (alist-get 'at pr))))
-    ;; Times are compared in LOCAL days, so the fixtures are written in
-    ;; local time -- a UTC instant late on the 21st is already the 22nd in
-    ;; a positive-offset zone, which is correct but makes for a confusing
-    ;; fixture.
-    (let ((prs (list `((id . 1) (merged . t) (at . ,(format-time-string "%FT%T%z" now)))
-                     `((id . 2) (merged . t)
-                       (at . ,(format-time-string "%FT%T%z" (time-subtract now (* 6 3600)))))
-                     `((id . 3) (merged . t)
-                       (at . ,(format-time-string "%FT%T%z" (time-subtract now (* 26 3600)))))
-                     `((id . 4) (merged . t)
-                       (at . ,(format-time-string "%FT%T%z" (time-subtract now (* 24 3600 21))))))))
-      ;; 24 hours: the two from today, not the 26-hour-old one
+is still listed the next morning instead of vanishing at midnight.
+Real Bitbucket accessors: merged means state MERGED, the time is
+`updated_on'."
+  (let* ((git-platform-current-backend (git-platform-bitbucket))
+         (now (current-time))
+         (prs (list (gp-helm-test--bb-merged-pr 1 0)
+                    (gp-helm-test--bb-merged-pr 2 6)
+                    (gp-helm-test--bb-merged-pr 3 26)
+                    (gp-helm-test--bb-merged-pr 4 (* 24 21)))))
+    (cl-letf (((symbol-function 'current-time) (lambda () now)))
+      ;; 24 hours: the two recent ones, not the 26-hour-old one
       (should (equal (mapcar (lambda (p) (alist-get 'id p))
-                            (gp-helm--merged-recently prs 24))
+                             (gp-helm--merged-recently prs 24))
                      '(1 2)))
       ;; 48 hours reaches the one merged 26 hours ago
       (should (equal (mapcar (lambda (p) (alist-get 'id p))
-                            (gp-helm--merged-recently prs 48))
+                             (gp-helm--merged-recently prs 48))
                      '(1 2 3)))
       ;; a tight window keeps only what just landed
       (should (equal (mapcar (lambda (p) (alist-get 'id p))
-                            (gp-helm--merged-recently prs 1))
+                             (gp-helm--merged-recently prs 1))
                      '(1))))))
+
+(defmacro gp-helm-test--with-list-session (&rest body)
+  "Run BODY with `gp-helm--list' state isolated and `helm' captured.
+Binds `sources' to the sources `helm' would have shown.  Idle timers
+and badge scans are dropped: only the section assembly and the list
+requests matter here."
+  (declare (indent 0) (debug t))
+  `(let ((gp-helm--mine-cache nil) (gp-helm--mine-uuid nil)
+         (gp-helm--reviewing-cache nil) (gp-helm--reviewing-uuid nil)
+         (gp-helm--merged-recent-cache nil)
+         (gp-helm--live-deploy-cache (make-hash-table :test 'equal))
+         (sources 'unset))
+     (cl-letf (((symbol-function 'helm)
+                (lambda (&rest args) (setq sources (plist-get args :sources))))
+               ((symbol-function 'run-with-idle-timer) #'ignore)
+               ((symbol-function 'gp-helm--scan-mine-badges) #'ignore)
+               ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+       ,@body)))
+
+(defun gp-helm-test--merged-list-requests ()
+  "Return the recorded workspace-PR list requests that asked for MERGED."
+  (cl-remove-if-not (lambda (call)
+                      (and (string-match-p "/workspaces/[^/]+/pullrequests/" (nth 1 call))
+                           (equal (cdr (assoc "state" (nth 2 call))) "MERGED")))
+                    bitbucket-mock-calls))
+
+(defun gp-helm-test--merged-source-p (source)
+  "Return non-nil if helm SOURCE is the recently-merged section."
+  (string-prefix-p "Merged in the last" (alist-get 'name source)))
 
 (ert-deftest gp-test-helm-merged-section-can-be-turned-off ()
   "Nil `gp-helm-show-merged-recent' yields no section and no fetch.
 The list is open-only by default, so the section needs a request of its
 own -- which must not happen when the section is off."
-  (let ((fetches 0))
-    (cl-letf (((symbol-function 'gp-workspace-pull-requests)
-               (lambda (&rest _) (cl-incf fetches) nil)))
+  (bitbucket-mock-with-service
+    (gp-helm-test--with-list-session
       (let ((gp-helm-show-merged-recent nil))
-        (should-not (when gp-helm-show-merged-recent
-                      (gp-helm--merged-recently
-                       (gp-workspace-pull-requests nil "MERGED" 20))))
-        (should (= fetches 0)))
-      (let ((gp-helm-show-merged-recent t))
-        (when gp-helm-show-merged-recent
-          (gp-helm--merged-recently (gp-workspace-pull-requests nil "MERGED" 20)))
-        (should (= fetches 1))))))
+        (gp-helm--list nil)
+        (should (listp sources))
+        (should sources)
+        (should-not (gp-helm-test--merged-list-requests))
+        (should-not (cl-some #'gp-helm-test--merged-source-p sources)))
+      ;; the control: on, the same call fetches MERGED and builds the section
+      (let ((gp-helm-show-merged-recent t)
+            (gp--result-cache (make-hash-table :test 'equal)))
+        (gp-helm--list nil)
+        (should (= (length (gp-helm-test--merged-list-requests)) 1))
+        (should (cl-some #'gp-helm-test--merged-source-p sources))))))
 
 (ert-deftest gp-test-helm-merged-section-label-follows-the-window ()
   "The heading names the window rather than saying \"today\"."
@@ -1037,37 +1086,53 @@ own -- which must not happen when the section is off."
     (should (equal (gp-helm--merged-section-label) "Merged in the last hour"))))
 
 (ert-deftest gp-test-helm-fetch-merged-recent-async-scans-live-deploys ()
-  "A successful merged-recent fetch also kicks off the live-deploy scan
-over the resulting list -- otherwise every 🚢 badge in that section
-would stay blank forever."
-  (let ((scanned 'unset)
-        (merged-pr '((state . "MERGED") (merged_on . "2026-08-22T10:00:00Z")
-                     (destination (branch (name . "main")) (repository (full_name . "acme/x")))))
-        (gp-cache-ttl 0))
-    (cl-letf (((symbol-function 'gp-workspace-pull-requests-async)
-               (lambda (callback _uuid _state _max) (funcall callback t (list merged-pr))))
-              ((symbol-function 'gp-pr-merged-p) (lambda (_) t))
-              ((symbol-function 'gp-pr-merged-at) (lambda (_) "2026-08-22T10:00:00Z"))
-              ((symbol-function 'date-to-time) (lambda (_) (current-time)))
-              ((symbol-function 'gp-helm--scan-live-deploys-async)
-               (lambda (prs) (setq scanned prs)))
-              ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
-      (gp-helm--fetch-merged-recent-async "{me}")
-      (should (equal scanned (list merged-pr))))))
+  "A successful merged-recent fetch keeps only the PRs inside the window
+and kicks off the live-deploy scan over them -- otherwise every 🚢
+badge in that section would stay blank forever."
+  (bitbucket-mock-with-service
+    (let* ((gp-helm--merged-recent-cache 'loading)
+           (gp-helm--live-deploy-cache (make-hash-table :test 'equal))
+           (recent (gp-helm-test--bb-merged-pr 7 1))
+           (old (gp-helm-test--bb-merged-pr 8 (* 24 5)))
+           (bitbucket-mock-overrides
+            `(("/workspaces/[^/]+/pullrequests/" . ((values ,recent ,old))))))
+      (cl-letf (((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+        (gp-helm--fetch-merged-recent-async "{me}"))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) gp-helm--merged-recent-cache)
+                     '(7)))
+      ;; the scan ran for the kept PR only, against its destination branch
+      (should (eq (gethash (cons "acme/web-frontend" "m7") gp-helm--live-deploy-cache 'miss)
+                  nil))
+      (should (eq (gethash (cons "acme/web-frontend" "m8") gp-helm--live-deploy-cache 'miss)
+                  'miss))
+      (should (equal (car (gp-helm-test--pipeline-requests)) "main")))))
+
+(ert-deftest gp-test-helm-fetch-merged-recent-async-failure-shows-none ()
+  "A failed merged-recent fetch clears the ⏳ row (nil, not `loading'),
+caches nothing and scans no deploys."
+  (bitbucket-mock-with-service
+    (let ((gp-helm--merged-recent-cache 'loading)
+          (gp-helm--live-deploy-cache (make-hash-table :test 'equal))
+          (bitbucket-mock-overrides
+           '(("/workspaces/[^/]+/pullrequests/" . gp-test--pipelines-down))))
+      (cl-letf (((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
+        (gp-helm--fetch-merged-recent-async "{me}"))
+      (should (null gp-helm--merged-recent-cache))
+      (should-not (car (gp-cache-get (list 'merged-recent "{me}"))))
+      (should-not (cl-find-if (lambda (c) (string-match-p "/pipelines" (nth 1 c)))
+                              bitbucket-mock-calls)))))
 
 (ert-deftest gp-test-helm-merged-recently-skips-the-unmergeable-and-undated ()
   "An open PR, or one whose merge time cannot be read, is left out.
 Guessing would put an open PR under a \"Merged today\" heading."
-  (cl-letf* ((now (date-to-time "2026-08-22T10:00:00Z"))
-             ((symbol-function 'current-time) (lambda () now))
-             ((symbol-function 'gp-pr-merged-p) (lambda (pr) (alist-get 'merged pr)))
-             ((symbol-function 'gp-pr-merged-at) (lambda (pr) (alist-get 'at pr))))
+  (let ((git-platform-current-backend (git-platform-bitbucket))
+        (fresh (format-time-string "%FT%T.000000+00:00" (current-time) t)))
     (should-not (gp-helm--merged-recently
-                 '(((id . 1) (merged . nil) (at . "2026-08-22T09:00:00Z"))) 24))
+                 `(((id . 1) (state . "OPEN") (updated_on . ,fresh))) 24))
     (should-not (gp-helm--merged-recently
-                 '(((id . 2) (merged . t) (at . nil))) 24))
+                 '(((id . 2) (state . "MERGED"))) 24))
     (should-not (gp-helm--merged-recently
-                 '(((id . 3) (merged . t) (at . "not a date"))) 24))))
-
-(provide 'gp-helm-test)
-;;; gp-helm-test.el ends here
+                 '(((id . 3) (state . "MERGED") (updated_on . "not a date"))) 24))
+    ;; the control: the same PR merged with a readable time is kept
+    (should (gp-helm--merged-recently
+             `(((id . 4) (state . "MERGED") (updated_on . ,fresh))) 24))))

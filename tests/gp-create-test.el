@@ -15,6 +15,7 @@
 ;; leaves the compiler treating that as an unused lexical variable (and
 ;; every bitbucket-* call as an unknown function).
 (require 'bitbucket-api)
+(require 'bitbucket-mock)
 
 ;;;; Common prefix / title derivation -----------------------------------------
 
@@ -23,11 +24,6 @@
   (should (equal (gp-create--common-prefix
                   '("feat(api): add x" "feat(api): drop y"))
                  "feat(api)")))
-
-(ert-deftest gp-create-test-common-prefix-trims-separators ()
-  "Trailing separators are trimmed off the shared prefix."
-  (should (equal (gp-create--common-prefix '("auth: add x" "auth: drop y"))
-                 "auth")))
 
 (ert-deftest gp-create-test-common-prefix-none ()
   "Disjoint messages have no usable common prefix."
@@ -39,7 +35,11 @@
                  "Fix the thing")))
 
 (ert-deftest gp-create-test-title-common-denominator ()
-  "Several commits sharing a scope use that scope as the title."
+  "Several commits sharing a scope use that scope as the title, with the
+trailing separator trimmed off the shared prefix."
+  (should (equal (gp-create--common-prefix
+                  '("payments: add stripe" "payments: handle refunds"))
+                 "payments"))
   (should (equal (gp-create--derive-title
                   '("payments: add stripe" "payments: handle refunds")
                   "feature/payments")
@@ -98,128 +98,146 @@ the rest stays alphabetical."
 
 ;;;; Create request body ------------------------------------------------------
 
+(defun gp-create-test--post-pr-route (_method _path _params data)
+  "Mock answer to the create-PR POST: echo DATA back with an id."
+  (append '((id . 7)) data))
+
+(defun gp-create-test--create-posts ()
+  "The create-PR POSTs recorded by the Bitbucket mock, oldest first."
+  (reverse
+   (cl-remove-if-not
+    (lambda (c) (and (equal (nth 0 c) "POST")
+                     (string-match-p "/repositories/ws/slug/pullrequests\\'"
+                                     (nth 1 c))))
+    bitbucket-mock-calls)))
+
 (ert-deftest gp-create-test-request-body-options ()
-  "Draft, close-source-branch and reviewers all reach the POST body."
-  (require 'bitbucket-api)
-  (let (captured)
-    (cl-letf (((symbol-function 'bitbucket-api-request)
-               (lambda (_m _p &optional _params data)
-                 (setq captured data) '((id . 7)))))
-      (bitbucket-create-pull-request
-       "ws/slug" "feature/x" "main" "T"
-       :description "body" :draft t :close-source-branch t
-       :reviewer-uuids '("{uuid-a}" "{uuid-b}")))
-    (should (equal (alist-get 'title captured) "T"))
-    (should (eq (alist-get 'draft captured) t))
-    (should (eq (alist-get 'close_source_branch captured) t))
-    (should (equal (alist-get 'reviewers captured)
-                   '(((uuid . "{uuid-a}")) ((uuid . "{uuid-b}")))))))
+  "Through the backend protocol, every form field reaches the POST body:
+title, source, destination, description, draft, close-source-branch
+and reviewers."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           `(("/repositories/ws/slug/pullrequests\\'"
+              . gp-create-test--post-pr-route))))
+      (should (equal (alist-get 'id (gp-create-pull-request
+                                     "ws/slug" "feature/x" "main" "T" "body"
+                                     t t '("{uuid-a}" "{uuid-b}")))
+                     7))
+      (let* ((posts (gp-create-test--create-posts))
+             (body (nth 3 (car posts))))
+        (should (= (length posts) 1))
+        (should (equal (alist-get 'title body) "T"))
+        (should (equal (alist-get 'source body)
+                       '((branch . ((name . "feature/x"))))))
+        (should (equal (alist-get 'destination body)
+                       '((branch . ((name . "main"))))))
+        (should (equal (alist-get 'description body) "body"))
+        (should (eq (alist-get 'draft body) t))
+        (should (eq (alist-get 'close_source_branch body) t))
+        (should (equal (alist-get 'reviewers body)
+                       '(((uuid . "{uuid-a}")) ((uuid . "{uuid-b}")))))))))
 
 (ert-deftest gp-create-test-request-body-minimal ()
-  "Unset options are omitted entirely (no close_source_branch/reviewers keys)."
-  (require 'bitbucket-api)
-  (let (captured)
-    (cl-letf (((symbol-function 'bitbucket-api-request)
-               (lambda (_m _p &optional _params data)
-                 (setq captured data) '((id . 7)))))
-      (bitbucket-create-pull-request "ws/slug" "feature/x" "main" "T"))
-    (should (null (assq 'draft captured)))
-    (should (null (assq 'close_source_branch captured)))
-    (should (null (assq 'reviewers captured)))
-    (should (equal (alist-get 'destination captured)
-                   '((branch . ((name . "main"))))))))
+  "Unset options are omitted entirely: an empty description (what the
+form's trimmed blank field yields), no draft, no close_source_branch
+and no reviewers keys -- but source and destination are always sent."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           `(("/repositories/ws/slug/pullrequests\\'"
+              . gp-create-test--post-pr-route))))
+      (gp-create-pull-request "ws/slug" "feature/x" "main" "T" "" nil nil nil)
+      (let* ((posts (gp-create-test--create-posts))
+             (body (nth 3 (car posts))))
+        (should (= (length posts) 1))
+        (should (equal (alist-get 'title body) "T"))
+        (should (equal (alist-get 'source body)
+                       '((branch . ((name . "feature/x"))))))
+        (should (equal (alist-get 'destination body)
+                       '((branch . ((name . "main"))))))
+        (should-not (assq 'description body))
+        (should-not (assq 'draft body))
+        (should-not (assq 'close_source_branch body))
+        (should-not (assq 'reviewers body))))))
 
 ;;;; Default-reviewers caching ------------------------------------------------
 
+(defun gp-create-test--count-calls (regexp)
+  "Number of mock requests whose path matches REGEXP."
+  (cl-count-if (lambda (c) (string-match-p regexp (nth 1 c)))
+               bitbucket-mock-calls))
+
 (ert-deftest gp-create-test-default-reviewers-empty-not-cached ()
-  "An empty/failed reviewer fetch is not cached; a later call re-fetches."
-  (require 'bitbucket-api)
-  (let ((bitbucket-cache-ttl 300)
-        (calls 0))
-    (bitbucket-cache-clear)
-    (cl-letf (((symbol-function 'bitbucket-api-paged)
-               (lambda (&rest _)
-                 (cl-incf calls)
-                 ;; first call: empty (transient); second: real data
-                 (if (= calls 1) nil
-                   '(((uuid . "{u1}") (display_name . "Alice")))))))
+  "An empty/failed reviewer fetch is not cached; a later call re-fetches,
+and once it returns reviewers those are cached."
+  (bitbucket-mock-with-service
+    (let* ((bitbucket-cache-ttl 300)
+           (n 0)
+           (bitbucket-mock-overrides
+            `(("/repositories/ws/slug/default-reviewers"
+               . ,(lambda (&rest _)
+                    (cl-incf n)
+                    ;; first fetch: empty (transient); later: real data
+                    (if (= n 1) '((values))
+                      '((values ((uuid . "{u1}") (display_name . "Alice"))))))))))
       (should (null (bitbucket-repo-default-reviewers "ws/slug")))
-      ;; not cached -> the second call actually re-fetches and now succeeds
       (should (equal (bitbucket-repo-default-reviewers "ws/slug")
                      '(((uuid . "{u1}") (display_name . "Alice")))))
-      (should (= calls 2))
-      ;; now it IS cached -> no third fetch
+      (should (= (gp-create-test--count-calls "/default-reviewers") 2))
+      ;; now it IS cached -> no third request
       (should (equal (bitbucket-repo-default-reviewers "ws/slug")
                      '(((uuid . "{u1}") (display_name . "Alice")))))
-      (should (= calls 2)))))
+      (should (= (gp-create-test--count-calls "/default-reviewers") 2)))))
 
 ;;;; Bitbucket suggested reviewers (workspace members) -------------------------
 
+(defconst gp-create-test--me "{21d7839d-779f-44b2-8c40-6f43ac90be06}"
+  "The uuid of the mock's authenticated user (fixtures/user.json).")
+
+(defun gp-create-test--members-route (_method path &rest _)
+  "Two pages of workspace members; the first links to the second.
+Page 1 holds the authenticated user and Alice, page 2 holds Bob."
+  (if (string-match-p "page=2" path)
+      '((values ((user . ((uuid . "{u2}") (display_name . "Bob"))))))
+    `((values ((user . ((uuid . ,gp-create-test--me) (display_name . "Me"))))
+              ((user . ((uuid . "{u1}") (display_name . "Alice")))))
+      (next . "https://api.bitbucket.org/2.0/workspaces/ws/members?page=2"))))
+
 (ert-deftest gp-create-test-bitbucket-suggested-unwraps-members ()
-  "Workspace members arrive nested under `user'; candidates are flat."
-  (require 'bitbucket-api)
-  (bitbucket-cache-clear)
-  (cl-letf (((symbol-function 'bitbucket-api-paged)
-             (lambda (path &rest _)
-               (should (string-match-p "/workspaces/ws/members" path))
-               '(((user . ((uuid . "{u1}") (display_name . "Alice"))))
-                 ((user . ((uuid . "{u2}") (display_name . "Bob")))))))
-            ((symbol-function 'bitbucket-user-uuid) (lambda () "{me}"))
-            ((symbol-function 'bitbucket-repo-default-reviewers) (lambda (_) nil)))
-    (should (equal (bitbucket-repo-suggested-reviewers "ws/slug")
-                   '(((uuid . "{u1}") (display_name . "Alice"))
-                     ((uuid . "{u2}") (display_name . "Bob")))))))
+  "Workspace members arrive nested under `user' and across pages;
+candidates are flat, in order, without yourself."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           '(("/default-reviewers" . ((values)))
+             ("/workspaces/ws/members" . gp-create-test--members-route))))
+      (should (equal (bitbucket-repo-suggested-reviewers "ws/slug")
+                     '(((uuid . "{u1}") (display_name . "Alice"))
+                       ((uuid . "{u2}") (display_name . "Bob")))))
+      ;; both pages were actually requested
+      (should (= (gp-create-test--count-calls "/workspaces/ws/members") 2)))))
 
 (ert-deftest gp-create-test-bitbucket-suggested-excludes-self-and-defaults ()
   "You are never your own reviewer, and defaults are not offered twice."
-  (require 'bitbucket-api)
-  (bitbucket-cache-clear)
-  (cl-letf (((symbol-function 'bitbucket-api-paged)
-             (lambda (&rest _)
-               '(((user . ((uuid . "{me}")  (display_name . "Me"))))
-                 ((user . ((uuid . "{u1}")  (display_name . "Alice"))))
-                 ((user . ((uuid . "{u2}")  (display_name . "Bob")))))))
-            ((symbol-function 'bitbucket-user-uuid) (lambda () "{me}"))
-            ((symbol-function 'bitbucket-repo-default-reviewers)
-             (lambda (_) '(((uuid . "{u1}") (display_name . "Alice"))))))
-    (should (equal (bitbucket-repo-suggested-reviewers "ws/slug")
-                   '(((uuid . "{u2}") (display_name . "Bob")))))))
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           '(("/repositories/ws/slug/default-reviewers"
+              . ((values ((uuid . "{u1}") (display_name . "Alice")))))
+             ("/workspaces/ws/members" . gp-create-test--members-route))))
+      (should (equal (bitbucket-repo-suggested-reviewers "ws/slug")
+                     '(((uuid . "{u2}") (display_name . "Bob"))))))))
 
 (ert-deftest gp-create-test-bitbucket-suggested-survives-api-failure ()
-  "A members fetch the token cannot make must not break the create form."
-  (require 'bitbucket-api)
-  (bitbucket-cache-clear)
-  (cl-letf (((symbol-function 'bitbucket-api-paged)
-             (lambda (&rest _) (error "403 Forbidden")))
-            ((symbol-function 'bitbucket-user-uuid) (lambda () "{me}"))
-            ((symbol-function 'bitbucket-repo-default-reviewers) (lambda (_) nil)))
-    (should (null (bitbucket-repo-suggested-reviewers "ws/slug")))))
+  "A members fetch the token cannot make must not break the create form,
+and the failure is not cached: the next call asks again."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           `(("/default-reviewers" . ((values)))
+             ("/workspaces/ws/members"
+              . ,(lambda (&rest _) (error "403 Forbidden"))))))
+      (should (null (bitbucket-repo-suggested-reviewers "ws/slug")))
+      (should (null (bitbucket-repo-suggested-reviewers "ws/slug")))
+      (should (= (gp-create-test--count-calls "/workspaces/ws/members") 2)))))
 
 ;;;; Default vs. suggested reviewer checkboxes ---------------------------------
-
-(ert-deftest gp-create-test-default-reviewers-checked-by-default ()
-  "Default reviewers get a checked checkbox."
-  (require 'wid-edit)
-  (cl-letf (((symbol-function 'gp-repo-default-reviewers)
-             (lambda (_) '(((uuid . "alice") (display_name . "Alice")))))
-            ((symbol-function 'gp-repo-suggested-reviewers)
-             (lambda (_) nil)))
-    (with-temp-buffer
-      (let ((alist (gp-create--insert-reviewers "acme/web")))
-        (should (equal (mapcar #'car alist) '("alice")))
-        (should (widget-value (cdr (assoc "alice" alist))))))))
-
-(ert-deftest gp-create-test-suggested-reviewers-unchecked-by-default ()
-  "Suggested reviewers (GitHub collaborators) get an unchecked checkbox."
-  (require 'wid-edit)
-  (cl-letf (((symbol-function 'gp-repo-default-reviewers)
-             (lambda (_) nil))
-            ((symbol-function 'gp-repo-suggested-reviewers)
-             (lambda (_) '(((uuid . "bob") (display_name . "Bob"))))))
-    (with-temp-buffer
-      (let ((alist (gp-create--insert-reviewers "acme/web")))
-        (should (equal (mapcar #'car alist) '("bob")))
-        (should-not (widget-value (cdr (assoc "bob" alist))))))))
 
 (ert-deftest gp-create-test-default-and-suggested-reviewers-combined ()
   "Both groups render together, defaults checked and suggestions not,
@@ -279,21 +297,26 @@ and `gp-create--selected-reviewer-uuids' only picks up checked ones."
         (should (string-match-p "Keep Me *★" (buffer-string)))))))
 
 (ert-deftest gp-create-test-preferred-never-invents-a-reviewer ()
-  "An id matching no candidate yields no widget -- and is logged, not silent."
-  (let ((gp-create-preferred-reviewers '("{ghost}"))
+  "Rendering the reviewers section: an id matching no candidate yields no
+widget -- and is logged, not silent; a matching one is still honoured."
+  (require 'wid-edit)
+  (let ((gp-create-preferred-reviewers '("{ghost}" "{real}"))
         (logged nil))
     (cl-letf (((symbol-function 'gp-log)
                (lambda (_lvl fmt &rest args)
-                 (setq logged (apply #'format fmt args)))))
+                 (push (apply #'format fmt args) logged)))
+              ((symbol-function 'gp-repo-default-reviewers) (lambda (_) nil))
+              ((symbol-function 'gp-repo-suggested-reviewers)
+               (lambda (_) '(((uuid . "{real}") (display_name . "Real Person"))
+                             ((uuid . "{other}") (display_name . "Other"))))))
       (with-temp-buffer
-        (let ((widgets (gp-create--insert-reviewer-list
-                        '(((uuid . "{real}") (display_name . "Real Person")))
-                        nil)))
-          (should-not (assoc "{ghost}" widgets))
-          (should-not (widget-value (cdr (assoc "{real}" widgets)))))
-        (gp-create--log-unmatched-preferred
-         '(((uuid . "{real}") (display_name . "Real Person")))))
-      (should (string-match-p "{ghost}" (or logged ""))))))
+        (let ((widgets (gp-create--insert-reviewers "acme/web")))
+          (should (equal (mapcar #'car widgets) '("{real}" "{other}")))
+          (should (widget-value (cdr (assoc "{real}" widgets))))
+          (should-not (widget-value (cdr (assoc "{other}" widgets))))))
+      (should (seq-some (lambda (m) (string-match-p "{ghost}" m)) logged))
+      ;; only the unmatched entry is reported
+      (should-not (seq-some (lambda (m) (string-match-p "{real}" m)) logged)))))
 
 (ert-deftest gp-create-test-draft-default-follows-defcustom ()
   "The \"Create as draft\" box starts ticked iff `gp-create-draft' is non-nil.

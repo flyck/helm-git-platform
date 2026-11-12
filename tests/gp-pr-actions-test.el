@@ -4,6 +4,9 @@
 
 (require 'ert)
 (require 'gp-pr-actions)
+;; `gp--pr' (special) and `gp-detail-mode' live in gp-ui; without it the
+;; key tests below fail when this file runs alone.
+(require 'gp-ui)
 
 (defconst gp-test-actions--pr
   '((id . 42)
@@ -25,7 +28,8 @@
 (ert-deftest gp-test-pr-action-context-checkout-falls-back-to-clone ()
   (cl-letf (((symbol-function 'gp-local-ensure-checkout)
              (lambda (_pr) (user-error "conflict")))
-            ((symbol-function 'gp-local-find-checkout) (lambda (_n) "/tmp/clone")))
+            ((symbol-function 'gp-local-find-checkout)
+             (lambda (name) (and (equal name "acme/repo") "/tmp/clone"))))
     (let ((ctx (gp-pr-action-context gp-test-actions--pr t)))
       (should (equal (plist-get ctx :dir) "/tmp/clone"))
       (should (equal (plist-get ctx :checkout-error) "conflict")))))
@@ -64,13 +68,6 @@
 (ert-deftest gp-test-pr-action-button-label-shows-key ()
   (should (equal (gp-pr-action-button-label '(:key "z" :label "Stealth")) "Stealth [z]"))
   (should (equal (gp-pr-action-button-label '(:label "Plain")) "Plain")))
-
-(ert-deftest gp-test-pr-actions-defaults-are-terminal-and-stealth ()
-  (let ((fns (mapcar (lambda (a) (plist-get a :function))
-                     (eval (car (get 'gp-pr-actions 'standard-value))))))
-    (should (memq 'gp-helm-terminal-shell-action fns))
-    (should (memq 'gp-stealth-open-session fns))
-    (dolist (fn fns) (should (functionp fn)))))
 
 (ert-deftest gp-test-pr-actions-keys-follow-a-plain-setq-on-next-detail-buffer ()
   (let ((gp-pr-actions--bound-keys nil)

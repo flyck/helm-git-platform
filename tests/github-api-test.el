@@ -50,57 +50,76 @@ and is not resolvable -- GitHub has no \"resolve\" concept for it."
     (createdAt . "2026-01-01T00:00:00Z")
     (url . "https://x")))
 
+(defconst github-test--rest-404
+  (list (cons "/comments/1\\'" (lambda (&rest _) (error "Not Found"))))
+  "`github-mock-overrides' making comment 1 404 on both REST endpoints,
+as a comment still in a PENDING review does.")
+
 (ert-deftest github-test-delete-comment-falls-back-to-review-batch ()
   "A comment id that 404s on both REST endpoints is deleted via GraphQL,
-by looking its node id up among the pending review's own comments."
+by looking its node id up among the pending review's own comments:
+the mutation must carry the node id \"NODE_1\", not the databaseId 1."
   (github-mock-with-service
-    (let ((pending-review (github-test--pending-review
+    (let ((github-mock-overrides github-test--rest-404)
+          (pending-review (github-test--pending-review
                            (list github-test--pending-comment-node)))
-          (deleted-ids nil))
-      (cl-letf (((symbol-function 'github-api-request)
-                 (lambda (method &rest _) (ignore method) (error "not found")))
-                ((symbol-function 'github-graphql-request)
-                 (lambda (query &optional _variables)
+          (deletes nil))
+      (cl-letf (((symbol-function 'github-graphql-request)
+                 (lambda (query &optional variables)
                    (cond
                     ((string-match-p "reviews(states:PENDING" query) pending-review)
                     ((string-match-p "deletePullRequestReviewComment" query)
-                     (push query deleted-ids)
+                     (push variables deletes)
                      '((deletePullRequestReviewComment (pullRequestReview (id . "REVIEW_1")))))
                     (t (error "unexpected query: %s" query))))))
         (github-delete-comment "acme/web" 42 1)
-        (should (= (length deleted-ids) 1))))))
+        ;; both REST kinds were tried first
+        (should (equal (sort (mapcar (lambda (c) (concat (nth 0 c) " " (nth 1 c)))
+                                     github-mock-calls)
+                             #'string<)
+                       '("DELETE /repos/acme/web/issues/comments/1"
+                         "DELETE /repos/acme/web/pulls/comments/1")))
+        (should (equal deletes '(((id . "NODE_1")))))))))
 
 (ert-deftest github-test-delete-comment-not-in-pending-review-errors ()
   "A comment id absent from every fallback (REST or the pending review)
 signals a clear user-error rather than a bare GraphQL failure."
   (github-mock-with-service
-    (cl-letf (((symbol-function 'github-api-request)
-               (lambda (method &rest _) (ignore method) (error "not found")))
-              ((symbol-function 'github-graphql-request)
-               (lambda (&rest _) (github-test--pending-review nil))))
-      (should-error (github-delete-comment "acme/web" 42 999) :type 'user-error))))
+    (let ((github-mock-overrides
+           (list (cons "/comments/999\\'" (lambda (&rest _) (error "Not Found"))))))
+      (cl-letf (((symbol-function 'github-graphql-request)
+                 (lambda (&rest _) (github-test--pending-review nil))))
+        (should-error (github-delete-comment "acme/web" 42 999) :type 'user-error)))))
 
 (ert-deftest github-test-edit-comment-falls-back-to-review-batch ()
-  "Editing a comment still in the pending review updates it via GraphQL."
+  "Editing a comment still in the pending review updates it via GraphQL,
+sending the node id and the new body, and returns the shared pending
+comment shape keyed by the databaseId with the node id alongside."
   (github-mock-with-service
-    (let ((pending-review (github-test--pending-review
-                           (list github-test--pending-comment-node))))
-      (cl-letf (((symbol-function 'github-api-request)
-                 (lambda (method &rest _) (ignore method) (error "not found")))
-                ((symbol-function 'github-graphql-request)
-                 (lambda (query &optional _variables)
+    (let ((github-mock-overrides github-test--rest-404)
+          (pending-review (github-test--pending-review
+                           (list github-test--pending-comment-node)))
+          (updates nil))
+      (cl-letf (((symbol-function 'github-graphql-request)
+                 (lambda (query &optional variables)
                    (cond
                     ((string-match-p "reviews(states:PENDING" query) pending-review)
                     ((string-match-p "updatePullRequestReviewComment" query)
-                     '((updatePullRequestReviewComment
+                     (push variables updates)
+                     ;; GitHub echoes the comment with the body it stored
+                     `((updatePullRequestReviewComment
                         (pullRequestReviewComment
-                         (databaseId . 1) (body . "new") (path . "a.el") (line . 1)
+                         (databaseId . 1) (body . ,(alist-get 'body variables))
+                         (path . "a.el") (line . 1)
                          (author (login . "ada") (avatarUrl . "u"))
                          (createdAt . "2026-01-01T00:00:00Z") (url . "https://x")))))
                     (t (error "unexpected query: %s" query))))))
         (let ((updated (github-edit-comment "acme/web" 42 1 "new")))
+          (should (equal updates '(((id . "NODE_1") (body . "new")))))
           (should (gp-comment-pending-p updated))
-          (should (equal (let-alist updated .content.raw) "new")))))))
+          (should (equal (alist-get 'id updated) 1))
+          (should (equal (alist-get 'node-id updated) "NODE_1"))
+          (should (equal (let-alist updated .inline.path) "a.el")))))))
 
 (ert-deftest github-test-suggested-reviewers-excludes-self-and-reshapes ()
   "Collaborators are reshaped to the shared reviewer alist shape,
@@ -158,54 +177,107 @@ Bitbucket's diffstat endpoint whose response IS the per-file list."
       (should (equal (plist-get stats :file-list)
                      '((:path "widget.el" :status "modified" :added 4 :removed 1)))))))
 
-(ert-deftest github-test-set-pull-request-draft-ready-to-draft-uses-graphql ()
-  "Converting a ready PR to draft is a real GitHub capability (the web
-UI offers it), just GraphQL-only -- `convertPullRequestToDraft', the
-mirror of `markPullRequestReadyForReview'.  Must NOT `user-error'."
+;; NOTE: `github-mock-graphql-calls' is newest-first.
+(ert-deftest github-test-set-pull-request-draft-uses-graphql-with-the-pr-node-id ()
+  "Both draft directions are GraphQL-only mutations keyed by the PR's
+`node_id' (\"PR_42\"), not its number or database id.  Converting a
+ready PR to draft is a real GitHub capability (the web UI offers it),
+the mirror of `markPullRequestReadyForReview'; neither may `user-error'."
   (github-mock-with-service
     (github-set-pull-request-draft "acme/web" 42 t)
-    (should (cl-some (lambda (c) (string-match-p "convertPullRequestToDraft" (car c)))
-                     github-mock-graphql-calls))))
-
-(ert-deftest github-test-set-pull-request-draft-draft-to-ready-uses-graphql ()
-  (github-mock-with-service
+    (let ((call (car github-mock-graphql-calls)))
+      (should (string-match-p "convertPullRequestToDraft" (nth 0 call)))
+      (should (equal (nth 1 call) '((id . "PR_42")))))
+    (setq github-mock-graphql-calls nil)
     (github-set-pull-request-draft "acme/web" 42 nil)
-    (should (cl-some (lambda (c) (string-match-p "markPullRequestReadyForReview" (car c)))
-                     github-mock-graphql-calls))))
+    (should (= (length github-mock-graphql-calls) 1))
+    (let ((call (car github-mock-graphql-calls)))
+      (should (string-match-p "markPullRequestReadyForReview" (nth 0 call)))
+      (should (equal (nth 1 call) '((id . "PR_42")))))))
 
-(defmacro github-test--with-sync-paged-async (&rest body)
-  "Run BODY with `github-api-paged-async' delegating to the sync mock.
-`github-api-paged-async' isn't itself stubbed by `github-mock.el'
-\(only the sync `github-api-request'/`github-api-paged' are) since it
-does real `url-retrieve' I/O even against a mocked host; this makes
-it call back immediately using the already-mocked sync path instead."
+(defconst github-test--reviews
+  '(((id . 1) (state . "CHANGES_REQUESTED")
+     (user (login . "bea") (avatar_url . "https://example.com/bea.png")))
+    ((id . 2) (state . "CHANGES_REQUESTED")
+     (user (login . "cid") (avatar_url . "https://example.com/cid.png")))
+    ;; bea's later approval supersedes her earlier change request
+    ((id . 3) (state . "APPROVED")
+     (user (login . "bea") (avatar_url . "https://example.com/bea.png"))))
+  "Raw `/pulls/42/reviews' rows, oldest first, as GitHub lists them.")
+
+(defvar github-test--paged-routes nil
+  "Alist of (PATH-REGEXP . VALUE) served ahead of `github-mock-paged'.
+VALUE may be a function of (PATH PARAMS) -- e.g. one that signals, to
+fake a failed listing.  `github-mock-overrides' covers only single
+GETs; this is its paged counterpart, reaching both the sync and the
+async paged mock (which share `github-mock-paged').")
+
+(defvar github-test--orig-mock-paged nil)
+
+(defun github-test--routed-paged (path &optional params max-items)
+  "`github-mock-paged', consulting `github-test--paged-routes' first."
+  (let ((route (cl-find-if (lambda (r) (string-match-p (car r) path))
+                           github-test--paged-routes)))
+    (if (not route)
+        (funcall github-test--orig-mock-paged path params max-items)
+      (push (list "GET" path params nil) github-mock-calls)
+      (if (functionp (cdr route)) (funcall (cdr route) path params) (cdr route)))))
+
+(defmacro github-test--with-paged-routes (routes &rest body)
+  "Run BODY (inside `github-mock-with-service') with paged ROUTES added."
+  (declare (indent 1) (debug t))
+  `(let ((github-test--paged-routes ,routes)
+         (github-test--orig-mock-paged (symbol-function 'github-mock-paged)))
+     (cl-letf (((symbol-function 'github-mock-paged) #'github-test--routed-paged))
+       ,@body)))
+
+(defmacro github-test--with-reviews (&rest body)
+  "Run BODY in the mock with PR 42 carrying `github-test--reviews'.
+PR 42 also requests dee, who has not reviewed, and bea, who has.
+The reviews route is served by both the sync and async paged mock."
   (declare (indent 0) (debug t))
-  `(cl-letf (((symbol-function 'github-api-paged-async)
-              (lambda (path &optional params callback _max-items)
-                (funcall callback t (github-mock-paged path params)))))
-     ,@body))
+  `(github-mock-with-service
+     (let ((github-mock-overrides
+            (list (cons "/pulls/42\\'"
+                        (cons '(requested_reviewers
+                                ((login . "dee") (avatar_url . "https://example.com/dee.png"))
+                                ((login . "bea") (avatar_url . "https://example.com/bea.png")))
+                              (assq-delete-all 'requested_reviewers
+                                               (copy-alist github-mock--pr-1)))))))
+       (github-test--with-paged-routes
+           (list (cons "/pulls/42/reviews\\'" github-test--reviews))
+         ,@body))))
 
-(ert-deftest github-test-pr-review-tally-async-matches-sync ()
-  (github-mock-with-service
-    (github-test--with-sync-paged-async
-      (let ((pr (github-pull-request "acme/web" 42))
-            async-result)
-        (github-pr-review-tally-async pr (lambda (tally) (setq async-result tally)))
-        (should (equal async-result (github-pr-review-tally pr)))))))
+(ert-deftest github-test-pr-review-tally-latest-review-per-user-wins ()
+  "Only each reviewer's latest review counts: bea's CHANGES_REQUESTED is
+superseded by her APPROVED, cid requested changes, and dee -- requested
+but silent -- is pending.  bea is still listed as requested but has
+reviewed, so she is not pending too.  Sync and async agree."
+  (github-test--with-reviews
+    (let ((pr (github-pull-request "acme/web" 42))
+          async-result)
+      (should (equal (github-pr-review-tally pr)
+                     '(:approved 1 :changes 1 :pending 1)))
+      (github-pr-review-tally-async pr (lambda (tally) (setq async-result tally)))
+      (should (equal async-result '(:approved 1 :changes 1 :pending 1))))))
 
 (ert-deftest github-test-pr-reviewers-async-shape ()
-  "Each reviewer plist has :name/:avatar/:state; :state is a symbol
-in `(approved changes pending)', matching `gp-pr-reviewers-async's contract."
-  (github-mock-with-service
-    (github-test--with-sync-paged-async
-      (let ((pr (github-pull-request "acme/web" 42))
-            reviewers)
-        (github-pr-reviewers-async pr (lambda (r) (setq reviewers r)))
-        (should (listp reviewers))
-        (dolist (r reviewers)
-          (should (plist-member r :name))
-          (should (plist-member r :avatar))
-          (should (memq (plist-get r :state) '(approved changes pending))))))))
+  "One plist per person with :id/:name/:avatar/:state, :state taken
+from their latest review; a requested reviewer with no review is
+`pending' with the avatar from `requested_reviewers'."
+  (github-test--with-reviews
+    (let ((pr (github-pull-request "acme/web" 42))
+          (reviewers :unset))
+      (github-pr-reviewers-async pr (lambda (r) (setq reviewers r)))
+      (should (equal (sort (copy-sequence reviewers)
+                           (lambda (a b) (string< (plist-get a :name)
+                                                  (plist-get b :name))))
+                     '((:id "bea" :name "bea" :avatar "https://example.com/bea.png"
+                        :state approved)
+                       (:id "cid" :name "cid" :avatar "https://example.com/cid.png"
+                        :state changes)
+                       (:id "dee" :name "dee" :avatar "https://example.com/dee.png"
+                        :state pending)))))))
 
 (ert-deftest github-test-pr-comment-count-sums-issue-and-review-comments ()
   (should (= (gp--pr-comment-count (git-platform-github)
@@ -367,28 +439,37 @@ users paste into issue reports."
 A 422 names the field it rejected (`…thread.line'), which only means
 something next to the value actually sent -- without this the log
 cannot explain an out-of-diff inline comment, which is exactly the
-case that prompted it.  Drives the real `github-api-request' with a
-stubbed 422 transport."
-  (let ((logged '()))
-    (cl-letf (((symbol-function 'gp-log-error)
-               (lambda (fmt &rest args) (push (apply #'format fmt args) logged)))
-              ;; a canned 422, shaped like GitHub's
-              ((symbol-function 'github--split-response)
-               (lambda (&rest _)
-                 (list 422 nil "{\"message\":\"Validation Failed\"}")))
-              ((symbol-function 'url-retrieve-synchronously)
-               (lambda (&rest _) (generate-new-buffer " *stub*")))
-              ((symbol-function 'github-api-token-value) (lambda () "t")))
-      (should-error
-       (github-api-request "POST" "/repos/acme/web/pulls/7/comments" nil
-                           '((body . "note") (path . "gp-helm.el") (line . 500)))))
-    (let ((all (mapconcat #'identity logged " ")))
-      ;; the payload is there, with the values that explain the rejection
-      (should (string-match-p "sent:" all))
-      (should (string-match-p "gp-helm\\.el" all))
-      (should (string-match-p "500" all))
-      ;; and the response body is still logged too
-      (should (string-match-p "Validation Failed" all)))))
+case that prompted it.  Drives the real `github-api-request' against
+a raw HTTP 422 response, so the status line is parsed for real too."
+  (let ((gp-log-enabled t)
+        (gp-log-buffer-name (generate-new-buffer-name " *gp-test-log*"))
+        (github-api-token "t")
+        err)
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                     (lambda (&rest _)
+                       (let ((buf (generate-new-buffer " *gh-test-http*")))
+                         (with-current-buffer buf
+                           (set-buffer-multibyte nil) ;; raw, like url.el
+                           (insert "HTTP/1.1 422 Unprocessable Entity\n"
+                                   "Content-Type: application/json\n\n"
+                                   "{\"message\":\"Validation Failed\"}"))
+                         buf))))
+            (setq err (should-error
+                       (github-api-request "POST" "/repos/acme/web/pulls/7/comments" nil
+                                           '((body . "note") (path . "gp-helm.el")
+                                             (line . 500))))))
+          ;; the status line was parsed and the API's message surfaced
+          (should (string-match-p "HTTP 422: Validation Failed"
+                                  (error-message-string err)))
+          (let ((all (with-current-buffer gp-log-buffer-name (buffer-string))))
+            ;; the payload is there, with the values that explain the rejection
+            (should (string-match-p "sent:.*gp-helm\\.el" all))
+            (should (string-match-p "sent:.*500" all))
+            ;; and the response body is still logged too
+            (should (string-match-p "body: .*Validation Failed" all))))
+      (when (get-buffer gp-log-buffer-name) (kill-buffer gp-log-buffer-name)))))
 
 ;;;; Inline comment targets ----------------------------------------------------
 
@@ -521,7 +602,13 @@ anything here would be a silently ignored field at best."
       (let ((info (github-pull-request-merge-strategies "acme/web" 42)))
         (should (equal (car info) '("merge" "rebase")))
         ;; the default is the first permitted one, GitHub's own order
-        (should (equal (cdr info) "merge"))))))
+        (should (equal (cdr info) "merge"))))
+    ;; a repo that permits no method at all offers nothing, not an empty pair
+    (let ((github-mock-overrides
+           '(("/repos/acme/web\\'" . ((allow_merge_commit)
+                                     (allow_squash_merge)
+                                     (allow_rebase_merge))))))
+      (should-not (github-pull-request-merge-strategies "acme/web" 42)))))
 
 (ert-deftest github-test-mergeability-distinguishes-dirty-from-unknown ()
   "A conflict and \"not computed yet\" must not be confused.
@@ -544,21 +631,25 @@ backwards would refuse to merge a perfectly clean PR."
       ;; not judged yet -> unknown, which must NOT block a merge
       (should (equal (probe '((mergeable) (mergeable_state . "unknown")))
                      '(unknown . "unknown")))
-      ;; blocked for a non-conflict reason (review required) -> also unknown
+      ;; GitHub judged it mergeable, merely blocked (review required) -> t
       (should (equal (probe '((mergeable . t) (mergeable_state . "blocked")))
-                     '(t . "blocked"))))))
+                     '(t . "blocked")))
+      ;; null `mergeable' with a non-conflict state -> unknown, not a conflict
+      (should (equal (probe '((mergeable) (mergeable_state . "blocked")))
+                     '(unknown . "blocked")))
+      (should (equal (probe '((mergeable) (mergeable_state . "behind")))
+                     '(unknown . "behind"))))))
 
 ;;;; Pipeline identity ----------------------------------------------------------
 
-(ert-deftest github-test-pipeline-id-is-the-run-id-not-a-uuid ()
-  "A workflow run is keyed by `id'; it has no `uuid'.
-`gp-pipeline.el' used to read `uuid' directly, which is Bitbucket's
-field name -- on GitHub that is nil, so every steps/stop/log lookup got
-nil and the detail view showed \"(no steps)\" for every run."
+(ert-deftest github-test-pipeline-id-ignores-a-bitbucket-uuid ()
+  "On GitHub a run is keyed by `id' and has no `uuid'; a `uuid' field
+must not be mistaken for the id.  `gp-pipeline.el' used to read `uuid'
+directly, so every steps/stop/log lookup got nil and the detail view
+showed \"(no steps)\" for every run.  The positive per-backend cases
+live in `gp-test-pipeline-id-differs-per-backend'."
   (let ((git-platform-current-backend (git-platform-github)))
-    (should (equal (gp-pipeline-id '((id . 32188796940) (name . "CI"))) 32188796940))
-    (should-not (gp-pipeline-id '((uuid . "{bitbucket-shaped}"))))
-    (should (equal (gp-pipeline-step-id '((id . 95878412069))) 95878412069))))
+    (should-not (gp-pipeline-id '((uuid . "{bitbucket-shaped}"))))))
 
 ;;;; Pipeline step log line classification --------------------------------------
 
@@ -737,96 +828,95 @@ DELETE aimed at the content would 404."
 ;; API -- if either reverts to a blocking call, the stubs here are bypassed
 ;; and the test fails rather than silently freezing the UI again.
 
-(defvar github-test--async-blocking-calls nil
-  "Names of synchronous API functions called during an async listing.")
+(defvar github-test--blocking-calls nil
+  "Paths requested through a synchronous choke point during an async test.")
 
-(defun github-test--stub-pr (full-name number prs)
-  "Return the stub PR for FULL-NAME/NUMBER from the alist PRS."
-  (cdr (assoc (format "%s#%s" full-name number) prs)))
+(defun github-test--pr-numbered (_method path &rest _)
+  "The mock's PR fixture, renumbered to the number at the end of PATH."
+  (let ((n (string-to-number (car (last (split-string path "/"))))))
+    (cons (cons 'number n)
+          (assq-delete-all 'number (copy-alist github-mock--pr-1)))))
 
-(defmacro github-test--with-async-stubs (search-hits prs &rest body)
-  "Run BODY with the async GitHub endpoints stubbed.
-SEARCH-HITS is the issue-search result; PRS maps \"owner/repo#number\"
-to the PR object its async fetch returns.  Any call to a *blocking*
-entry point is recorded in `github-test--async-blocking-calls'."
-  (declare (indent 2))
-  `(let ((github-test--async-blocking-calls nil))
-     (cl-letf (((symbol-function 'github-api-paged-async)
-                (lambda (_path _params callback &optional _max)
-                  (funcall callback t ,search-hits)))
-               ((symbol-function 'github-pull-request-async)
-                (lambda (full-name number callback)
-                  (funcall callback t
-                           (github-test--stub-pr full-name number ,prs))))
-               ;; blocking twins must NOT be reached
-               ((symbol-function 'github-api-paged)
-                (lambda (&rest _)
-                  (push 'github-api-paged github-test--async-blocking-calls)
-                  nil))
-               ((symbol-function 'github-pull-request)
-                (lambda (&rest _)
-                  (push 'github-pull-request github-test--async-blocking-calls)
-                  nil)))
-       ,@body)))
+(defmacro github-test--with-async-workspace (search-hits &rest body)
+  "Run BODY in the mock with the issue search answering SEARCH-HITS.
+Every `/pulls/N' GET serves the PR fixture renumbered to N.  The sync
+choke points `github-api-request'/`github-api-paged' are trip-wired:
+the async mock reaches the fixtures without them, so anything landing
+in `github-test--blocking-calls' is a blocking call the async path
+should never make."
+  (declare (indent 1) (debug t))
+  `(github-mock-with-service
+     (let ((github-test--blocking-calls nil)
+           (github-mock-overrides
+            (list (cons "/pulls/[0-9]+\\'" #'github-test--pr-numbered))))
+       (github-test--with-paged-routes
+           (list (cons "\\`/search/issues\\'" ,search-hits))
+         (cl-letf (((symbol-function 'github-api-request)
+                    (lambda (_method path &rest _) (push path github-test--blocking-calls) nil))
+                   ((symbol-function 'github-api-paged)
+                    (lambda (path &rest _) (push path github-test--blocking-calls) nil)))
+           ,@body)))))
+
+(defconst github-test--two-hits
+  '(((number . 7) (repository_url . "https://api.github.com/repos/acme/web"))
+    ((number . 9) (repository_url . "https://api.github.com/repos/acme/api")))
+  "Two search hits in two repos, in search order.")
 
 (ert-deftest github-test-workspace-prs-async-uses-only-async-endpoints ()
-  "The async listing never falls back to a blocking search or PR fetch."
-  (github-test--with-async-stubs
-      '(((number . 7) (repository_url . "https://api.github.com/repos/acme/web"))
-        ((number . 9) (repository_url . "https://api.github.com/repos/acme/api")))
-      '(("acme/web#7" . ((id . 7) (title . "seven")))
-        ("acme/api#9" . ((id . 9) (title . "nine"))))
+  "The async listing never falls back to a blocking search or PR fetch,
+and each hit is fetched in full from its own repo and reshaped."
+  (github-test--with-async-workspace github-test--two-hits
     (let (result)
       (github-workspace-pull-requests-async
        (lambda (ok prs) (setq result (list ok prs)))
        "ada")
       (should (car result))
+      ;; reshaped: `id' is the repo-scoped number, the full PR's title kept
       (should (equal (mapcar (lambda (p) (alist-get 'id p)) (cadr result)) '(7 9)))
+      (should (equal (alist-get 'title (car (cadr result))) "Add the widget toggle"))
+      (should (equal (sort (mapcar #'cadr (seq-filter (lambda (c) (string-match-p "/pulls/" (cadr c)))
+                                                      github-mock-calls))
+                           #'string<)
+                     '("/repos/acme/api/pulls/9" "/repos/acme/web/pulls/7")))
       ;; the whole point: no blocking call was made
-      (should-not github-test--async-blocking-calls))))
+      (should-not github-test--blocking-calls))))
 
 (ert-deftest github-test-workspace-prs-async-preserves-search-order ()
   "Out-of-order async completions still yield the search's ordering."
-  (let ((pending '()))
-    (cl-letf (((symbol-function 'github-api-paged-async)
-               (lambda (_p _q callback &optional _m)
-                 (funcall callback t
-                          '(((number . 1) (repository_url . "https://api.github.com/repos/o/a"))
-                            ((number . 2) (repository_url . "https://api.github.com/repos/o/b"))
-                            ((number . 3) (repository_url . "https://api.github.com/repos/o/c"))))))
-              ((symbol-function 'github-pull-request-async)
-               (lambda (_fn number callback)
-                 ;; defer instead of answering inline, so we control the order
-                 (push (cons number callback) pending))))
-      (let (result)
+  (github-test--with-async-workspace
+      '(((number . 1) (repository_url . "https://api.github.com/repos/o/a"))
+        ((number . 2) (repository_url . "https://api.github.com/repos/o/b"))
+        ((number . 3) (repository_url . "https://api.github.com/repos/o/c")))
+    (let ((pending '()) result)
+      ;; defer each PR GET instead of answering inline, so we control the order
+      (cl-letf (((symbol-function 'github-api-get-async)
+                 (lambda (path params callback)
+                   (push (lambda () (github-mock-get-async path params callback))
+                         pending))))
         (github-workspace-pull-requests-async
          (lambda (ok prs) (setq result (and ok (mapcar (lambda (p) (alist-get 'id p)) prs))))
          "ada")
-        ;; complete in reverse arrival order
-        (dolist (entry pending)
-          (funcall (cdr entry) t (list (cons 'id (car entry)))))
+        (should (= (length pending) 3))
+        (should-not result)
+        ;; `pending' is newest-first: complete in reverse arrival order
+        (mapc #'funcall pending)
         (should (equal result '(1 2 3)))))))
 
 (ert-deftest github-test-workspace-prs-async-drops-failed-fetches ()
   "A PR fetch that fails is skipped, not fatal to the whole list."
-  (github-test--with-async-stubs
-      '(((number . 7) (repository_url . "https://api.github.com/repos/acme/web"))
-        ((number . 9) (repository_url . "https://api.github.com/repos/acme/api")))
-      '(("acme/web#7" . ((id . 7))))
-    (cl-letf* ((orig (symbol-function 'github-pull-request-async))
-               ((symbol-function 'github-pull-request-async)
-                (lambda (full-name number callback)
-                  (if (equal number 9)
-                      (funcall callback nil nil)
-                    (funcall orig full-name number callback)))))
-      (let (result)
-        (github-workspace-pull-requests-async
-         (lambda (ok prs) (setq result (and ok prs))) "ada")
-        (should (equal (mapcar (lambda (p) (alist-get 'id p)) result) '(7)))))))
+  (github-test--with-async-workspace github-test--two-hits
+    (let ((github-mock-overrides
+           (cons (cons "/acme/api/pulls/9\\'" (lambda (&rest _) (error "HTTP 404")))
+                 github-mock-overrides))
+          result)
+      (github-workspace-pull-requests-async
+       (lambda (ok prs) (setq result (list ok prs))) "ada")
+      (should (car result))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (cadr result)) '(7))))))
 
 (ert-deftest github-test-workspace-prs-async-empty-search-completes ()
   "An empty search still calls back exactly once, with an empty list."
-  (github-test--with-async-stubs '() '()
+  (github-test--with-async-workspace '()
     (let ((calls 0) result)
       (github-workspace-pull-requests-async
        (lambda (ok prs) (setq calls (1+ calls) result (list ok prs))) "ada")
@@ -835,8 +925,7 @@ entry point is recorded in `github-test--async-blocking-calls'."
 
 (ert-deftest github-test-workspace-prs-async-search-failure-reports-not-ok ()
   "A failed search reports OK nil rather than an empty success."
-  (cl-letf (((symbol-function 'github-api-paged-async)
-             (lambda (_p _q callback &optional _m) (funcall callback nil nil))))
+  (github-test--with-async-workspace (lambda (&rest _) (error "HTTP 422"))
     (let (result)
       (github-workspace-pull-requests-async
        (lambda (ok prs) (setq result (list ok prs))) "ada")
@@ -873,19 +962,20 @@ entry point is recorded in `github-test--async-blocking-calls'."
       (should-not blocking))))
 
 (ert-deftest github-test-comments-async-survives-graphql-failure ()
-  "GraphQL is optional enrichment: its failure still yields REST comments."
-  (let (result)
+  "GraphQL is optional enrichment: its failure still yields REST comments.
+Both REST listings land -- the general issue comment without an
+`inline' key, the review comment with its own file path."
+  (github-mock-with-service
     (cl-letf (((symbol-function 'github-graphql-request-async)
-               (lambda (_q _v callback) (funcall callback nil nil)))
-              ((symbol-function 'github-api-paged-async)
-               (lambda (_path _params callback &optional _max)
-                 (funcall callback t (list '((id . 1) (body . "x")
-                                             (user (login . "ada"))))))))
-      (github-pull-request-comments-async
-       "acme/web" 5 (lambda (ok comments) (setq result (list ok (length comments)))))
-      ;; two sources x one comment each, GraphQL contributed nothing
-      (should (car result))
-      (should (= (cadr result) 2)))))
+               (lambda (_q _v callback) (funcall callback nil nil))))
+      (let (result)
+        (github-pull-request-comments-async
+         "acme/web" 42 (lambda (ok comments) (setq result (list ok comments))))
+        (should (car result))
+        (let ((by-id (mapcar (lambda (c) (cons (alist-get 'id c) c)) (cadr result))))
+          (should (equal (sort (mapcar #'car by-id) #'<) '(9001 9002)))
+          (should-not (alist-get 'inline (alist-get 9001 by-id)))
+          (should (equal (let-alist (alist-get 9002 by-id) .inline.path) "widget.el")))))))
 
 (ert-deftest github-test-comments-async-reshapes-after-graphql-lands ()
   "Resolution markers survive GraphQL answering AFTER the REST comments.
@@ -959,7 +1049,7 @@ per-response instead of at the end would drop the marker."
       (should-not blocking))))
 
 (ert-deftest github-test-repo-branches-sorted-names ()
-  "Extracts just the name field, alphabetically, across pages."
+  "Extracts just the name field of each listed branch, alphabetically."
   (github-mock-with-service
     (cl-letf (((symbol-function 'github-api-paged)
                (lambda (&rest _)
@@ -993,10 +1083,7 @@ and the caller's own alist is left unmutated."
          (out (github--reshape-pr raw)))
     (should (equal (alist-get 'body out) "Adds the toggle.\n\n- [x] tests\n"))
     ;; reshaping must not rewrite the object it was handed
-    (should (equal (alist-get 'body raw) "Adds the toggle.\r\n\r\n- [x] tests\r\n"))
-    ;; the existing id/number reshaping still holds
-    (should (equal (alist-get 'id out) 42))
-    (should (equal (alist-get 'gh-database-id out) 501))))
+    (should (equal (alist-get 'body raw) "Adds the toggle.\r\n\r\n- [x] tests\r\n"))))
 
 (ert-deftest github-test-comment-bodies-normalize-crlf ()
   "Issue and review comment bodies are web-authored too, so both

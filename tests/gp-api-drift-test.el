@@ -5,7 +5,7 @@
 ;; A scoped drift check: it fetches Bitbucket's official OpenAPI/Swagger spec
 ;; (https://api.bitbucket.org/swagger.json) and asserts that every endpoint
 ;; this package actually calls -- path + HTTP method -- still exists.  Unlike
-;; a full oasdiff of the whole spec, this only looks at the ~12 endpoints we
+;; a full oasdiff of the whole spec, this only looks at the 34 endpoints we
 ;; depend on, so it has no noise from the other ~185 paths.
 ;;
 ;; It is NOT part of the offline unit suite: it needs the network, so it
@@ -55,7 +55,20 @@
     ("get"    . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/diffstat")
     ("get"    . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/commits")
     ("get"    . "/repositories/{workspace}/{repo_slug}/commit/{commit}/statuses")
-    ("get"    . "/repositories/{workspace}/{repo_slug}/refs/branches"))
+    ("get"    . "/repositories/{workspace}/{repo_slug}/refs/branches")
+    ("get"    . "/users/{selected_user}")
+    ("get"    . "/repositories/{workspace}/{repo_slug}")
+    ("get"    . "/repositories/{workspace}/{repo_slug}/commit/{commit}")
+    ("post"   . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/approve")
+    ("delete" . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/approve")
+    ("post"   . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/request-changes")
+    ("delete" . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/request-changes")
+    ("post"   . "/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/merge")
+    ("get"    . "/repositories/{workspace}/{repo_slug}/pipelines")
+    ("post"   . "/repositories/{workspace}/{repo_slug}/pipelines")
+    ("get"    . "/repositories/{workspace}/{repo_slug}/pipelines/{pipeline_uuid}/steps")
+    ("post"   . "/repositories/{workspace}/{repo_slug}/pipelines/{pipeline_uuid}/stopPipeline")
+    ("get"    . "/repositories/{workspace}/{repo_slug}/pipelines/{pipeline_uuid}/steps/{step_uuid}/log"))
   "Endpoints (METHOD . PATH) the package relies on; checked against the spec.")
 
 (defun gp-api-drift--fetch-spec ()

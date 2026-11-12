@@ -102,11 +102,16 @@ makes that dir report no remotes (still a work tree)."
          (delete-directory root t)))))
 
 (ert-deftest gp-test-find-checkout-fast-path ()
+  "The same-named folder is tried before the directory scan: it is
+returned without listing the git root at all, so a decoy clone of the
+same repo can never win."
   (gp-test-with-fake-tree
-      '(("web-frontend" . "git@bitbucket.org:acme/web-frontend.git"))
-    (should (string-suffix-p
-             "web-frontend"
-             (gp-local-find-checkout "acme/web-frontend")))))
+      '(("aaa-decoy-clone" . "git@bitbucket.org:acme/web-frontend.git")
+        ("web-frontend" . "git@bitbucket.org:acme/web-frontend.git"))
+    (cl-letf (((symbol-function 'directory-files)
+               (lambda (&rest _) (error "fast path must not scan the root"))))
+      (should (equal (gp-local-find-checkout "acme/web-frontend")
+                     (expand-file-name "web-frontend" root))))))
 
 (ert-deftest gp-test-find-checkout-renamed-folder ()
   "A folder named differently from the slug still resolves via its remote."
@@ -117,31 +122,46 @@ makes that dir report no remotes (still a work tree)."
              (gp-local-find-checkout "acme/web-frontend")))))
 
 (ert-deftest gp-test-dir-remote-prefers-origin ()
-  "`origin' wins when it is a Bitbucket remote."
+  "`origin' wins when it is a Bitbucket remote, even though another
+remote listed before it is a Bitbucket remote too."
   (gp-local-clear-cache)
-  (cl-letf (((symbol-function 'gp-local--git-output)
-             (lambda (&rest args)
-               (pcase args
-                 (`("rev-parse" "--is-inside-work-tree") "true")
-                 (`("remote" "get-url" "origin")
-                  "git@bitbucket.org:acme/web.git")
-                 (`("remote") "origin\nupstream")
-                 (_ nil)))))
-    (should (equal (gp-local--dir-remote "/tmp/x") "acme/web"))))
+  (let ((git-platform-current-backend (git-platform-bitbucket)))
+    (cl-letf (((symbol-function 'gp-local--git-output)
+               (lambda (&rest args)
+                 (pcase args
+                   (`("rev-parse" "--is-inside-work-tree") "true")
+                   (`("remote" "get-url" "origin")
+                    "git@bitbucket.org:acme/web.git")
+                   (`("remote" "get-url" "upstream")
+                    "git@bitbucket.org:other/web.git")
+                   (`("remote") "upstream\norigin")
+                   (_ nil)))))
+      (should (equal (gp-local--dir-remote "/tmp/x") "acme/web")))))
 
 (ert-deftest gp-test-dir-remote-works-in-worktree ()
-  "A linked worktree (where .git is a FILE, not a dir) still resolves.
-We never touch the filesystem -- git reports it is a work tree."
+  "A real linked worktree (where .git is a FILE, not a dir) resolves to
+the shared repository's origin."
+  (skip-unless (executable-find "git"))
   (gp-local-clear-cache)
-  (cl-letf (((symbol-function 'gp-local--git-output)
-             (lambda (&rest args)
-               (pcase args
-                 (`("rev-parse" "--is-inside-work-tree") "true")
-                 (`("remote" "get-url" "origin")
-                  "git@bitbucket.org:acme/api.git")
-                 (`("remote") "origin")
-                 (_ nil)))))
-    (should (equal (gp-local--dir-remote "/tmp/wt") "acme/api"))))
+  (let* ((root (make-temp-file "gp-wt-" t))
+         (main (expand-file-name "main" root))
+         (wt (expand-file-name "linked" root))
+         (git-platform-current-backend (git-platform-bitbucket))
+         (process-environment (append '("GIT_AUTHOR_NAME=t" "GIT_AUTHOR_EMAIL=t@t"
+                                        "GIT_COMMITTER_NAME=t" "GIT_COMMITTER_EMAIL=t@t")
+                                      process-environment)))
+    (unwind-protect
+        (progn
+          (make-directory main)
+          (let ((default-directory (file-name-as-directory main)))
+            (dolist (args `(("init" "-q")
+                            ("remote" "add" "origin" "git@bitbucket.org:acme/api.git")
+                            ("commit" "-q" "--allow-empty" "-m" "init")
+                            ("worktree" "add" "-q" "-b" "wt-branch" ,wt)))
+              (should (= 0 (apply #'call-process "git" nil nil nil args)))))
+          (should (file-regular-p (expand-file-name ".git" wt)))
+          (should (equal (gp-local--dir-remote wt) "acme/api")))
+      (delete-directory root t))))
 
 (ert-deftest gp-test-dir-remote-falls-back-to-other-remote ()
   "When `origin' is not a recognised forge, scan other remotes for one that is."
@@ -188,47 +208,41 @@ We never touch the filesystem -- git reports it is a work tree."
           (should (string-suffix-p "web-frontend/" default-directory)))))))
 
 (ert-deftest gp-test-anchor-to-checkout-keeps-dir-when-no-clone ()
-  "With no local clone the inherited `default-directory' is left alone.
-An inherited directory beats a wrong one."
+  "With no local clone the inherited `default-directory' is left alone,
+and nothing is cloned even when cloning is configured: painting a
+buffer must not hit the network.  An inherited directory beats a
+wrong one."
+  (require 'gp-checkout)
   (bitbucket-mock-with-service
     (let ((pr (car (alist-get 'values
-                             (bitbucket-mock--fixture "workspace-prs.json")))))
+                             (bitbucket-mock--fixture "workspace-prs.json"))))
+          (gp-checkout-clone-base "git@bitbucket.org:"))
       (gp-test-with-fake-tree
           '(("unrelated" . "git@bitbucket.org:acme/something-else.git"))
-        (with-temp-buffer
-          (setq default-directory "/somewhere/else/")
-          (should (null (gp-local-anchor-to-checkout pr)))
-          (should (equal default-directory "/somewhere/else/")))))))
-
-(ert-deftest gp-test-anchor-to-checkout-never-clones ()
-  "Anchoring resolves locally only -- painting a buffer must not hit the network."
-  (bitbucket-mock-with-service
-    (let ((pr (car (alist-get 'values
-                             (bitbucket-mock--fixture "workspace-prs.json")))))
-      (cl-letf (((symbol-function 'gp-local-find-checkout)
-                 (lambda (_fn) nil))
-                ((symbol-function 'gp-local-ensure-checkout)
-                 (lambda (&rest _) (error "must not clone or switch branches")))
-                ((symbol-function 'gp-checkout-ensure-clone)
-                 (lambda (&rest _) (error "must not clone"))))
-        (with-temp-buffer
-          (should (null (gp-local-anchor-to-checkout pr))))))))
+        (cl-letf (((symbol-function 'gp-checkout--git)
+                   (lambda (&rest _) (error "must not run git clone/checkout"))))
+          (with-temp-buffer
+            (setq default-directory "/somewhere/else/")
+            (should (null (gp-local-anchor-to-checkout pr)))
+            (should (equal default-directory "/somewhere/else/"))))))))
 
 (ert-deftest gp-test-checkout-branch-delegates-to-service ()
   "checkout-branch resolves the dir and runs the checkout service there."
   (require 'gp-checkout)
   (bitbucket-mock-with-service
     (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
-           (called-dir nil) (called-branch nil))
+           (called-dir nil) (called-branch nil) (called-base nil))
       (cl-letf (((symbol-function 'gp-local-find-checkout)
                  (lambda (_fn) "/tmp/fake"))
                 ((symbol-function 'gp-checkout-run)
-                 (lambda (dir branch &optional _base)
-                   (setq called-dir dir called-branch branch)
+                 (lambda (dir branch &optional base)
+                   (setq called-dir dir called-branch branch called-base base)
                    (list :ok t :stashed nil :log ""))))
         (let ((res (gp-local-checkout-branch pr)))
           (should (equal called-dir "/tmp/fake"))
-          (should (equal called-branch (gp-pr-source-branch pr)))
+          (should (equal called-branch "feature/widget-toggle"))
+          ;; the destination branch is passed so its remote ref is fetched
+          (should (equal called-base "main"))
           (should (equal (plist-get res :dir) "/tmp/fake"))
           (should (plist-get res :ok)))))))
 
@@ -245,11 +259,24 @@ An inherited directory beats a wrong one."
         (should (equal (car cloned) "ws/slug"))))))
 
 (ert-deftest gp-test-resolve-dir-errors-when-clone-disabled ()
-  "Without a checkout and with cloning off, resolve-dir signals clearly."
+  "Without a checkout and with `gp-checkout-clone-base' unset,
+resolve-dir signals a user-error naming that variable -- whether or
+not cloning was requested -- and never runs git."
   (require 'gp-checkout)
-  (let ((gp-checkout-clone-base nil))
-    (cl-letf (((symbol-function 'gp-local-find-checkout) (lambda (_fn) nil)))
-      (should-error (gp-local-resolve-dir "ws/slug" nil) :type 'user-error))))
+  (let ((gp-checkout-clone-base nil)
+        (gp-local-git-root (make-temp-name
+                            (expand-file-name "gp-no-root-" temporary-file-directory))))
+    (cl-letf (((symbol-function 'gp-local-find-checkout) (lambda (_fn) nil))
+              ((symbol-function 'gp-checkout--git)
+               (lambda (&rest _) (error "must not run git"))))
+      ;; cloning requested but impossible
+      (let ((err (should-error (gp-local-resolve-dir "ws/slug" t)
+                               :type 'user-error)))
+        (should (string-match-p "gp-checkout-clone-base" (cadr err))))
+      ;; cloning not requested: the hint still points at the variable
+      (let ((err (should-error (gp-local-resolve-dir "ws/slug" nil)
+                               :type 'user-error)))
+        (should (string-match-p "gp-checkout-clone-base" (cadr err)))))))
 
 (ert-deftest gp-test-resolve-dir-uses-existing ()
   "When a checkout exists, resolve-dir returns it without cloning."

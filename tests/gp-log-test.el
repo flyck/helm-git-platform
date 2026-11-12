@@ -40,9 +40,12 @@
     (let ((gp-log-max-lines 10))
       (dotimes (i 50) (gp-log 'info "line %d" i))
       (with-current-buffer gp-log-buffer-name
-        (should (<= (count-lines (point-min) (point-max)) 12))
-        ;; the most recent line survived
-        (should (string-match-p "line 49" (buffer-string)))))))
+        (should (= (count-lines (point-min) (point-max)) gp-log-max-lines))
+        ;; The newest lines survive; the oldest are dropped.
+        (should (string-match-p "line 49$" (buffer-string)))
+        (should (string-match-p "line 40$" (buffer-string)))
+        (should-not (string-match-p "line 39$" (buffer-string)))
+        (should-not (string-match-p "line 0$" (buffer-string)))))))
 
 (ert-deftest gp-test-log-never-signals ()
   "Logging with a bad format spec must not raise."

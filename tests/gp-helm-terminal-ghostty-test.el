@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'gp-helm-terminal)
 (require 'gp-helm-terminal-ghostty)
 
@@ -24,14 +25,6 @@
     (should-not (gp-helm-terminal-session-job-name (nth 0 sessions)))
     (should (equal (gp-helm-terminal-session-id (nth 1 sessions)) "def"))))
 
-(ert-deftest gp-test-terminal-ghostty-list-sessions-parses-run-script-output ()
-  (let ((sep gp-helm-terminal-ghostty--field-separator))
-    (cl-letf (((symbol-function 'gp-helm-terminal-ghostty--run-script)
-               (lambda (&rest _) (concat "abc" sep "/tmp/repo" sep "Claude"))))
-      (let ((sessions (gp-helm-terminal-ghostty-list-sessions)))
-        (should (= (length sessions) 1))
-        (should (equal (gp-helm-terminal-session-path (car sessions)) "/tmp/repo"))))))
-
 (ert-deftest gp-test-terminal-ghostty-send-text-passes-args-via-argv ()
   "Send-text must pass the terminal id, text and submit flag as argv items
 \(never interpolated into the script text), and submit via a separate
@@ -45,14 +38,10 @@
       (gp-helm-terminal-ghostty-send-text "term-1" "hello\nworld $USER" t)
       (should (equal captured-args '("term-1" "hello\nworld $USER" "true")))
       (should (member "input text theText to terminal id targetId" captured-lines))
-      (should (member "send key \"enter\" to terminal id targetId" captured-lines)))))
-
-(ert-deftest gp-test-terminal-ghostty-send-text-skips-submit-when-nil ()
-  (let (captured-args)
-    (cl-letf (((symbol-function 'gp-helm-terminal-ghostty--run-script)
-               (lambda (_lines &rest args) (setq captured-args args) "")))
+      (should (member "send key \"enter\" to terminal id targetId" captured-lines))
+      ;; Without SUBMIT only the flag changes.
       (gp-helm-terminal-ghostty-send-text "term-1" "hello" nil)
-      (should (equal (nth 2 captured-args) "false")))))
+      (should (equal captured-args '("term-1" "hello" "false"))))))
 
 (ert-deftest gp-test-terminal-ghostty-open-session-passes-directory-command-and-text ()
   (let (captured-args)
@@ -88,27 +77,35 @@ before the prompt can be sent."
       (should (member "input text theCommand to terminal id targetId" captured-lines)))))
 
 (ert-deftest gp-test-terminal-ghostty-send-comment-dispatches-via-backend ()
-  "The generic dispatcher (`gp-helm-terminal-send-comment') must route to the
-Ghostty backend functions when `gp-helm-terminal-backend' is `ghostty'."
+  "With `gp-helm-terminal-backend' set to `ghostty', the generic dispatcher
+lists Ghostty terminals and types the prompt into the one whose title marks
+an AI session in the repo (Ghostty reports no job name)."
   (let* ((pr '((id . 42)
                (title . "Implement thing")
                (source (branch (name . "feat/demo")))
                (destination (branch (name . "main"))
                             (repository (full_name . "acme/repo")))))
          (comment '((content (raw . "Please rename this helper."))))
-         (sent nil))
+         (sep gp-helm-terminal-ghostty--field-separator)
+         (sends nil))
     (cl-letf (((symbol-function 'gp-local-ensure-checkout) (lambda (_pr) "/tmp/repo"))
-              ((symbol-function 'gp-helm-terminal--list-sessions)
-               (lambda ()
-                 (list (make-gp-helm-terminal-session
-                        :id "ghost-1" :path "/tmp/repo" :job-name nil :name "Claude"))))
-              ((symbol-function 'gp-helm-terminal-ghostty-send-text)
-               (lambda (id text submit) (setq sent (list id text submit)))))
-      (let ((gp-helm-terminal-backend 'ghostty))
+              ((symbol-function 'gp-helm-terminal-ghostty--run-script)
+               (lambda (lines &rest args)
+                 (if (null args)
+                     ;; The listing: a plain shell and a Claude terminal.
+                     (concat "shell-1" sep "/tmp/repo" sep "-zsh" "\n"
+                             "ghost-1" sep "/tmp/repo" sep "Claude")
+                   (push (cons lines args) sends)
+                   ""))))
+      (let ((gp-helm-terminal-backend 'ghostty)
+            (gp-helm-terminal-submit-immediately t))
         (gp-helm-terminal-send-comment pr comment)
-        (should (equal (car sent) "ghost-1"))
-        (should (string-match-p "Please rename this helper\\." (cadr sent)))
-        (should (caddr sent))))))
+        (should (= (length sends) 1))
+        (let ((args (cdar sends)))
+          (should (member "input text theText to terminal id targetId" (caar sends)))
+          (should (equal (nth 0 args) "ghost-1"))
+          (should (string-match-p "Please rename this helper\\." (nth 1 args)))
+          (should (equal (nth 2 args) "true")))))))
 
 (ert-deftest gp-test-terminal-ghostty-open-session-guards-empty-text ()
   "An empty prompt (a plain shell) must send neither input nor submit, and

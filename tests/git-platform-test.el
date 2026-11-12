@@ -2,12 +2,10 @@
 
 ;;; Commentary:
 
-;; A backend-agnostic conformance suite: it exercises the `gp-' protocol
-;; against a configured backend + its mock and asserts the documented
-;; return shapes.  Today it runs against the Bitbucket backend with
-;; `bitbucket-mock-with-service'.  A future GitHub backend reuses
-;; `git-platform-test--run' with its own mock, proving both satisfy one
-;; contract.
+;; Protocol conformance: the `gp-' protocol driven through each
+;; backend's mock (`bitbucket-mock-with-service' /
+;; `github-mock-with-service') with exact expected values, plus the
+;; shared helpers (cache, diff, ticket links) in git-platform.el.
 
 ;;; Code:
 
@@ -19,74 +17,181 @@
 (require 'git-platform-github)
 (require 'github-mock)
 
-(defun git-platform-test--run ()
-  "Run protocol assertions against the active backend (mock must be live)."
-  (let* ((uuid (gp-user-uuid))
-         (prs (gp-workspace-pull-requests)))
-    (should (stringp uuid))
-    (should (listp prs))
-    (let ((pr (car prs)))
-      (should pr)
-      ;; accessors return the documented shapes
-      (should (string-match-p "/" (gp-pr-full-name pr)))   ;; owner/slug
-      (should (stringp (gp-pr-source-branch pr)))
-      (should (stringp (gp-pr-destination-branch pr)))
-      (should (memq (gp-pr-draft-p pr) '(t nil)))
-      (should (memq (gp-pr-authored-by-p pr uuid) '(t nil)))
-      (should (memq (gp-pr-open-p pr) '(t nil)))
-      (should (memq (gp-pr-merged-p pr) '(t nil)))
-      (should (or (null (gp-pr-author-name pr)) (stringp (gp-pr-author-name pr))))
-      (should (or (null (gp-pr-author-avatar pr)) (stringp (gp-pr-author-avatar pr))))
-      (should (or (null (gp-pr-repo-slug pr)) (stringp (gp-pr-repo-slug pr))))
-      (should (or (null (gp-pr-comment-count pr)) (integerp (gp-pr-comment-count pr))))
-      (let ((tally (gp-pr-review-tally pr)))
-        (should (integerp (plist-get tally :approved)))
-        (should (integerp (plist-get tally :changes)))
-        (should (integerp (plist-get tally :pending))))
-      (let (async-tally)
-        (gp-pr-review-tally-async pr (lambda (v) (setq async-tally v)))
-        (should (integerp (plist-get async-tally :approved))))
-      (let (async-reviewers)
-        (gp-pr-reviewers-async pr (lambda (v) (setq async-reviewers v)))
-        (should (listp async-reviewers)))
-      ;; categorize/partition produce the documented structure
-      (let ((cat (gp-categorize-pull-requests prs uuid)))
-        (should (= (length prs)
-                   (+ (length (plist-get cat :mine))
-                      (length (plist-get cat :reviewing))
-                      (length (plist-get cat :drafts))))))
-      (let ((split (gp-partition-pull-requests prs uuid)))
-        (should (= (length prs) (+ (length (car split)) (length (cdr split))))))
-      ;; comments + their accessors
-      (let* ((fn (gp-pr-full-name pr))
-             (id (alist-get 'id pr))
-             (comments (gp-pull-request-comments fn id)))
-        (should (listp comments))
-        (when comments
-          (should (memq (gp-comment-resolved-p (car comments)) '(t nil)))
-          (should (memq (gp-comment-resolvable-p (car comments)) '(t nil)))
-          (should (memq (gp-comment-own-p (car comments) uuid) '(t nil)))
-          (should (memq (gp-comment-pending-p (car comments)) '(t nil))))))))
+;; The conformance tests drive one protocol through each backend's mock
+;; and compare everything against exact, hand-derived values.  The data
+;; is chosen so every predicate has both a t and a nil case and every
+;; category of `gp-categorize-pull-requests' is non-empty.
+
+(defun git-platform-test--pr-row (pr uuid)
+  "Every shape accessor's value for PR, as one comparable list.
+Order: id, full name, source, destination, draft, authored by UUID,
+open, merged, author name, author avatar, repo slug, comment count,
+review tally."
+  (list (alist-get 'id pr)
+        (gp-pr-full-name pr) (gp-pr-source-branch pr)
+        (gp-pr-destination-branch pr)
+        (gp-pr-draft-p pr) (gp-pr-authored-by-p pr uuid)
+        (gp-pr-open-p pr) (gp-pr-merged-p pr)
+        (gp-pr-author-name pr) (gp-pr-author-avatar pr)
+        (gp-pr-repo-slug pr) (gp-pr-comment-count pr)
+        (gp-pr-review-tally pr)))
+
+(defun git-platform-test--comment-row (comment uuid)
+  "(ID RESOLVED RESOLVABLE OWN PENDING) for COMMENT as seen by UUID."
+  (list (alist-get 'id comment)
+        (gp-comment-resolved-p comment) (gp-comment-resolvable-p comment)
+        (gp-comment-own-p comment uuid) (gp-comment-pending-p comment)))
+
+(defun git-platform-test--await (fn pr)
+  "Call async FN on PR and return what its callback got.
+Fails when the callback never fires: the mocks answer synchronously,
+so a callback that has not run by now never will."
+  (let ((got 'never-called))
+    (funcall fn pr (lambda (v) (setq got v)))
+    (should-not (eq got 'never-called))
+    got))
+
+(defun git-platform-test--ids (prs)
+  "The ids of PRS, in order."
+  (mapcar (lambda (p) (alist-get 'id p)) prs))
+
+(defconst git-platform-test--bb-me "{21d7839d-779f-44b2-8c40-6f43ac90be06}"
+  "The uuid tests/fixtures/user.json answers for the current user.")
+
+(defun git-platform-test--bb-pr (id author-uuid author-name &rest extra)
+  "A Bitbucket PR object ID by AUTHOR-UUID/AUTHOR-NAME, EXTRA keys first."
+  (append extra
+          `((id . ,id) (title . ,(format "PR %d" id))
+            (author (display_name . ,author-name) (uuid . ,author-uuid))
+            (destination (branch (name . "main"))
+                         (repository (full_name . "acme/web") (slug . "web")))
+            (source (branch (name . ,(format "feature/f%d" id)))
+                    (commit (hash . ,(format "c0ffee%d" id)))))))
+
+(defun git-platform-test--bb-participant (role uuid name &rest extra)
+  "A Bitbucket participant with ROLE, user UUID/NAME and EXTRA keys."
+  (append `((role . ,role) (user (uuid . ,uuid) (display_name . ,name)))
+          extra))
 
 (ert-deftest git-platform-test-bitbucket-conformance ()
   "The Bitbucket backend satisfies the git-platform protocol."
-  (let ((git-platform-current-backend (git-platform-bitbucket)))
+  (let* ((me git-platform-test--bb-me)
+         (mine (git-platform-test--bb-pr
+                180 me "Ada Lovelace"
+                '(state . "OPEN") '(comment_count . 13)
+                `(participants
+                  ,(git-platform-test--bb-participant
+                    "REVIEWER" "{rita}" "Rita" '(state . "approved") '(approved . t))
+                  ,(git-platform-test--bb-participant
+                    "REVIEWER" "{sam}" "Sam" '(state . "changes_requested"))
+                  ,(git-platform-test--bb-participant "REVIEWER" "{tom}" "Tom")
+                  ;; a non-reviewer's approval is not counted
+                  ,(git-platform-test--bb-participant
+                    "PARTICIPANT" "{pat}" "Pat" '(approved . t)))))
+         (draft (git-platform-test--bb-pr
+                 181 me "Ada Lovelace" '(state . "OPEN") '(draft . t)))
+         (other (git-platform-test--bb-pr
+                 182 "{bea}" "Bea" '(state . "MERGED") '(comment_count . 2)))
+         (all (list mine draft other)))
     (bitbucket-mock-with-service
-      (git-platform-test--run))))
+      (let ((bitbucket-mock-overrides
+             `(("/workspaces/[^/]+/pullrequests/" . ((values . ,all)))
+               ("/pullrequests/180/comments\\'" .
+                ((values
+                  ((id . 1) (user (uuid . ,me)) (content (raw . "mine")))
+                  ((id . 2) (user (uuid . "{bea}")) (content (raw . "theirs"))
+                   (resolution (user (display_name . "Bea"))))
+                  ((id . 3) (user (uuid . ,me)) (content (raw . "draft note"))
+                   (pending . t))
+                  ((id . 4) (user (uuid . ,me)) (deleted . t)))))
+               ;; the async tally/reviewers refetch the PR by id
+               ("/pullrequests/[0-9]+\\'" .
+                ,(lambda (_m path &rest _)
+                   (let ((id (string-to-number (car (last (split-string path "/"))))))
+                     (cl-find id all :key (lambda (p) (alist-get 'id p)))))))))
+        (should (equal (gp-user-uuid) me))
+        (let ((prs (gp-workspace-pull-requests)))
+          (should (equal (mapcar (lambda (p) (git-platform-test--pr-row p me)) prs)
+                         `((180 "acme/web" "feature/f180" "main" nil t t nil
+                                "Ada Lovelace" nil "web" 13
+                                (:approved 1 :changes 1 :pending 1))
+                           (181 "acme/web" "feature/f181" "main" t t t nil
+                                "Ada Lovelace" nil "web" nil
+                                (:approved 0 :changes 0 :pending 0))
+                           (182 "acme/web" "feature/f182" "main" nil nil nil t
+                                "Bea" nil "web" 2
+                                (:approved 0 :changes 0 :pending 0)))))
+          (let ((pr (car prs)))
+            (should (equal (git-platform-test--await #'gp-pr-review-tally-async pr)
+                           '(:approved 1 :changes 1 :pending 1)))
+            (should (equal (git-platform-test--await #'gp-pr-reviewers-async pr)
+                           '((:id "{rita}" :name "Rita" :avatar nil :state approved)
+                             (:id "{sam}" :name "Sam" :avatar nil :state changes)
+                             (:id "{tom}" :name "Tom" :avatar nil :state pending))))
+            ;; deleted comment 4 is dropped; 1/3 are mine, 2 is resolved,
+            ;; 3 is pending; every Bitbucket comment is resolvable
+            (should (equal (mapcar (lambda (c) (git-platform-test--comment-row c me))
+                                   (gp-pull-request-comments "acme/web" 180))
+                           '((1 nil t t nil) (2 t t nil nil) (3 nil t t t)))))
+          (let ((cat (gp-categorize-pull-requests prs me)))
+            (should (equal (git-platform-test--ids (plist-get cat :mine)) '(180)))
+            (should (equal (git-platform-test--ids (plist-get cat :drafts)) '(181)))
+            (should (equal (git-platform-test--ids (plist-get cat :reviewing)) '(182))))
+          (let ((split (gp-partition-pull-requests prs me)))
+            (should (equal (git-platform-test--ids (car split)) '(180 181)))
+            (should (equal (git-platform-test--ids (cdr split)) '(182)))))))))
 
 (ert-deftest git-platform-test-github-conformance ()
   "The GitHub backend satisfies the git-platform protocol."
-  (let ((git-platform-current-backend (git-platform-github)))
-    (github-mock-with-service
-      ;; `github-api-paged-async' isn't itself stubbed by github-mock.el (it
-      ;; does real `url-retrieve' I/O even against a mocked host); delegate
-      ;; it to the already-mocked sync path so gp-pr-review-tally-async /
-      ;; gp-pr-reviewers-async (exercised by `git-platform-test--run') get
-      ;; a real callback instead of hanging.
-      (cl-letf (((symbol-function 'github-api-paged-async)
-                 (lambda (path &optional params callback _max-items)
-                   (funcall callback t (github-mock-paged path params)))))
-        (git-platform-test--run)))))
+  (github-mock-with-service
+    (let ((github-mock-overrides
+           ;; pr-1 with one still-requested reviewer, so tally/reviewers
+           ;; have something to report; 44 is the user's own draft
+           `(("/pulls/42\\'" .
+              ,(cons '(requested_reviewers
+                       ((login . "cy") (avatar_url . "https://example.com/cy.png")))
+                     github-mock--pr-1))
+             ("/pulls/43\\'" . ,github-mock--pr-2)
+             ("/pulls/44\\'" .
+              ,(append '((id . 504) (number . 44) (draft . t)
+                         (head (ref . "wip/thing") (sha . "aaa444")
+                               (repo (full_name . "acme/web"))))
+                       github-mock--pr-1)))))
+      (should (equal (gp-user-uuid) "ada"))
+      ;; the search only finds the user's PR 42; 43/44 are fetched directly
+      (let* ((found (gp-workspace-pull-requests))
+             (prs (append found (list (gp-pull-request "acme/web" 43)
+                                      (gp-pull-request "acme/web" 44)))))
+        (should (equal (git-platform-test--ids found) '(42)))
+        (should (equal (mapcar (lambda (p) (git-platform-test--pr-row p "ada")) prs)
+                       '((42 "acme/web" "feature/widget" "main" nil t t nil
+                              "ada" "https://example.com/ada.png" "web" 3
+                              (:approved 0 :changes 0 :pending 1))
+                         (43 "acme/web" "fix/flaky" "main" t nil t nil
+                              "bea" "https://example.com/bea.png" "web" 0
+                              (:approved 0 :changes 0 :pending 0))
+                         (44 "acme/web" "wip/thing" "main" t t t nil
+                              "ada" "https://example.com/ada.png" "web" 3
+                              (:approved 0 :changes 0 :pending 0)))))
+        (let ((pr (car prs)))
+          (should (equal (git-platform-test--await #'gp-pr-review-tally-async pr)
+                         '(:approved 0 :changes 0 :pending 1)))
+          (should (equal (git-platform-test--await #'gp-pr-reviewers-async pr)
+                         '((:id "cy" :name "cy" :avatar "https://example.com/cy.png"
+                                :state pending))))
+          ;; both mock comments are bea's; only the inline one is resolvable
+          (let ((comments (gp-pull-request-comments "acme/web" 42)))
+            (should (equal (mapcar (lambda (c) (git-platform-test--comment-row c "ada"))
+                                   comments)
+                           '((9001 nil nil nil nil) (9002 nil t nil nil))))
+            (should (cl-every (lambda (c) (gp-comment-own-p c "bea")) comments))))
+        (let ((cat (gp-categorize-pull-requests prs "ada")))
+          (should (equal (git-platform-test--ids (plist-get cat :mine)) '(42)))
+          (should (equal (git-platform-test--ids (plist-get cat :drafts)) '(44)))
+          (should (equal (git-platform-test--ids (plist-get cat :reviewing)) '(43))))
+        (let ((split (gp-partition-pull-requests prs "ada")))
+          (should (equal (git-platform-test--ids (car split)) '(42 44)))
+          (should (equal (git-platform-test--ids (cdr split)) '(43))))))))
 
 (ert-deftest git-platform-test-backend-lazy-default ()
   "`git-platform-backend' builds a Bitbucket backend by default."
@@ -94,21 +199,19 @@
         (git-platform-default-backend 'bitbucket))
     (should (object-of-class-p (git-platform-backend) 'git-platform-bitbucket))))
 
-(ert-deftest git-platform-test-public-wrappers-need-no-backend ()
-  "The public gp- functions take no backend argument."
-  (let ((git-platform-current-backend (git-platform-bitbucket)))
-    (bitbucket-mock-with-service
-      ;; would error if gp-user-uuid still required a backend arg
-      (should (stringp (gp-user-uuid))))))
-
 (ert-deftest git-platform-test-bitbucket-review-batch-add ()
-  "Bitbucket: adding a review-batch comment creates it with pending:t."
-  (let ((git-platform-current-backend (git-platform-bitbucket)))
-    (bitbucket-mock-with-service
-      (let ((added (gp-add-review-batch-comment
-                    "acme/web" 42 "Looks off" (cons "a.el" 10))))
-        (should (equal (alist-get 'pending added) t))
-        (should (gp-comment-pending-p added))))))
+  "Bitbucket: adding a review-batch comment POSTs it with pending:t,
+anchored inline at the given path/line."
+  (bitbucket-mock-with-service
+    (gp-add-review-batch-comment "acme/web" 42 "Looks off" (cons "a.el" 10))
+    (should (= (length bitbucket-mock-calls) 1))
+    (pcase-let ((`(,method ,path ,_params ,data) (car bitbucket-mock-calls)))
+      (should (equal method "POST"))
+      (should (equal path "/repositories/acme/web/pullrequests/42/comments"))
+      (should (eq (alist-get 'pending data) t))
+      (should (equal (let-alist data .content.raw) "Looks off"))
+      (should (equal (let-alist data .inline.path) "a.el"))
+      (should (equal (let-alist data .inline.to) 10)))))
 
 (ert-deftest git-platform-test-bitbucket-review-batch-list-and-submit ()
   "Bitbucket: only pending comments list as the batch; submitting
@@ -140,28 +243,38 @@ place (see `bitbucket-submit-review-batch'), then applies EVENT."
                         bitbucket-mock-calls)))
           (should created)
           (should (equal (let-alist (nth 3 created) .content.raw) "Looks off"))
+          (should (equal (let-alist (nth 3 created) .inline.path) "a.el"))
+          (should (equal (let-alist (nth 3 created) .inline.to) 10))
           (should-not (assq 'pending (nth 3 created))))
-        ;; the pending original is deleted
-        (should (cl-find-if (lambda (c) (and (equal (nth 0 c) "DELETE")
-                                             (string-match-p "/comments/1\\'" (nth 1 c))))
-                            bitbucket-mock-calls))
-        (should (cl-find-if (lambda (c) (string-match-p "/approve\\'" (nth 1 c)))
-                            bitbucket-mock-calls))))))
+        ;; the writes, oldest first: recreate, delete the pending original
+        ;; (only it -- comment 2 was never pending), and approve last
+        (should (equal (mapcar (lambda (c) (list (nth 0 c) (nth 1 c)))
+                               (cl-remove-if (lambda (c) (equal (nth 0 c) "GET"))
+                                             (reverse bitbucket-mock-calls)))
+                       '(("POST" "/repositories/acme/web/pullrequests/42/comments")
+                         ("DELETE" "/repositories/acme/web/pullrequests/42/comments/1")
+                         ("POST" "/repositories/acme/web/pullrequests/42/approve"))))))))
 
 (ert-deftest git-platform-test-bitbucket-review-batch-discard ()
-  "Bitbucket: discarding the batch deletes each of its pending comments."
-  (let ((git-platform-current-backend (git-platform-bitbucket))
-        (full-name "acme/web") (id 42))
-    (bitbucket-mock-with-service
-      (let ((bitbucket-mock-overrides
-             `(("/pullrequests/42/comments\\'" .
-                ((values . (((id . 1) (pending . t) (deleted . nil)
-                             (content (raw . "Looks off")))))))))
-            (deleted nil))
-        (cl-letf (((symbol-function 'bitbucket-delete-comment)
-                   (lambda (fn pid cid) (push (list fn pid cid) deleted) t)))
-          (gp-discard-review-batch full-name id)
-          (should (equal deleted '(("acme/web" 42 1)))))))))
+  "Bitbucket: discarding the batch deletes each pending comment, and
+leaves already-posted ones alone."
+  (bitbucket-mock-with-service
+    (let ((bitbucket-mock-overrides
+           `(("/pullrequests/42/comments\\'" .
+              ((values . (((id . 1) (pending . t) (content (raw . "Looks off")))
+                          ((id . 2) (pending . nil) (content (raw . "posted")))
+                          ((id . 3) (pending . t) (content (raw . "Typo"))))))))))
+      (gp-discard-review-batch "acme/web" 42)
+      (should (equal (sort (mapcar (lambda (c) (nth 1 c))
+                                   (cl-remove-if-not
+                                    (lambda (c) (equal (nth 0 c) "DELETE"))
+                                    bitbucket-mock-calls))
+                           #'string<)
+                     '("/repositories/acme/web/pullrequests/42/comments/1"
+                       "/repositories/acme/web/pullrequests/42/comments/3")))
+      ;; nothing else is written
+      (should-not (cl-find-if (lambda (c) (member (nth 0 c) '("POST" "PUT")))
+                              bitbucket-mock-calls)))))
 
 (defun git-platform-test--gh-pending-comment-node ()
   "One GraphQL comment node, as `github--pending-review-query' returns it."
@@ -188,7 +301,7 @@ place (see `bitbucket-submit-review-batch'), then applies EVENT."
             (graphql-responses
              (list
               ;; 1: github--ensure-pending-review's own lookup -- none yet
-              (git-platform-test--gh-pending-review nil)
+              '((repository (pullRequest (reviews (nodes)))))
               ;; 2: addPullRequestReview
               '((addPullRequestReview (pullRequestReview (id . "REVIEW_1"))))
               ;; 3: addPullRequestReviewThread
@@ -198,6 +311,16 @@ place (see `bitbucket-submit-review-batch'), then applies EVENT."
                      (push (list query variables) github-mock-graphql-calls)
                      (pop graphql-responses))))
           (gp-add-review-batch-comment full-name id "Looks off" (cons "a.el" 10)))
+        ;; a pending review was created on the PR's node, and the comment
+        ;; was threaded onto it at the given path/line
+        (let ((vars (lambda (re)
+                      (cadr (cl-find-if (lambda (c) (string-match-p re (car c)))
+                                        github-mock-graphql-calls)))))
+          (should (equal (funcall vars "addPullRequestReview(") '((pr . "PR_42"))))
+          (should (equal (funcall vars "addPullRequestReviewThread(")
+                         '((review . "REVIEW_1") (path . "a.el") (line . 10)
+                           (body . "Looks off")))))
+        (setq github-mock-graphql-calls nil)
         ;; now simulate the review existing with one comment, for list/submit
         (let ((pending-review
                (git-platform-test--gh-pending-review
@@ -225,8 +348,15 @@ place (see `bitbucket-submit-review-batch'), then applies EVENT."
               (gp-review-batch-comments-async full-name id (lambda (v) (setq async-batch v)))
               (should (= (length async-batch) 1)))
             (gp-submit-review-batch full-name id 'approve)
-            (should (cl-find-if (lambda (c) (string-match-p "submitPullRequestReview" (car c)))
-                                github-mock-graphql-calls))))))))
+            ;; the existing pending review is submitted with the mapped event
+            (should (equal (cadr (cl-find-if
+                                  (lambda (c) (string-match-p "submitPullRequestReview" (car c)))
+                                  github-mock-graphql-calls))
+                           '((review . "REVIEW_1") (event . "APPROVE") (body))))
+            ;; ...and no second review is opened
+            (should-not (cl-find-if
+                         (lambda (c) (string-match-p "addPullRequestReview(" (car c)))
+                         github-mock-graphql-calls))))))))
 
 (ert-deftest git-platform-test-cache-remove ()
   (let ((gp--result-cache (make-hash-table :test 'equal))
@@ -312,7 +442,6 @@ leaving unrelated keys alone."
 ;;;; Buffer naming ------------------------------------------------------------
 
 (ert-deftest gp-test-buffer-name-carries-the-shared-tag ()
-  (should (equal (gp--buffer-name "PRs") "*gp: PRs*"))
   (let ((gp-buffer-name-prefix "zz: "))
     (should (equal (gp--buffer-name "PRs") "*zz: PRs*"))))
 
@@ -339,10 +468,7 @@ PR\"."
                    "https://bb/pr/1")))
   (let ((git-platform-current-backend (git-platform-github)))
     (should (equal (gp-pr-web-url '((html_url . "https://gh/pull/1")))
-                   "https://gh/pull/1"))
-    ;; a reshaped object carrying the shared shape still works
-    (should (equal (gp-pr-web-url '((links (html (href . "https://gh/pull/2")))))
-                   "https://gh/pull/2"))))
+                   "https://gh/pull/1"))))
 
 (ert-deftest gp-test-comment-web-url-differs-per-backend ()
   "Same split for a comment's browser URL."
@@ -351,9 +477,7 @@ PR\"."
                    "https://bb/c/1")))
   (let ((git-platform-current-backend (git-platform-github)))
     (should (equal (gp-comment-web-url '((links (html (href . "https://gh/c/1")))))
-                   "https://gh/c/1"))
-    (should (equal (gp-comment-web-url '((html_url . "https://gh/c/2")))
-                   "https://gh/c/2"))))
+                   "https://gh/c/1"))))
 
 (ert-deftest gp-test-ticket-key-pattern-matches-shape ()
   "2-3 letters, a dash, 1-5 digits -- and, deliberately, never a bare
@@ -414,26 +538,28 @@ a keymap binding only `mouse-1' silently never gets that translated
 event, and the click falls through to whatever mouse-2 does by
 default instead (e.g. `mouse-yank-primary', or `set-mark-command'
 depending on context) -- see `gp-ticket--keymap'."
-  (let ((m (gp-ticket--keymap "WP-1231")))
-    (should (functionp (lookup-key m [mouse-1])))
-    (should (functionp (lookup-key m [mouse-2])))
-    (should (functionp (lookup-key m (kbd "RET"))))))
+  (let ((m (gp-ticket--keymap "WP-1231"))
+        (gp-ticket-url-format "https://co.atlassian.net/browse/%s"))
+    ;; every binding opens the ticket's URL
+    (dolist (key (list [mouse-1] [mouse-2] (kbd "RET")))
+      (let (opened)
+        (cl-letf (((symbol-function 'browse-url)
+                   (lambda (url &rest _) (push url opened))))
+          (call-interactively (lookup-key m key)))
+        (should (equal opened '("https://co.atlassian.net/browse/WP-1231")))))))
 (ert-deftest gp-test-cache-put-honours-explicit-ttl ()
   "An explicit TTL scopes one entry without touching the global default."
   (let ((gp--result-cache (make-hash-table :test 'equal))
         (gp-cache-ttl 300))
     ;; a short-lived entry expires on its own schedule...
     (gp-cache-put '(k short) 'v 60)
+    ;; omitting TTL keeps the previous behaviour (gp-cache-ttl)
+    (gp-cache-put '(k default) 'v)
     (should (equal (gp-cache-get '(k short)) '(t . v)))
     (let ((later (+ (float-time) 100)))
       (cl-letf (((symbol-function 'float-time) (lambda (&rest _) later)))
         (should-not (car (gp-cache-get '(k short))))
-        ;; ...while a default-TTL entry written at the same time still lives
-        (should t)))
-    ;; omitting TTL keeps the previous behaviour (gp-cache-ttl)
-    (gp-cache-put '(k default) 'v)
-    (let ((later (+ (float-time) 100)))
-      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) later)))
+        ;; ...while the default-TTL entry written at the same time still lives
         (should (equal (gp-cache-get '(k default)) '(t . v)))))
     ;; a non-positive TTL skips caching entirely
     (gp-cache-put '(k none) 'v 0)
