@@ -10,6 +10,8 @@
 
 ;;; Code:
 
+(require 'cl-lib)
+
 (defvar gp-test-notifications nil
   "Notifications raised during the run, newest first: (TITLE BODY URGENT).")
 
@@ -38,6 +40,38 @@
   (advice-add 'start-process :before
               (lambda (_name _buffer program &rest _)
                 (gp-test--refuse-desktop-program program))))
+
+;;;; Deferred work --------------------------------------------------------------
+
+(defvar gp-test--timers nil
+  "Timers queued by `gp-test-with-queued-timers', oldest first.")
+
+(defun gp-test--queue-timer (_time _repeat function &rest args)
+  "Queue FUNCTION with ARGS instead of scheduling it; return an inert timer.
+The timer is never activated, so `cancel-timer' on it is a no-op."
+  (let ((timer (timer-create)))
+    (timer-set-function timer function args)
+    (setq gp-test--timers (append gp-test--timers (list timer)))
+    timer))
+
+(defun gp-test-drain-timers (&optional passes)
+  "Run queued timers, PASSES rounds at most (default 4).
+Timers queued during a round run in the next one, so a self re-arming
+poller stops after PASSES rounds instead of looping."
+  (dotimes (_ (or passes 4))
+    (let ((batch gp-test--timers))
+      (setq gp-test--timers nil)
+      (dolist (timer batch)
+        (apply (timer--function timer) (timer--args timer))))))
+
+(defmacro gp-test-with-queued-timers (&rest body)
+  "Run BODY with timers queued for `gp-test-drain-timers', not scheduled."
+  (declare (indent 0) (debug t))
+  `(let ((gp-test--timers nil))
+     (cl-letf (((symbol-function 'run-at-time) #'gp-test--queue-timer)
+               ((symbol-function 'run-with-timer) #'gp-test--queue-timer)
+               ((symbol-function 'run-with-idle-timer) #'gp-test--queue-timer))
+       ,@body)))
 
 (provide 'gp-test-helper)
 ;;; gp-test-helper.el ends here

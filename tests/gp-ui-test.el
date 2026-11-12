@@ -1027,43 +1027,6 @@ a visible stall once per interval in any open detail buffer."
     (should (= (length threads) 1))
     (should (= (cdr (car threads)) 0))))
 
-(defconst gp-test--me "{21d7839d-779f-44b2-8c40-6f43ac90be06}"
-  "The signed-in user's uuid, as tests/fixtures/user.json has it.")
-
-(defun gp-test--delete-comment-at-point (comment answer)
-  "Run `gp-detail-delete' on COMMENT on PR 7 in acme/x, answering ANSWER.
-Runs inside `bitbucket-mock-with-service'; returns the DELETE requests."
-  (let ((gp--pr '((id . 7) (destination (repository (full_name . "acme/x"))))))
-    (cl-letf (((symbol-function 'magit-current-section)
-               (lambda () (let ((s (gp-comment-section))) (oset s value comment) s)))
-              ((symbol-function 'yes-or-no-p) (lambda (&rest _) answer))
-              ((symbol-function 'gp-detail-refresh) #'ignore))
-      (gp-detail-delete)
-      (cl-remove-if-not (lambda (c) (equal (car c) "DELETE")) bitbucket-mock-calls))))
-
-(ert-deftest gp-test-detail-delete-own-comment ()
-  "`gp-detail-delete' deletes an own comment at point (confirmed)."
-  (bitbucket-mock-with-service
-    (let ((deletes (gp-test--delete-comment-at-point
-                    `((id . 55) (user (uuid . ,gp-test--me))) t)))
-      (should (equal (mapcar (lambda (c) (nth 1 c)) deletes)
-                     '("/repositories/acme/x/pullrequests/7/comments/55"))))))
-
-(ert-deftest gp-test-detail-delete-declined-sends-nothing ()
-  "Answering no at the confirmation prompt makes no API call."
-  (bitbucket-mock-with-service
-    (should-not (gp-test--delete-comment-at-point
-                 `((id . 55) (user (uuid . ,gp-test--me))) nil))))
-
-(ert-deftest gp-test-detail-delete-rejects-foreign-comment ()
-  "Deleting someone else's comment signals and does not call the API."
-  (bitbucket-mock-with-service
-    (let ((gp-comment-delete-others nil))
-      (should-error (gp-test--delete-comment-at-point
-                     '((id . 55) (user (uuid . "{someone-else}"))) t)
-                    :type 'user-error)
-      (should-not (cl-find "DELETE" bitbucket-mock-calls :key #'car :test #'equal)))))
-
 (ert-deftest gp-test-detail-send-to-terminal-delegates ()
   (let* ((pr '((id . 7) (destination (repository (full_name . "acme/x")))))
          (comment '((id . 55) (content (raw . "Please fix this"))))
@@ -1300,46 +1263,6 @@ is sent as no body at all, a typed one verbatim."
       (should (cl-find "/repositories/acme/x/pullrequests/11/comments"
                        bitbucket-mock-calls :key #'cadr :test #'equal)))))
 
-(ert-deftest gp-test-detail-browse-opens-comment-url-at-comment-point ()
-  (let ((comment '((links (html (href . "https://example.test/comment/1")))))
-        (opened nil))
-    (cl-letf (((symbol-function 'magit-current-section)
-               (lambda () (let ((s (gp-comment-section))) (oset s value comment) s)))
-              ((symbol-function 'browse-url)
-               (lambda (url &rest _) (setq opened url))))
-      (gp-detail-browse)
-      (should (equal opened "https://example.test/comment/1")))))
-
-(ert-deftest gp-test-detail-browse-opens-pipeline-or-step-url ()
-  "`w' on a pipeline heading opens the pipeline; on a step, that step;
-elsewhere, the PR itself."
-  (let* ((pipeline '((uuid . "{p}") (build_number . 42)))
-         (step '((uuid . "{s}") (name . "Deploy")))
-         (parent (gp-pipeline-section))
-         (child (gp-pipeline-step-section))
-         (git-platform-current-backend (git-platform-bitbucket))
-         (at nil) (opened nil))
-    (oset parent value (cons pipeline (list step)))
-    (oset child value step)
-    (oset child parent parent)
-    (oset parent parent nil)
-    (cl-letf (((symbol-function 'magit-current-section) (lambda () at))
-              ((symbol-function 'browse-url)
-               (lambda (url &rest _) (setq opened url))))
-      (with-temp-buffer
-        (gp-detail-mode)
-        (setq gp--pr '((id . 1) (destination (repository (full_name . "acme/x")))
-                       (links (html (href . "https://bitbucket.org/acme/x/pull-requests/1")))))
-        (setq at parent)
-        (gp-detail-browse)
-        (should (equal opened "https://bitbucket.org/acme/x/pipelines/results/42"))
-        (setq at child)
-        (gp-detail-browse)
-        (should (equal opened "https://bitbucket.org/acme/x/pipelines/results/42/steps/{s}"))
-        (setq at nil)
-        (gp-detail-browse)
-        (should (equal opened "https://bitbucket.org/acme/x/pull-requests/1"))))))
-
 (defmacro gp-test--without-diff-fetch (&rest body)
   "Run BODY with the deferred stats/diff fetch answering nil at once.
 `bitbucket-mock-with-service' does not serve the raw-text diff
@@ -1353,7 +1276,11 @@ elsewhere, the PR itself."
 
 (ert-deftest gp-test-detail-refresh-uses-async-path-with-cached-content ()
   "`g' refetches the PR and its comments through the async path (no
-full `gp-show-pr' reload), and swaps them in."
+full `gp-show-pr' reload), and swaps them in.
+Kept beside the end-to-end refresh flows (gp-e2e-detail-test.el) for
+its last part, cached stats/diff surviving a failed refetch: no flow
+can reach that yet, since the Bitbucket mock has no diffstat route and
+GitHub's stats fetch reports a failed files request as an empty list."
   (bitbucket-mock-with-service
     (let ((pr '((id . 180) (title . "Old")
                 (destination (repository (full_name . "acme/web-frontend")))))
@@ -1429,7 +1356,6 @@ prevent, so each producer is checked rather than trusted."
                         (gp--detail-buffer-name '((id . 7) (title . "t")))
                         (gp-reviewers--buffer-name '((id . 7)))))
       (should (string-prefix-p tag name)))))
-
 
 ;;;; Resolved-thread collapsing -------------------------------------------------
 
@@ -1965,46 +1891,6 @@ impossible it would be a slot that can never fill."
           (gp--insert-description pr))
         (should (equal (buffer-string) ""))))))
 
-(defun gp-test--bitbucket-pr-puts ()
-  "The DATA of every PUT to a PR resource in `bitbucket-mock-calls', oldest first."
-  (mapcar (lambda (c) (nth 3 c))
-          (reverse (cl-remove-if-not
-                    (lambda (c) (and (equal (car c) "PUT")
-                                     (string-match-p "/pullrequests/[0-9]+\\'" (nth 1 c))))
-                    bitbucket-mock-calls))))
-
-(ert-deftest gp-test-edit-description-refreshes-the-detail-buffer ()
-  "Saving a description sends it, then redraws the DETAIL buffer, not
-the compose one.  `:on-success' runs while the compose buffer is
-current, where `gp--pr' is nil and a bare `gp-detail-refresh' silently
-does nothing -- the edit reaches the server but the view keeps showing
-the old text."
-  (bitbucket-mock-with-service
-    (let* ((pr (append '((description . "old body")) (car (gp-test--mock-prs))))
-           (detail-buf (gp--detail-buffer-name pr))
-           (refreshed-in nil))
-      (unwind-protect
-          (progn
-            ;; a stand-in for the real detail buffer, so `buffer-live-p' holds
-            (get-buffer-create detail-buf)
-            (cl-letf (((symbol-function 'gp-detail-refresh)
-                       (lambda () (setq refreshed-in (buffer-name)))))
-              (let ((compose (gp-ui-edit-description pr)))
-                (unwind-protect
-                    (with-current-buffer compose
-                      (erase-buffer)
-                      (insert "new body")
-                      (gp-compose-submit))
-                  (when (buffer-live-p compose) (kill-buffer compose)))))
-            ;; exactly one PUT, carrying the new text and keeping the title
-            (let ((puts (gp-test--bitbucket-pr-puts)))
-              (should (= (length puts) 1))
-              (should (equal (alist-get 'description (car puts)) "new body"))
-              (should (equal (alist-get 'title (car puts)) (alist-get 'title pr))))
-            ;; the redraw must have happened inside the detail buffer
-            (should (equal refreshed-in detail-buf)))
-        (when (get-buffer detail-buf) (kill-buffer detail-buf))))))
-
 (defun gp-test--buttons ()
   "Return the buffer's button overlays, ordered by position.
 `overlays-in' returns them in an unspecified order -- and Emacs 28.2
@@ -2021,42 +1907,6 @@ order it happened to see locally."
           (gp-test--buttons)))
 
 ;;;; Title editing ---------------------------------------------------------------
-
-(ert-deftest gp-test-edit-title-saves-a-changed-title ()
-  "A changed title is sent (trimmed), then the buffer refreshes."
-  (bitbucket-mock-with-service
-    (let ((pr (append '((title . "old title")) (car (gp-test--mock-prs))))
-          refreshed)
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "  new title  "))
-                ((symbol-function 'gp-detail-refresh) (lambda () (setq refreshed t))))
-        (gp-ui-edit-title pr))
-      (let ((puts (gp-test--bitbucket-pr-puts)))
-        (should (= (length puts) 1))
-        ;; trimmed before sending
-        (should (equal (alist-get 'title (car puts)) "new title"))
-        ;; the whole-object PUT resends the description so it is not blanked
-        (should (assq 'description (car puts))))
-      (should refreshed))))
-
-(ert-deftest gp-test-edit-title-does-nothing-when-unchanged ()
-  "Submitting the same title costs no request.
-The prompt is pre-filled with the current title, so RET is the most
-likely keystroke -- it must not fire a pointless write."
-  (bitbucket-mock-with-service
-    (let ((pr (append '((title . "same title")) (car (gp-test--mock-prs)))))
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "same title"))
-                ((symbol-function 'gp-detail-refresh) #'ignore))
-        (gp-ui-edit-title pr))
-      (should-not (gp-test--bitbucket-pr-puts)))))
-
-(ert-deftest gp-test-edit-title-refuses-an-empty-title ()
-  "Clearing the prompt aborts rather than blanking the PR's title.
-Unlike a description, an empty title is never a legitimate edit."
-  (bitbucket-mock-with-service
-    (let ((pr (append '((title . "old")) (car (gp-test--mock-prs)))))
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "   ")))
-        (should-error (gp-ui-edit-title pr) :type 'user-error))
-      (should-not (gp-test--bitbucket-pr-puts)))))
 
 (ert-deftest gp-test-title-edit-button-only-on-open-prs ()
   "The title carries an edit button while open, and none once closed."
@@ -2562,25 +2412,6 @@ but not reactors, so a button cannot know whose reaction it is."
           ;; "ada" is the signed-in user (mock /user), so the click removes
           (should (string-match-p "remove yours" tip)))))))
 
-(ert-deftest gp-test-toggle-reaction-adds-then-removes ()
-  "The same entry point adds when absent and removes when present,
-which is what makes a rendered reaction a toggle."
-  (github-mock-with-service
-    (let ((pr (gp-test--gh-pr))
-          (comment (gp-test--gh-comment))
-          (path "/repos/acme/web/issues/comments/7/reactions"))
-      (cl-letf (((symbol-function 'gp-detail-refresh) #'ignore))
-        (gp-ui-toggle-reaction pr comment "+1")   ;; none held -> add
-        (should (equal (mapcar (lambda (r) (nth 2 r)) github-mock--reactions) '("+1")))
-        (gp-ui-toggle-reaction pr comment "+1"))  ;; now held -> remove
-      (should-not github-mock--reactions)
-      ;; the writes, in order: a POST with the content, then a DELETE by id
-      (let ((writes (reverse (cl-remove-if (lambda (c) (equal (car c) "GET"))
-                                           github-mock-calls))))
-        (should (equal (mapcar (lambda (c) (list (car c) (nth 1 c))) writes)
-                       `(("POST" ,path) ("DELETE" ,(concat path "/5001")))))
-        (should (equal (alist-get 'content (nth 3 (car writes))) "+1"))))))
-
 (ert-deftest gp-test-label-face-uses-the-platform-color ()
   "Each distinct colour gets its own face, interned once and reused.
 Text colour flips with background luminance so a dark label stays
@@ -2621,21 +2452,6 @@ display all fall back to the single themable face."
                     (lambda (c) (and (equal (car c) "PUT")
                                      (string-match-p "/labels\\'" (nth 1 c))))
                     github-mock-calls))))
-
-(ert-deftest gp-test-edit-labels-sends-the-chosen-set ()
-  "Editing labels PUTs the complete chosen set and refreshes the buffer."
-  (github-mock-with-service
-    (let (refreshed)
-      (cl-letf (((symbol-function 'completing-read-multiple)
-                 (lambda (&rest _) '("bug" "chore")))
-                ((symbol-function 'gp-detail-refresh)
-                 (lambda (&rest _) (setq refreshed t))))
-        ;; a PR as callers actually hold it: `github--reshape-pr' has already
-        ;; put the PR *number* in `id', which is what the endpoints take
-        (gp-ui-edit-labels (github-pull-request "acme/web" 42))
-        (should (equal (gp-test--label-puts)
-                       '(("/repos/acme/web/issues/42/labels" ("bug" "chore")))))
-        (should refreshed)))))
 
 (ert-deftest gp-test-edit-labels-no-change-skips-the-write ()
   "Leaving the pre-filled set untouched must not PUT or refresh --

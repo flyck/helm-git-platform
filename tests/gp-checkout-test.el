@@ -144,55 +144,6 @@ all invocations are recorded in the dynamically-bound list
                   (funcall ,script dir args))))
        ,@body)))
 
-(defun gp-test--mutating-git-calls (calls)
-  "Return the repository-changing steps among CALLS (as recorded by
-`gp-test-with-fake-git'), in order, without their directory: the
-read-only probes (status, rev-parse, worktree, diff, merge-base) are
-internal detail."
-  (cl-loop for c in calls
-           when (member (cadr c) '("stash" "reset" "fetch" "checkout" "pull" "branch"))
-           collect (cdr c)))
-
-(ert-deftest gp-test-run-clean-executes-three-steps ()
-  "A clean tree with no competing worktree: fetch, checkout, pull, in
-that order, nothing stashed, and the run reports the original DIR."
-  (gp-test-with-fake-git
-      (lambda (_dir args)
-        (cond ((equal (car args) "status") '(0 . ""))         ;; clean
-              ((equal (car args) "worktree")
-               '(0 . "worktree /repo\nHEAD a\nbranch refs/heads/main\n"))
-              ((equal args '("rev-parse" "--abbrev-ref" "HEAD")) '(0 . "main"))
-              (t '(0 . ""))))
-    (let ((res (gp-checkout-run "/repo" "feature")))
-      (should (plist-get res :ok))
-      (should-not (plist-get res :stashed))
-      (should (equal (plist-get res :dir) "/repo"))
-      (should (equal (gp-test--mutating-git-calls git-calls)
-                     '(("fetch" "origin" "feature")
-                       ("checkout" "feature")
-                       ("pull" "--ff-only" "origin" "feature")))))))
-
-(ert-deftest gp-test-run-dirty-stashes ()
-  "A dirty tree is stashed (named after the current branch) before the
-switch, and the run reports it as stashed."
-  (let ((gp-checkout-stash-prefix "gp-auto"))
-    (gp-test-with-fake-git
-        (lambda (_dir args)
-          (cond ((equal (car args) "status") '(0 . " M file.txt")) ;; dirty
-                ((equal args '("rev-parse" "--abbrev-ref" "HEAD")) '(0 . "main"))
-                ;; no intent-to-add paths and no competing worktree
-                ((member (car args) '("diff" "worktree")) '(0 . ""))
-                (t '(0 . ""))))
-      (let ((res (gp-checkout-run "/repo" "feature")))
-        (should (plist-get res :ok))
-        (should (plist-get res :stashed))
-        (should (equal (gp-test--mutating-git-calls git-calls)
-                       '(("stash" "push" "--include-untracked"
-                          "-m" "gp-auto: WIP on main")
-                         ("fetch" "origin" "feature")
-                         ("checkout" "feature")
-                         ("pull" "--ff-only" "origin" "feature"))))))))
-
 (ert-deftest gp-test-run-stops-on-failure ()
   "If checkout fails, pull is not attempted and :ok is nil."
   (gp-test-with-fake-git

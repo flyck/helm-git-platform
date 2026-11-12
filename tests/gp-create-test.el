@@ -237,31 +237,6 @@ and the failure is not cached: the next call asks again."
       (should (null (bitbucket-repo-suggested-reviewers "ws/slug")))
       (should (= (gp-create-test--count-calls "/workspaces/ws/members") 2)))))
 
-;;;; Default vs. suggested reviewer checkboxes ---------------------------------
-
-(ert-deftest gp-create-test-default-and-suggested-reviewers-combined ()
-  "Both groups render together, defaults checked and suggestions not,
-and `gp-create--selected-reviewer-uuids' only picks up checked ones."
-  (require 'wid-edit)
-  (cl-letf (((symbol-function 'gp-repo-default-reviewers)
-             (lambda (_) '(((uuid . "alice") (display_name . "Alice")))))
-            ((symbol-function 'gp-repo-suggested-reviewers)
-             (lambda (_) '(((uuid . "bob") (display_name . "Bob"))))))
-    (with-temp-buffer
-      (setq-local gp-create--w-reviewers (gp-create--insert-reviewers "acme/web"))
-      (should (equal (mapcar #'car gp-create--w-reviewers) '("alice" "bob")))
-      (should (equal (gp-create--selected-reviewer-uuids) '("alice"))))))
-
-(ert-deftest gp-create-test-no-reviewers-blank-section ()
-  "Neither defaults nor suggestions: a friendly empty message, no widgets."
-  (require 'wid-edit)
-  (cl-letf (((symbol-function 'gp-repo-default-reviewers) (lambda (_) nil))
-            ((symbol-function 'gp-repo-suggested-reviewers) (lambda (_) nil)))
-    (with-temp-buffer
-      (should (null (gp-create--insert-reviewers "acme/web")))
-      (should (string-match-p "no default or suggested reviewers"
-                              (buffer-string))))))
-
 ;;;; Preferred reviewers -------------------------------------------------------
 
 (ert-deftest gp-create-test-preferred-matches-uuid-name-and-nickname ()
@@ -295,47 +270,6 @@ and `gp-create--selected-reviewer-uuids' only picks up checked ones."
         (should-not (widget-value (cdr (assoc "{skip}" widgets))))
         ;; and the row says why it came ticked
         (should (string-match-p "Keep Me *★" (buffer-string)))))))
-
-(ert-deftest gp-create-test-preferred-never-invents-a-reviewer ()
-  "Rendering the reviewers section: an id matching no candidate yields no
-widget -- and is logged, not silent; a matching one is still honoured."
-  (require 'wid-edit)
-  (let ((gp-create-preferred-reviewers '("{ghost}" "{real}"))
-        (logged nil))
-    (cl-letf (((symbol-function 'gp-log)
-               (lambda (_lvl fmt &rest args)
-                 (push (apply #'format fmt args) logged)))
-              ((symbol-function 'gp-repo-default-reviewers) (lambda (_) nil))
-              ((symbol-function 'gp-repo-suggested-reviewers)
-               (lambda (_) '(((uuid . "{real}") (display_name . "Real Person"))
-                             ((uuid . "{other}") (display_name . "Other"))))))
-      (with-temp-buffer
-        (let ((widgets (gp-create--insert-reviewers "acme/web")))
-          (should (equal (mapcar #'car widgets) '("{real}" "{other}")))
-          (should (widget-value (cdr (assoc "{real}" widgets))))
-          (should-not (widget-value (cdr (assoc "{other}" widgets))))))
-      (should (seq-some (lambda (m) (string-match-p "{ghost}" m)) logged))
-      ;; only the unmatched entry is reported
-      (should-not (seq-some (lambda (m) (string-match-p "{real}" m)) logged)))))
-
-(ert-deftest gp-create-test-draft-default-follows-defcustom ()
-  "The \"Create as draft\" box starts ticked iff `gp-create-draft' is non-nil.
-Guards the defcustom actually reaching the widget -- the box was once
-hardcoded to nil, which silently ignored the setting."
-  (let ((ctx '(:full-name "ws/repo" :source "feature" :dest "main"
-               :title "t" :description "d")))
-    (dolist (want '(t nil))
-      (let ((gp-create-draft want)
-            ;; the reviewers section would otherwise hit the network
-            (gp-create-preferred-reviewers nil))
-        (cl-letf (((symbol-function 'gp-repo-default-reviewers) (lambda (_) nil))
-                  ((symbol-function 'gp-repo-suggested-reviewers) (lambda (_) nil)))
-          (with-temp-buffer
-            (gp-create--build-form ctx)
-            (should (eq (and (widget-value gp-create--w-draft) t) want))
-            ;; the sibling toggle keeps its own default, unaffected
-            (should (eq (and (widget-value gp-create--w-close) t)
-                        (and gp-create-close-source-branch t)))))))))
 
 (provide 'gp-create-test)
 ;;; gp-create-test.el ends here

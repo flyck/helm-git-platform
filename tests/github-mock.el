@@ -143,6 +143,9 @@ Stateful so an add/remove round-trip can be driven through the real
        (setq github-mock--reactions
              (seq-remove (lambda (r) (equal (car r) id)) github-mock--reactions))
        t))
+    ;; requested reviewers: POST adds, DELETE removes; both answer the PR
+    ((string-match-p "/pulls/[0-9]+/requested_reviewers\\'" path)
+     github-mock--pr-1)
     ((and (equal method "POST") (string-match-p "/pulls/[0-9]+/reviews\\'" path))
      `((id . 7001) (user . ,github-mock--user) (state . ,(alist-get 'event data))))
     ((string-match-p "/pulls/[0-9]+/reviews\\'" path) nil)
@@ -171,6 +174,14 @@ Stateful so an add/remove round-trip can be driven through the real
   "Mock implementation of `github-api-paged'; ignores real pagination."
   (push (list "GET" path params nil) github-mock-calls)
   (ignore max-items)
+  (or
+   (cl-loop for (re . resp) in github-mock-overrides
+            when (string-match-p re path)
+            return (if (functionp resp) (funcall resp "GET" path params nil) resp))
+   (github-mock--paged-route path)))
+
+(defun github-mock--paged-route (path)
+  "Built-in list response for PATH."
   (cond
    ((string-match-p "/reactions\\'" path) (github-mock--reaction-list path))
    ((string-match-p "\\`/search/issues\\'" path) (list github-mock--search-hit))
@@ -211,6 +222,17 @@ Stateful so an add/remove round-trip can be driven through the real
   "Mock `github-graphql-request-async': CALLBACK gets (OK DATA)."
   (funcall callback t (github-mock-graphql query variables)))
 
+(defconst github-mock--diff
+  (concat "diff --git a/widget.el b/widget.el\n"
+          "--- a/widget.el\n+++ b/widget.el\n"
+          "@@ -10,1 +10,1 @@\n-(old)\n+(new)\n")
+  "The raw diff served for any PR.")
+
+(defun github-mock-get-raw-async (path callback &optional _extra-headers)
+  "Mock `github-api-get-raw-async': CALLBACK gets `github-mock--diff'."
+  (push (list "GET" path nil nil) github-mock-calls)
+  (funcall callback github-mock--diff))
+
 (defmacro github-mock-with-service (&rest body)
   "Run BODY with the GitHub API replaced by the mock service.
 Seeds a token, selects the GitHub backend, clears caches and the
@@ -230,14 +252,16 @@ callbacks run immediately."
          (github--thread-id-cache (make-hash-table :test 'equal))
          ;; `github-repo-labels' caches through the shared `gp-cache-*' table;
          ;; rebind it so a pool cached by one test can't answer another's fetch
-         (gp--result-cache (make-hash-table :test 'equal)))
+         (gp--result-cache (make-hash-table :test 'equal))
+         (gp--comment-outdated-cache (make-hash-table :test 'eql)))
      (cl-letf (((symbol-function 'github-api-request) #'github-mock-request)
                ((symbol-function 'github-api-paged) #'github-mock-paged)
                ((symbol-function 'github-graphql-request) #'github-mock-graphql)
                ((symbol-function 'github-api-get-async) #'github-mock-get-async)
                ((symbol-function 'github-api-paged-async) #'github-mock-paged-async)
                ((symbol-function 'github-graphql-request-async)
-                #'github-mock-graphql-async))
+                #'github-mock-graphql-async)
+               ((symbol-function 'github-api-get-raw-async) #'github-mock-get-raw-async))
        ,@body)))
 
 (provide 'github-mock)

@@ -113,14 +113,6 @@ same repo can never win."
       (should (equal (gp-local-find-checkout "acme/web-frontend")
                      (expand-file-name "web-frontend" root))))))
 
-(ert-deftest gp-test-find-checkout-renamed-folder ()
-  "A folder named differently from the slug still resolves via its remote."
-  (gp-test-with-fake-tree
-      '(("my-frontend-clone" . "git@bitbucket.org:acme/web-frontend.git"))
-    (should (string-suffix-p
-             "my-frontend-clone"
-             (gp-local-find-checkout "acme/web-frontend")))))
-
 (ert-deftest gp-test-dir-remote-prefers-origin ()
   "`origin' wins when it is a Bitbucket remote, even though another
 remote listed before it is a Bitbucket remote too."
@@ -225,65 +217,6 @@ wrong one."
             (setq default-directory "/somewhere/else/")
             (should (null (gp-local-anchor-to-checkout pr)))
             (should (equal default-directory "/somewhere/else/"))))))))
-
-(ert-deftest gp-test-checkout-branch-delegates-to-service ()
-  "checkout-branch resolves the dir and runs the checkout service there."
-  (require 'gp-checkout)
-  (bitbucket-mock-with-service
-    (let* ((pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
-           (called-dir nil) (called-branch nil) (called-base nil))
-      (cl-letf (((symbol-function 'gp-local-find-checkout)
-                 (lambda (_fn) "/tmp/fake"))
-                ((symbol-function 'gp-checkout-run)
-                 (lambda (dir branch &optional base)
-                   (setq called-dir dir called-branch branch called-base base)
-                   (list :ok t :stashed nil :log ""))))
-        (let ((res (gp-local-checkout-branch pr)))
-          (should (equal called-dir "/tmp/fake"))
-          (should (equal called-branch "feature/widget-toggle"))
-          ;; the destination branch is passed so its remote ref is fetched
-          (should (equal called-base "main"))
-          (should (equal (plist-get res :dir) "/tmp/fake"))
-          (should (plist-get res :ok)))))))
-
-(ert-deftest gp-test-resolve-dir-clones-when-missing ()
-  "resolve-dir clones (when enabled) if no checkout exists."
-  (require 'gp-checkout)
-  (let ((gp-checkout-clone-base "git@bitbucket.org:")
-        (cloned nil))
-    (cl-letf (((symbol-function 'gp-local-find-checkout) (lambda (_fn) nil))
-              ((symbol-function 'gp-checkout-ensure-clone)
-               (lambda (fn dest) (setq cloned (list fn dest)) dest)))
-      (let ((dir (gp-local-resolve-dir "ws/slug" t)))
-        (should (string-suffix-p "slug" dir))
-        (should (equal (car cloned) "ws/slug"))))))
-
-(ert-deftest gp-test-resolve-dir-errors-when-clone-disabled ()
-  "Without a checkout and with `gp-checkout-clone-base' unset,
-resolve-dir signals a user-error naming that variable -- whether or
-not cloning was requested -- and never runs git."
-  (require 'gp-checkout)
-  (let ((gp-checkout-clone-base nil)
-        (gp-local-git-root (make-temp-name
-                            (expand-file-name "gp-no-root-" temporary-file-directory))))
-    (cl-letf (((symbol-function 'gp-local-find-checkout) (lambda (_fn) nil))
-              ((symbol-function 'gp-checkout--git)
-               (lambda (&rest _) (error "must not run git"))))
-      ;; cloning requested but impossible
-      (let ((err (should-error (gp-local-resolve-dir "ws/slug" t)
-                               :type 'user-error)))
-        (should (string-match-p "gp-checkout-clone-base" (cadr err))))
-      ;; cloning not requested: the hint still points at the variable
-      (let ((err (should-error (gp-local-resolve-dir "ws/slug" nil)
-                               :type 'user-error)))
-        (should (string-match-p "gp-checkout-clone-base" (cadr err)))))))
-
-(ert-deftest gp-test-resolve-dir-uses-existing ()
-  "When a checkout exists, resolve-dir returns it without cloning."
-  (cl-letf (((symbol-function 'gp-local-find-checkout) (lambda (_fn) "/have/it"))
-            ((symbol-function 'gp-checkout-ensure-clone)
-             (lambda (&rest _) (error "should not clone"))))
-    (should (equal (gp-local-resolve-dir "ws/slug" t) "/have/it"))))
 
 (provide 'gp-local-test)
 ;;; gp-local-test.el ends here

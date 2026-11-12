@@ -63,4 +63,6 @@ emacs --batch -Q \
   -l tests/gp-magit-test.el \
   -l tests/gp-helm-test.el \
   -l tests/gp-deploy-watch-test.el \
+  -l tests/gp-e2e-detail-test.el \
+  -l tests/gp-e2e-list-test.el \
   -f ert-run-tests-batch-and-exit

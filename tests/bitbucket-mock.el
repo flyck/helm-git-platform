@@ -138,6 +138,11 @@ Serves one fixture page and reports (OK VALUES), honouring MAX-ITEMS."
       (setq values (seq-take values max-items)))
     (funcall callback (and page t) values)))
 
+(defun bitbucket-mock-get-text-async (url callback)
+  "Mock `bitbucket-api-get-text-async': CALLBACK gets the mock diff."
+  (push (list "GET" url nil nil) bitbucket-mock-calls)
+  (funcall callback (bitbucket-mock-diff nil nil)))
+
 (defmacro bitbucket-mock-with-service (&rest body)
   "Run BODY with the Bitbucket API replaced by the mock service.
 Seeds credentials and workspace, selects the Bitbucket backend, and
@@ -151,11 +156,13 @@ async ones are mocked, so async callers hit fixtures too."
          (bitbucket--uuid-cache nil)
          (bitbucket-mock-calls nil)
          (git-platform-current-backend (git-platform-bitbucket))
-         (gp--result-cache (make-hash-table :test 'equal)))
+         (gp--result-cache (make-hash-table :test 'equal))
+         (gp--comment-outdated-cache (make-hash-table :test 'eql)))
      (clrhash bitbucket--mention-cache)
      (cl-letf (((symbol-function 'bitbucket-api-request) #'bitbucket-mock-request)
                ((symbol-function 'bitbucket-api-get-async) #'bitbucket-mock-get-async)
                ((symbol-function 'bitbucket-api-paged-async) #'bitbucket-mock-paged-async)
+               ((symbol-function 'bitbucket-api-get-text-async) #'bitbucket-mock-get-text-async)
                ((symbol-function 'bitbucket-pull-request-diff) #'bitbucket-mock-diff))
        ,@body)))
 

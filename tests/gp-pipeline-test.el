@@ -322,19 +322,6 @@ in-progress one, which cannot."
       ;; section instead, see `gp-test-detail-commits-show-pipeline-status'
       (should-not (string-match-p "Recent runs" text)))))
 
-(ert-deftest gp-test-pipeline-trigger-or-run-manual-prefers-manual-step ()
-  (let ((called nil)
-        (step '((state (name . "PENDING") (stage (name . "PAUSED")))
-                (trigger (type . "pipeline_step_trigger_manual")))))
-    (cl-letf (((symbol-function 'magit-current-section)
-               (lambda () (let ((s (gp-pipeline-step-section))) (oset s value step) s)))
-              ((symbol-function 'gp-detail-pipeline-run-manual)
-               (lambda () (setq called 'manual)))
-              ((symbol-function 'gp-detail-pipeline-trigger)
-               (lambda () (setq called 'trigger))))
-      (gp-detail-pipeline-trigger-or-run-manual)
-      (should (eq called 'manual)))))
-
 ;;;; Redeploy an already-successful manual step --------------------------------
 
 ;; Shared deploy fixtures.  `gp-test--deploy-pipeline' / `gp-test--deploy-step'
@@ -498,7 +485,6 @@ first manual run, not a fresh pipeline trigger or the browser."
                    (and (slot-boundp section 'children)
                         (oref section children)))))
 
-
 (ert-deftest gp-test-elapsed-repaint-advances-in-place ()
   "A running step's elapsed time reticks without a full rerender.
 Regression: the duration was computed at render time only, and the
@@ -654,7 +640,6 @@ Lets a script distinguish absent from empty with a plain -z test."
           (lambda (title body urgent) (setq got (list title body urgent)))))
     (should (gp-notify "T" "B" t))
     (should (equal got '("T" "B" t)))))
-
 
 (ert-deftest gp-test-deploy-refresh-targets-originating-buffer ()
   "The sentinel refreshes the detail buffer the deploy was started from.

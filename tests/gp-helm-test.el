@@ -702,7 +702,6 @@ the whole list."
   "With no known identity nothing is classed as already-voted."
   (should-not (gp-helm--my-vote '((id . 1)) nil)))
 
-
 ;;;; Quorum: covered by other reviewers -----------------------------------------
 
 (defmacro gp-test-with-reviewers (alist &rest body)
@@ -1025,54 +1024,6 @@ Real Bitbucket accessors: merged means state MERGED, the time is
       (should (equal (mapcar (lambda (p) (alist-get 'id p))
                              (gp-helm--merged-recently prs 1))
                      '(1))))))
-
-(defmacro gp-helm-test--with-list-session (&rest body)
-  "Run BODY with `gp-helm--list' state isolated and `helm' captured.
-Binds `sources' to the sources `helm' would have shown.  Idle timers
-and badge scans are dropped: only the section assembly and the list
-requests matter here."
-  (declare (indent 0) (debug t))
-  `(let ((gp-helm--mine-cache nil) (gp-helm--mine-uuid nil)
-         (gp-helm--reviewing-cache nil) (gp-helm--reviewing-uuid nil)
-         (gp-helm--merged-recent-cache nil)
-         (gp-helm--live-deploy-cache (make-hash-table :test 'equal))
-         (sources 'unset))
-     (cl-letf (((symbol-function 'helm)
-                (lambda (&rest args) (setq sources (plist-get args :sources))))
-               ((symbol-function 'run-with-idle-timer) #'ignore)
-               ((symbol-function 'gp-helm--scan-mine-badges) #'ignore)
-               ((symbol-function 'gp-helm--refresh-if-alive) #'ignore))
-       ,@body)))
-
-(defun gp-helm-test--merged-list-requests ()
-  "Return the recorded workspace-PR list requests that asked for MERGED."
-  (cl-remove-if-not (lambda (call)
-                      (and (string-match-p "/workspaces/[^/]+/pullrequests/" (nth 1 call))
-                           (equal (cdr (assoc "state" (nth 2 call))) "MERGED")))
-                    bitbucket-mock-calls))
-
-(defun gp-helm-test--merged-source-p (source)
-  "Return non-nil if helm SOURCE is the recently-merged section."
-  (string-prefix-p "Merged in the last" (alist-get 'name source)))
-
-(ert-deftest gp-test-helm-merged-section-can-be-turned-off ()
-  "Nil `gp-helm-show-merged-recent' yields no section and no fetch.
-The list is open-only by default, so the section needs a request of its
-own -- which must not happen when the section is off."
-  (bitbucket-mock-with-service
-    (gp-helm-test--with-list-session
-      (let ((gp-helm-show-merged-recent nil))
-        (gp-helm--list nil)
-        (should (listp sources))
-        (should sources)
-        (should-not (gp-helm-test--merged-list-requests))
-        (should-not (cl-some #'gp-helm-test--merged-source-p sources)))
-      ;; the control: on, the same call fetches MERGED and builds the section
-      (let ((gp-helm-show-merged-recent t)
-            (gp--result-cache (make-hash-table :test 'equal)))
-        (gp-helm--list nil)
-        (should (= (length (gp-helm-test--merged-list-requests)) 1))
-        (should (cl-some #'gp-helm-test--merged-source-p sources))))))
 
 (ert-deftest gp-test-helm-merged-section-label-follows-the-window ()
   "The heading names the window rather than saying \"today\"."
