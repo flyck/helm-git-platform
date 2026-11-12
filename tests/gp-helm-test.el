@@ -415,6 +415,37 @@ step yet caches nil, and a cached commit is never re-fetched."
                    (lambda (_pr _cb) (setq calls (1+ calls)))))
           (gp-helm--scan-deploys-async (list pr))
           (should (= calls 0)))))))
+(defun gp-test--pipelines-down (&rest _)
+  "Mock route for a pipelines listing that fails at the network."
+  (error "HTTP 503"))
+
+(ert-deftest gp-test-helm-scan-deploys-retries-after-a-failed-fetch ()
+  "A failed pipeline fetch is not cached as \"not deployed\": the next
+scan fetches again and resolves the badge."
+  (bitbucket-mock-with-service
+    (let* ((gp-helm--deploy-cache (make-hash-table :test 'equal))
+           (pr (car (alist-get 'values (bitbucket-mock--fixture "workspace-prs.json"))))
+           (key (gp-helm--deploy-cache-key pr)))
+      (let ((bitbucket-mock-overrides '(("/pipelines/?\\'" . gp-test--pipelines-down))))
+        (gp-helm--scan-deploys-async (list pr)))
+      (should (eq (gethash key gp-helm--deploy-cache 'miss) 'miss))
+      (gp-helm--scan-deploys-async (list pr))
+      (should (eq (gethash key gp-helm--deploy-cache 'miss) nil)))))
+
+(ert-deftest gp-test-helm-scan-live-deploys-retries-after-a-failed-fetch ()
+  (bitbucket-mock-with-service
+    (let* ((gp-helm--live-deploy-cache (make-hash-table :test 'equal))
+           (pr '((state . "MERGED")
+                 (merge_commit (hash . "deadbeefcafe0001"))
+                 (destination (branch (name . "main"))
+                              (repository (full_name . "acme/web-frontend")))))
+           (key (gp-helm--live-deploy-cache-key pr)))
+      (let ((bitbucket-mock-overrides '(("/pipelines/?\\'" . gp-test--pipelines-down))))
+        (gp-helm--scan-live-deploys-async (list pr)))
+      (should (eq (gethash key gp-helm--live-deploy-cache 'miss) 'miss))
+      (gp-helm--scan-live-deploys-async (list pr))
+      (should (eq (gethash key gp-helm--live-deploy-cache 'miss) nil)))))
+
 (ert-deftest gp-test-helm-pipeline-bubble-github-shape ()
   "GitHub PRs carry the head commit at .head.sha, not .source.commit.hash.
 The bubble must resolve the hash through `gp-pr-source-commit' so it

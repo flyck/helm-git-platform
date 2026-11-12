@@ -258,7 +258,8 @@ per backend."
 
 (defvar gp-helm--deploy-cache (make-hash-table :test 'equal)
   "(FULL-NAME . commit-hash) -> t/nil: whether a deploy step succeeded.
-Covers that commit's current pipeline(s); absent means not yet scanned.
+Covers that commit's current pipeline(s); absent means not yet scanned
+or the last fetch failed.
 Keyed by repo too so a deploy can be busted per-repo.
 
 Resolved entries never expire (walking every pipeline's steps is too
@@ -348,10 +349,13 @@ miss (see `gp-helm--deploy-cache')."
         (gp-pipeline-fetch-for-pr-async
          pr
          (lambda (data)
-           (let ((deployed (cl-some (lambda (pp) (gp-helm--pipeline-has-successful-deploy-p (cdr pp)))
-                                     (plist-get data :current))))
-             (puthash key (and deployed t) gp-helm--deploy-cache)
-             (gp-helm--refresh-if-alive))))))))
+           ;; nil means the fetch failed (or no runs yet): stay unscanned
+           ;; so the next scan retries rather than pinning "not deployed".
+           (when data
+             (let ((deployed (cl-some (lambda (pp) (gp-helm--pipeline-has-successful-deploy-p (cdr pp)))
+                                       (plist-get data :current))))
+               (puthash key (and deployed t) gp-helm--deploy-cache)
+               (gp-helm--refresh-if-alive)))))))))
 
 (defun gp-helm--deploy-badge (pr)
   "Return a 🚀 badge if PR's current pipeline deployed successfully, else \"\".
@@ -376,10 +380,12 @@ skipped."
         (gp-pipeline-fetch-for-branch-async
          (gp-pr-full-name pr) (gp-pr-destination-branch pr) (gp-pr-merge-commit pr)
          (lambda (data)
-           (let ((deployed (cl-some (lambda (pp) (gp-helm--pipeline-has-successful-live-deploy-p (cdr pp)))
-                                     (plist-get data :current))))
-             (puthash key (and deployed t) gp-helm--live-deploy-cache)
-             (gp-helm--refresh-if-alive))))))))
+           ;; As in `gp-helm--scan-deploys-async': nil retries next scan.
+           (when data
+             (let ((deployed (cl-some (lambda (pp) (gp-helm--pipeline-has-successful-live-deploy-p (cdr pp)))
+                                       (plist-get data :current))))
+               (puthash key (and deployed t) gp-helm--live-deploy-cache)
+               (gp-helm--refresh-if-alive)))))))))
 
 (defun gp-helm--live-deploy-badge (pr)
   "Return a 🚢 badge if merged PR was deployed live, else \"\".
