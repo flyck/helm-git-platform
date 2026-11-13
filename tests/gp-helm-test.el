@@ -678,6 +678,19 @@ done in \"Approved by me\"."
       (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 0 res)) '(1)))
       (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 1 res)) '(2))))))
 
+(ert-deftest gp-test-helm-others-drafts-do-not-need-my-review ()
+  "Someone else's draft is not under \"Needs my review\"; their ready
+PR is."
+  (bitbucket-mock-with-service
+    (let* ((base (cl-remove-if (lambda (c) (memq (car c) '(id draft author)))
+                               (car (alist-get 'values (bitbucket-mock--fixture
+                                                        "workspace-prs.json")))))
+           (bea '(author (display_name . "Bea") (uuid . "{bea}")))
+           (draft (append `((id . 901) (draft . t) ,bea) base))
+           (ready (append `((id . 902) (draft) ,bea) base))
+           (res (gp-helm--partition-reviewing (list draft ready) "{me}")))
+      (should (equal (mapcar (lambda (p) (alist-get 'id p)) (nth 0 res)) '(902))))))
+
 (ert-deftest gp-test-helm-partition-reviewing-preserves-order ()
   "Both halves keep the incoming order, so the list does not jump around."
   (cl-letf (((symbol-function 'gp-pr-my-review-state)

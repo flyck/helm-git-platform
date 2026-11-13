@@ -1360,12 +1360,14 @@ NEEDS-ACTION still wants the user's review; APPROVED are ones they
 already approved; COVERED are ones other reviewers have settled (see
 `gp-helm--covered-by-others-p').  The user's own vote wins over
 quorum: a PR you approved belongs under \"Approved by me\" even if
-others have since piled on."
+others have since piled on.  A draft never needs action: its author
+has not asked for review yet."
   (let (todo done covered)
     (dolist (pr prs)
       (cond
        ((gp-helm--voted-p pr uuid) (push pr done))
        ((gp-helm--covered-by-others-p pr uuid) (push pr covered))
+       ((gp-pr-draft-p pr))
        (t (push pr todo))))
     (list (nreverse todo) (nreverse done) (nreverse covered))))
 

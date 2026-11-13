@@ -177,12 +177,16 @@ created and deletes the temp root."
     . ((values . ,(append (gp-e2e-list--bb-prs)
                           (list gp-e2e-list--bb-foreign-pr))))))
 
+(defun gp-e2e-list--gh-ready-pr-2 ()
+  "Bea's #43 from the mock, marked ready for review (the mock's is a draft)."
+  (cons '(draft) (assq-delete-all 'draft (copy-alist github-mock--pr-2))))
+
 (defun gp-e2e-list--gh-two-prs-overrides ()
-  "GitHub overrides: the search finds #42 (ada's) and #43 (bea's)."
+  "GitHub overrides: the search finds #42 (ada's) and #43 (bea's, ready)."
   `(("\\`/search/issues\\'"
      . (((number . 42) (repository_url . "https://api.github.com/repos/acme/web"))
         ((number . 43) (repository_url . "https://api.github.com/repos/acme/web"))))
-    ("/pulls/43\\'" . ,github-mock--pr-2)))
+    ("/pulls/43\\'" . ,(gp-e2e-list--gh-ready-pr-2))))
 
 ;;;; gp-list buffer --------------------------------------------------------------
 
@@ -223,7 +227,7 @@ pull requests\", with each row's repo, author and source → target."
 
 (ert-deftest gp-e2e-list-groups-prs-by-authorship-github ()
   "On GitHub the list comes from an author search plus one PR fetch per
-hit; bea's draft #43 lands under review, ada's #42 under her own."
+hit; bea's #43 lands under review, ada's #42 under her own."
   (github-mock-with-service
     (gp-e2e-list--with-env
       (let ((github-mock-overrides (gp-e2e-list--gh-two-prs-overrides)))
@@ -430,7 +434,7 @@ requested, authored+closed (kept only when `merged_at' is recent)."
                         (cond ((string-match-p "review-requested:ada" q) (list (funcall hit 43)))
                               ((string-match-p "is:closed" q) (list (funcall hit 44)))
                               (t (list (funcall hit 42)))))))
-                ("/pulls/43\\'" . ,github-mock--pr-2)
+                ("/pulls/43\\'" . ,(gp-e2e-list--gh-ready-pr-2))
                 ("/pulls/44\\'" . ,merged)))
              (sources (gp-e2e-list--run-helm)))
         (should (equal (gp-e2e-list--candidate-ids

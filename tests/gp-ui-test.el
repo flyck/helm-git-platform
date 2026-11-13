@@ -66,6 +66,13 @@ section per PR."
         (should (string-match-p "Needs my review (1)\\(?:.\\|\n\\)*#901\\(?:.\\|\n\\)*My pull requests" text))
         ;; a known PR id from the fixture appears
         (should (string-match-p "#239" text)))
+      ;; someone else's draft does not need my review
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (gp--render-list (cons (append '((id . 902) (draft . t)) theirs) prs) uuid))
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "Needs my review (1)" text))
+        (should-not (string-match-p "#902" text)))
       ;; section tree: root has children, and PR sections carry their pr
       (let* ((root magit-root-section)
              (pr-secs (cl-remove-if-not

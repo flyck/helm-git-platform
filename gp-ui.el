@@ -332,10 +332,11 @@ the buffer is redrawn."
 
 (defun gp--render-list (prs uuid)
   "Render PRS into the current buffer, partitioned by UUID authorship.
+Others' drafts are left out: nobody has asked for their review yet.
 Assumes the buffer is in `gp-list-mode' and writable."
   (let* ((split (gp-partition-pull-requests prs uuid))
          (mine (car split))
-         (reviewing (cdr split)))
+         (reviewing (seq-remove #'gp-pr-draft-p (cdr split))))
     (magit-insert-section (gp-root)
       (gp--insert-group "Needs my review" reviewing)
       (gp--insert-group "My pull requests" mine))))
